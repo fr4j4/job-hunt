@@ -79,6 +79,22 @@ def cmd_run(cfg, notify: bool = True) -> None:
                      (now, total_seen, len(new_jobs)))
         conn.commit()
 
+        # IA complementaria para las NUEVAS (si IA_ENABLED) — llena modality/salary/
+        # seniority/flags al indexarse, no espera al batch nocturno
+        if new_jobs and cfg.ia.enabled and cfg.ia.api_key:
+            try:
+                from .enrich import run_ia_batch, profile_description
+                n_ia = run_ia_batch(conn, cfg, profile_description(cfg),
+                                    max_n=12, groups={j["group_id"] for j in new_jobs})
+                log.info("IA complementaria: %d/%d ofertas nuevas enriquecidas",
+                         n_ia, len(new_jobs))
+            except Exception as e:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                log.warning("IA complementaria falló (barrido continúa): %s", e)
+
         # auto-enrich de las nuevas (Anillo A, máx 8 para no frenar)
         from .enrich import enrich_pending
         try:
@@ -141,12 +157,8 @@ def cmd_ia(conn_unused=None) -> None:
     cfg = load_config()
     conn = database.connect(cfg)
     database.init_db(conn)
-    p = cfg.profile
-    profile_desc = (f"{p.title}, {p.years_exp} años exp, stack {', '.join(p.techs[:6])}, "
-                    f"inglés {p.english_level}, prefiere {'/'.join(p.modality_pref[:2])}, "
-                    f"banda {p.salary_min}-{p.salary_max} CLP")
-    from .enrich import run_ia_batch
-    done = run_ia_batch(conn, cfg, profile_desc)
+    from .enrich import run_ia_batch, profile_description
+    done = run_ia_batch(conn, cfg, profile_description(cfg))
     print(f"IA enriqueció: {done} ofertas")
 
 
@@ -177,11 +189,8 @@ def main():
     elif cmd == "ia":
         conn = database.connect(cfg)
         database.init_db(conn)
-        from .enrich import run_ia_batch
-        p = cfg.profile
-        profile_desc = (f"{p.title}, {p.years_exp} años exp, stack {', '.join(p.techs[:6])}, "
-                        f"inglés {p.english_level}")
-        done = run_ia_batch(conn, cfg, profile_desc)
+        from .enrich import run_ia_batch, profile_description
+        done = run_ia_batch(conn, cfg, profile_description(cfg))
         print(f"IA batch: {done} ofertas enriquecidas")
     elif cmd == "watch":
         from .bot import run_daemon

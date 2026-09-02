@@ -517,12 +517,8 @@ def _ia_batch_async(cfg: Config, chat_id: int | None):
     try:
         conn = database.connect(cfg)
         try:
-            p = cfg.profile
-            profile_desc = (f"{p.title}, {p.years_exp} años exp, stack {', '.join(p.techs[:6])}, "
-                            f"inglés {p.english_level}, prefiere {'/'.join(p.modality_pref[:2])}, "
-                            f"banda {p.salary_min}-{p.salary_max} CLP")
-            from .enrich import run_ia_batch
-            done = run_ia_batch(conn, cfg, profile_desc)
+            from .enrich import run_ia_batch, profile_description
+            done = run_ia_batch(conn, cfg, profile_description(cfg))
         finally:
             conn.close()
         if chat_id:

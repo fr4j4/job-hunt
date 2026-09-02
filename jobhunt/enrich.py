@@ -228,14 +228,34 @@ def enrich_pending(conn, cfg: Config, max_n: int | None = None) -> int:
     return done
 
 
-def run_ia_batch(conn, cfg: Config, profile_desc: str, max_n: int | None = None) -> int:
-    """Anillo C: IA para los que A+B no resolvieron. 1x/día."""
+def profile_description(cfg: Config) -> str:
+    """Descriptor del candidato para el prompt IA (única fuente)."""
+    p = cfg.profile
+    return (f"{p.title}, {p.years_exp} años exp, stack {', '.join(p.techs[:6])}, "
+            f"inglés {p.english_level}, prefiere {'/'.join(p.modality_pref[:2])}, "
+            f"banda {p.salary_min}-{p.salary_max} CLP")
+
+
+def run_ia_batch(conn, cfg: Config, profile_desc: str, max_n: int | None = None,
+                 groups: set[str] | None = None) -> int:
+    """Anillo C: IA para los que A+B no resolvieron. 1x/día (o grupos específicos).
+
+    groups: si se pasa, procesa SOLO esos group_id (ofertas recién indexadas),
+    sin exigir descripción larga — la IA trabaja con lo que haya.
+    """
     if not cfg.ia.enabled:
         return 0
-    rows = conn.execute(
-        "SELECT group_id, title, company, location, description, modality, salary FROM ofertas "
-        "WHERE active=1 AND length(description)>400 AND "
-        "(modality='' OR salary='' OR description IS NULL)").fetchall()
+    if groups:
+        qs = ",".join("?" for _ in groups)
+        rows = conn.execute(
+            f"SELECT group_id, title, company, location, description, modality, salary "
+            f"FROM ofertas WHERE active=1 AND group_id IN ({qs})",
+            tuple(groups)).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT group_id, title, company, location, description, modality, salary FROM ofertas "
+            "WHERE active=1 AND length(description)>400 AND "
+            "(modality='' OR salary='' OR description IS NULL)").fetchall()
     pending = [dict(r) for r in rows][:max_n or cfg.ia.batch_size]
     done = 0
     for r in pending:
