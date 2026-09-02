@@ -22,7 +22,8 @@ from datetime import datetime, timezone
 from .config import Config
 from . import db as database
 from .cli import cmd_run
-from .notify import esc, score_emoji, score_style, modality_tag, role_tag, techs_tag, age_tag
+from .notify import (esc, score_emoji, score_style, modality_tag, role_tag, techs_tag,
+                     age_tag, salary_tag, compact_label)
 
 log = logging.getLogger("jobhunt.bot")
 
@@ -36,10 +37,9 @@ def _score_row(j: dict) -> int:
 
 
 def render_page(offers: list[dict], page: int, page_size: int, cfg: Config) -> dict:
-    """Renderiza página N del pool ordenado por score.
+    """Renderiza página N: texto con títulos numerados + botones compactos (≤64 chars).
 
-    Returns {"text": str, "keyboard": [[{text,url|callback_data,style}], ...]}.
-    Botones por oferta = URL; navegación = callback_data jobs:page:N.
+    La fila N del texto = botón N. El pago va después del porcentaje.
     """
     total = len(offers)
     pages = max(1, (total + page_size - 1) // page_size)
@@ -48,38 +48,31 @@ def render_page(offers: list[dict], page: int, page_size: int, cfg: Config) -> d
 
     stamp = datetime.now(timezone.utc).strftime("%d %b %H:%M")
     lines = [
-        f"📬 <b>Ofertas</b> · <i>{total} activas</i> · {stamp}",
-        f"Página <b>{page + 1}/{pages}</b> · {len(chunk)} en esta vista",
+        f"📬 <b>Ofertas ≥{cfg.alerts.min_score}</b> · <i>{total} activas</i> · {stamp}",
+        f"Página <b>{page + 1}/{pages}</b>",
     ]
     if chunk:
         best = chunk[0]
         lines += [
             "",
             f"{score_emoji(best.get('score', 0))} <b>Mejor match:</b> {esc(best['title'][:70])}",
-            f"   <code>{best.get('score', '?')}%</code> · {modality_tag(best.get('modality'))}"
-            f" {role_tag(best['title'])} · {esc(best.get('company', '')[:25])}",
+            f"   <code>{best.get('score', '?')}%</code>{salary_tag(best)}"
+            f" · {modality_tag(best.get('modality'))} {role_tag(best['title'])}"
+            f" · {age_tag(best.get('date_posted', ''))} · {esc((best.get('company') or '')[:24])}",
         ]
         if best.get("ai_fit_reason"):
             lines.append(f"   🎯 <i>{esc(best['ai_fit_reason'][:140])}</i>")
+        lines += ["", "<b>Esta página:</b>"]
+        for i, j in enumerate(chunk, 1):
+            money = salary_tag(j)
+            title = esc((j.get("title") or "?")[:52])
+            lines.append(f"{i}. {title} ({j.get('score', '?')}%){money}")
     lines.append("")
-    lines.append(f"<i>Toca el botón para abrir · umbral {cfg.alerts.min_score}%</i>")
+    lines.append("<i>Toca el botón para abrir — fila N = botón N</i>")
     text = "\n".join(lines)[:4000]
 
-    kb: list[list[dict]] = []
-    for j in chunk:
-        pct = j.get("score", 0)
-        emp = (j.get("company") or "").strip()[:24]
-        loc = (j.get("location") or "").split(",")[0].strip()[:18]
-        label = (f"{score_emoji(pct)}{pct}% {modality_tag(j.get('modality'))}"
-                 f"{role_tag(j['title'])}{age_tag(j.get('date_posted', ''))}")
-        if techs_tag(j.get("title") or ""):
-            label += f" {techs_tag(j['title'])}"
-        if emp:
-            label += f" {emp}"
-        if loc:
-            label += f" · {loc}"
-        label = re.sub(r"\s+", " ", label).strip()[:140]
-        kb.append([{"text": label, "url": j.get("url", ""), "style": score_style(pct)}])
+    kb = [[{"text": compact_label(j), "url": j.get("url", ""), "style": score_style(j.get("score", 0))}]
+          for j in chunk]
 
     # navegación (todo botón debe tener acción: los inertes usan callback_data="noop")
     nav = []

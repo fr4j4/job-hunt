@@ -75,43 +75,118 @@ def age_tag(date_posted: str) -> str:
     return f"[{days // 30}m]"
 
 
+# ---------- helpers de salario ----------
+
+def salary_tag(j) -> str:
+    """' 💵USD4k' / ' 💵$2.1M' — parsea CLP chileno ($ 2.100.000,00) y USD plano (4000)."""
+    raw = (j.get("salary") or "").strip()
+    if not raw or raw == "-":
+        return ""
+    is_usd = "usd" in raw.lower()
+    # heurística: número plano < 10000 y sin prefijo $/CLP → sueldo mensual USD (ofertas remotas LinkedIn)
+    if not is_usd and not raw.strip().startswith(("$", "clp", "CLP")):
+        digits = re.sub(r"\D", "", raw.split(",")[0])
+        if digits and 0 < int(digits) < 10000:
+            is_usd = True
+    m = re.search(r"(\d[\d.,]*)", raw)
+    if not m:
+        return ""
+    rawnum = m.group(1)
+    # formato chileno: '.' miles + ',' decimales → quitar puntos, coma=decimal
+    if rawnum.count(".") >= 1 and "," in rawnum:
+        num = rawnum.replace(".", "").replace(",", ".")
+    else:
+        num = rawnum.replace(",", "")
+    try:
+        val = float(num)
+    except ValueError:
+        return ""
+    if is_usd:
+        return f" 💵USD{int(val)//1000}k" if val >= 1000 else f" 💵USD{int(val)}"
+    if val >= 1_000_000:
+        return f" 💵${val/1_000_000:.1f}M"
+    if val >= 1000:
+        return f" 💵${int(val)//1000}k"
+    return f" 💵${int(val)}"
+
+
+def compact_label(j, cap: int = 64) -> str:
+    """Botón compacto ≤cap chars:
+    emoji+score+[Mod][Rol][Techs][Edad]+ 💵 · empresa · ciudad
+    (el título NO va: la lista numerada del texto lo muestra)."""
+    pct = int(j.get("score") or 0)
+    # modalidad abreviada
+    m_raw = (j.get("modality") or "").lower()
+    import unicodedata as _ud
+    m_norm = "".join(c for c in _ud.normalize("NFD", m_raw) if _ud.category(c) != "Mn")
+    if "remot" in m_norm or "remote" in m_norm or "telecommute" in m_norm:
+        mod = "[R]"
+    elif "hibrid" in m_norm or "hybrid" in m_norm:
+        mod = "[H]"
+    elif "presencial" in m_norm or "on-site" in m_norm:
+        mod = "[P]"
+    else:
+        mod = "[?]"
+    rol = role_tag(j.get("title") or "")
+    # techs máx 2 abreviadas
+    found = []
+    tl = (j.get("title") or "").lower()
+    for k, abbr in [("python","Py"),("java","Jav"),("angular","Ang"),("react","Rct"),
+                    ("aws","AWS"),("node","Node"),("typescript","TS"),("sql","SQL"),
+                    ("kubernetes","K8s"),("docker","Dkr"),("golang","Go")]:
+        if k in tl:
+            found.append(abbr)
+        if len(found) == 2:
+            break
+    techs = "[" + "·".join(found) + "]" if found else ""
+    edad = age_tag(j.get("date_posted") or "")
+    sal = salary_tag(j)
+
+    emp = (j.get("company") or "").strip()
+    loc = (j.get("location") or "").split(",")[0].strip()
+    # presupuesto: fijo ≈ 6+3+6+7+4+len(sal) → libre para emp+loc
+    fixed = 6 + len(mod) + len(rol) + len(techs) + len(edad) + len(sal) + 3
+    libre = max(10, cap - fixed)
+    emp = emp[:max(6, int(libre * 0.62))]
+    loc = loc[:max(0, int(libre * 0.38))]
+    body = f"{emp}{' · ' + loc if loc else ''}"
+    label = f"{score_emoji(pct)}{pct}%{mod}{rol}{techs}{edad}{sal} {body}".strip()
+    return re.sub(r"\s+", " ", label).strip()[:cap]
+
+
 def build_digest_text(offers: list[dict], cfg) -> str:
-    """Contenido = insight; las ofertas viven SOLO en botones."""
+    """Texto = contexto: mejor match con detalle + lista numerada de la página.
+    La fila N del texto = botón N (los botones solo llevan tags, sin título)."""
     if not offers:
-        return f"🔍 <i>Sin ofertas nuevas con score ≥ {cfg.alerts.min_score}</i> en este barrido."
+        return f"🔍 <i>Sin ofertas con score ≥ {cfg.alerts.min_score}</i> en este barrido."
     best = max(offers, key=lambda o: o.get("score", 0))
-    stamp = datetime.now(timezone.utc).strftime("%d %b")
+    stamp = datetime.now(timezone.utc).strftime("%d %b %H:%M")
+    shown = offers[:cfg.alerts.max_per_digest]
     lines = [
-        f"📬 <b>{len(offers)} ofertas nuevas</b> · {stamp}",
+        f"📬 <b>Ofertas ≥{cfg.alerts.min_score}</b> · <i>{len(offers)} activas</i> · {stamp}",
         "",
         f"{score_emoji(best.get('score', 0))} <b>Mejor match:</b> {esc(best['title'][:70])}",
-        f"   <code>{best.get('score', '?')}%</code> · {modality_tag(best.get('modality'))} "
-        f"{role_tag(best['title'])} · {age_tag(best.get('date_posted', ''))} · {esc(best.get('company', '')[:25])}",
+        f"   <code>{best.get('score', '?')}%</code>{salary_tag(best)}"
+        f" · {modality_tag(best.get('modality'))} {role_tag(best['title'])}"
+        f" · {age_tag(best.get('date_posted', ''))} · {esc((best.get('company') or '')[:24])}",
     ]
-    if best.get("ai_summary"):
-        lines.append(f"   💡 <i>{esc(best['ai_summary'])}</i>")
     if best.get("ai_fit_reason"):
-        lines.append(f"   🎯 <i>{esc(best['ai_fit_reason'])}</i>")
+        lines.append(f"   🎯 <i>{esc(best['ai_fit_reason'][:140])}</i>")
+    lines += ["", "<b>Esta página:</b>"]
+    for i, j in enumerate(shown, 1):
+        money = salary_tag(j)
+        title = esc((j.get("title") or "?")[:52])
+        lines.append(f"{i}. {title} ({j.get('score', '?')}%){money}")
     lines.append("")
-    lines.append(f"<i>Umbral {cfg.alerts.min_score}% · toca un botón para abrir la oferta</i>")
+    lines.append("<i>Toca el botón para abrir la oferta — fila N = botón N</i>")
     return "\n".join(lines)[:4000]
 
 
 def build_buttons(offers: list[dict], cfg) -> list[list[dict]]:
-    rows = []
-    for j in offers[:cfg.alerts.max_per_digest]:
-        pct = j.get("score", 0)
-        emp = (j.get("company") or "").strip()[:24]
-        loc = (j.get("location") or "").split(",")[0].strip()[:20]
-        label = (f"{score_emoji(pct)}{pct}% {modality_tag(j.get('modality'))}"
-                 f"{role_tag(j['title'])}{age_tag(j.get('date_posted', ''))}")
-        if emp:
-            label += f" {emp}"
-        if loc:
-            label += f" · {loc}"
-        label = re.sub(r"\s+", " ", label).strip()[:140]
-        rows.append([{"text": label, "url": j.get("url", ""), "style": score_style(pct)}])
-    return rows
+    """1 botón por fila (ancho completo): tags compactos, sin título, cap 64 chars."""
+    return [[{"text": compact_label(j), "url": j.get("url", ""), "style": score_style(j.get("score", 0))}]
+            for j in offers[:cfg.alerts.max_per_digest]]
+
 
 
 def send_digest(cfg, offers: list[dict]) -> bool:
