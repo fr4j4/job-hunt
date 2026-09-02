@@ -99,7 +99,11 @@ def cmd_run(cfg, notify: bool = True) -> None:
         sent = False
         if notify:
             sent = send_digest(cfg, offers) if new_jobs else send_digest(cfg, [])
-        log.info("digest enviado: %d ofertas >= %d" if sent else "digest NO enviado", len(offers), threshold)
+        if sent:
+            log.info("digest enviado: %d ofertas >= %d", len(offers), threshold)
+        else:
+            log.info("digest NO enviado: %d ofertas >= %d (nuevas=%d, notify=%s)",
+                     len(offers), threshold, len(new_jobs), notify)
     except Exception:
         try:
             conn.rollback()      # no dejar transacción abierta → DB locked para otros
