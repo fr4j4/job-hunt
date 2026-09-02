@@ -268,6 +268,7 @@ def run_ia_batch(conn, cfg: Config, profile_desc: str, max_n: int | None = None)
             sets.append("ia_fields=?"); params.append(",".join(ia_fields))
             params.append(r["group_id"])
             conn.execute(f"UPDATE ofertas SET {', '.join(sets)} WHERE group_id=?", params)
+            conn.commit()   # libera el lock entre ofertas — el batch tarda minutos
             done += 1
         time.sleep(3)
     conn.commit()

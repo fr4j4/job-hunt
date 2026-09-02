@@ -242,17 +242,19 @@ def _salary_clp(cfg: Config, j: dict) -> float | None:
 def _parse_filters(tokens: list[str]) -> dict:
     """'remoto sueldo2.5 stgo' → {'modality': {...}, 'min_salary': 2.5e6, 'has_salary': False, 'loc': ['santiago']}"""
     f: dict = {"modality": set(), "min_salary": None, "has_salary": False, "loc": []}
-    _MOD = {"remoto": "remoto", "remote": "remoto", "remota": "remoto",
-            "hibrido": "híbrido", "hibrida": "híbrido", "hybrid": "híbrido",
-            "presencial": "presencial", "onsite": "presencial"}
-    _LOC = {"stgo": "santiago", "valpo": "valparaiso", "conce": "concepcion",
+    _MOD = {"remote": "remoto", "remoto": "remoto", "remota": "remoto",
+            "hybrid": "híbrido", "hibrido": "híbrido", "hibrida": "híbrido",
+            "onsite": "presencial", "presencial": "presencial"}
+    _LOC = {"stgo": "santiago", "scl": "santiago", "santiago": "santiago",
+            "valpo": "valparaiso", "valparaiso": "valparaiso",
+            "conce": "concepcion", "concepcion": "concepcion",
             "araucania": "araucania", "temuco": "temuco"}
     for t in tokens:
         tl = _norm_txt(t).replace(":", "")
         if tl in _MOD:
             f["modality"].add(_MOD[tl])
             continue
-        m_num = re.fullmatch(r"(?:sueldo|min|pago|>|>=)?([\d.,]+)\s*([mk]?)", tl)
+        m_num = re.fullmatch(r"(?:salary|sueldo|min|pay|pago|>|>=)?([\d.,]+)\s*([mk]?)", tl)
         if m_num and any(ch.isdigit() for ch in tl) and tl not in ("min",):
             numstr = m_num.group(1)
             try:
@@ -272,7 +274,7 @@ def _parse_filters(tokens: list[str]) -> dict:
                     val *= 1_000_000
                 f["min_salary"] = val
                 continue
-        if tl in ("sueldo", "pago", "salary"):
+        if tl in ("salary", "paid", "withsalary", "sueldo", "pago"):
             f["has_salary"] = True
             continue
         f["loc"].append(_LOC.get(tl, tl))
@@ -412,12 +414,14 @@ def _help_text() -> str:
         "🤖 <b>Comandos del bot</b>",
         "",
         "/search — gatilla una búsqueda ahora (reporta inicio, término y error)",
+        "/enrich — corre el batch IA ahora (modalidad, sueldo, inglés, techs…)",
         "/latest — últimas ofertas registradas",
         "/score N — ofertas con score ≥ N (ej: /score 60)",
-        "/jobs [filtros] — filtra el pool: remoto · hibrido · presencial ·",
-        "    sueldo (con sueldo publicado) · sueldo2.5 (≥$2.5M) · 2.5 (≥2.5M) ·",
-        "    500k · ubicación: stgo, temuco, valpo, conce, araucania, o texto libre",
-        "    ej: <code>/jobs remoto sueldo2.5</code> · <code>/jobs temuco</code> · <code>/jobs hibrido stgo</code>",
+        "/jobs [filtros] — filtra el pool (combinables):",
+        "    remote · hybrid · onsite · salary (con sueldo publicado) ·",
+        "    salary2.5 (≥$2.5M) · 2.5 / 500k / 2.500.000 ·",
+        "    ubicación: stgo, temuco, valpo, conce, araucania o texto libre",
+        "    ej: <code>/jobs remote salary2.5</code> · <code>/jobs temuco</code> · <code>/jobs hybrid stgo</code>",
         "/help — esta ayuda",
     ])
 
@@ -438,6 +442,8 @@ def _handle_command(cfg: Config, message: dict, state: dict) -> None:
     try:
         if cmd == "/search":
             threading.Thread(target=_run_search_async, args=(cfg, chat_id), daemon=True).start()
+        elif cmd == "/enrich":
+            threading.Thread(target=_ia_batch_async, args=(cfg, chat_id), daemon=True).start()
         elif cmd == "/latest":
             offers = _latest_offers(cfg)
             rendered = render_page(offers, 0, cfg.telegram.digest_page_size, cfg,
@@ -506,13 +512,61 @@ def _handle_command(cfg: Config, message: dict, state: dict) -> None:
             pass
 
 
+def _ia_batch_async(cfg: Config, chat_id: int | None):
+    """Batch IA nocturno con reporte opcional al chat. Nunca tumba el daemon."""
+    try:
+        conn = database.connect(cfg)
+        try:
+            p = cfg.profile
+            profile_desc = (f"{p.title}, {p.years_exp} años exp, stack {', '.join(p.techs[:6])}, "
+                            f"inglés {p.english_level}, prefiere {'/'.join(p.modality_pref[:2])}, "
+                            f"banda {p.salary_min}-{p.salary_max} CLP")
+            from .enrich import run_ia_batch
+            done = run_ia_batch(conn, cfg, profile_desc)
+        finally:
+            conn.close()
+        if chat_id:
+            _tg_api(cfg, "sendMessage", {
+                "chat_id": chat_id, "parse_mode": "HTML",
+                "text": f"🧠 <b>Batch IA terminado</b> — {done} ofertas enriquecidas"})
+        log.info("batch IA OK: %d ofertas", done)
+    except Exception as exc:
+        log.error("batch IA falló: %s", exc)
+        if chat_id:
+            try:
+                _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
+                                             "text": f"⚠️ Batch IA falló: <code>{esc(str(exc)[:200])}</code>"})
+            except Exception:
+                pass
+
+
+def _ia_hours_due(cfg: Config, last_ia: dict) -> bool:
+    """True si la hora UTC actual está en IA_RUN_HOURS_UTC y no corrió en esa hora."""
+    from datetime import datetime as _dt, timezone as _tz
+    now = _dt.now(_tz.utc)
+    key = now.strftime("%Y-%m-%d")
+    return now.hour in cfg.ia.run_hours_utc and last_ia.get("day") != key
+
+
+def _ia_sweep_maybe(cfg: Config, state: dict) -> None:
+    """Dispara el batch IA si toca la hora agendada (3:00 UTC por defecto)."""
+    if not cfg.ia.enabled or not cfg.ia.api_key:
+        return
+    if not _ia_hours_due(cfg, state.setdefault("ia_log", {})):
+        return
+    state["ia_log"]["day"] = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    log.info("batch IA agendado (%s) — disparando", cfg.ia.run_hours_utc)
+    threading.Thread(target=_ia_batch_async, args=(cfg, None), daemon=True).start()
+
+
 def _register_commands(cfg: Config) -> None:
     """Registra los comandos en Telegram (menú "/" del cliente)."""
     commands = [
         {"command": "search", "description": "Gatilla una búsqueda ahora"},
+        {"command": "enrich", "description": "Corre el batch IA ahora (rellena datos faltantes)"},
         {"command": "latest", "description": "Últimas ofertas registradas"},
         {"command": "score",  "description": "Ofertas con score ≥ N (ej: /score 60)"},
-        {"command": "jobs",   "description": "Filtra: remoto, sueldo2.5, temuco… combinables"},
+        {"command": "jobs",   "description": "Filtra: remote, salary2.5, temuco… combinables"},
         {"command": "help",   "description": "Ayuda"},
     ]
     try:
@@ -612,3 +666,6 @@ def run_daemon(cfg: Config) -> None:
         if time.time() - state["last_sweep"] >= interval_min * 60:
             state["last_sweep"] = time.time()
             threading.Thread(target=lambda: sweep(cfg, state), daemon=True).start()
+
+        # 3. batch IA nocturno (hora agendada en IA_RUN_HOURS_UTC, default 03)
+        _ia_sweep_maybe(cfg, state)
