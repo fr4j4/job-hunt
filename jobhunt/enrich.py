@@ -75,21 +75,31 @@ def extract_structured(url: str) -> dict:
         if jp.get("jobLocationType") == "TELECOMMUTE":
             info["remote_official"] = 1
             info["modality_badge"] = "remoto"
-        exp = jp.get("experienceRequirements") or {}
-        months = exp.get("monthsOfExperience")
-        if months:
-            info["years_official"] = round(months / 12)
-        edu = jp.get("educationRequirements") or {}
-        info["education"] = (exp.get("credentialCategory") if isinstance(exp, dict) and exp.get("credentialCategory") else exp.get("credentialCategory", "") if isinstance(exp, dict) else "") or ""
-        alr = jp.get("applicantLocationRequirements") or {}
+        # Schema.org permite experienceRequirements/educationRequirements como dict
+        # (EducationalOccupationalCredential) O como string plano ("3 years") — cubrir ambos
+        exp = jp.get("experienceRequirements")
+        if isinstance(exp, dict):
+            months = exp.get("monthsOfExperience")
+            if months:
+                info["years_official"] = round(months / 12)
+        else:
+            m_exp = re.search(r"(\d+)\s*year", str(exp or ""), re.I)
+            if m_exp:
+                info["years_official"] = int(m_exp.group(1))
+        edu = jp.get("educationRequirements")
+        info["education"] = (edu.get("credentialCategory")
+                             if isinstance(edu, dict) and edu.get("credentialCategory")
+                             else str(edu)[:60] if edu and not isinstance(edu, dict) else "")
+        alr = jp.get("applicantLocationRequirements")
         if isinstance(alr, dict):
             info["applicant_region"] = alr.get("name", "")
         if jp.get("baseSalary"):
             sal = jp["baseSalary"]
-            val = (sal.get("value") or {})
+            val = sal.get("value") if isinstance(sal, dict) else None
+            val = val if isinstance(val, dict) else {}
             if val.get("value"):
                 unit = {"MONTH": "/mes", "YEAR": "/año"}.get(val.get("unitText", ""), "")
-                info["salary"] = f"{sal.get('currencyCode','')} {val.get('value','')}{unit}".strip()[:40]
+                info["salary"] = f"{sal.get('currencyCode','') if isinstance(sal, dict) else ''} {val.get('value','')}{unit}".strip()[:40]
         desc_html = jp.get("description") or ""
         if desc_html:
             info["description"] = re.sub(r"\s+", " ", _u(re.sub(r"<[^>]+>", " ", desc_html))).strip()[:1800]
@@ -185,7 +195,11 @@ def enrich_pending(conn, cfg: Config, max_n: int | None = None) -> int:
     for r in pending:
         if not r.get("url"):
             continue
-        info = extract_structured(r["url"])
+        try:
+            info = extract_structured(r["url"])
+        except Exception as e:
+            log.warning("enrich falló para %s (%s): %s", r["group_id"], (r.get("title") or "")[:40], e)
+            continue
         new_desc = (info.get("description") or "")[:1800]
         extra = (f" · {info['contrato']}" if info.get("contrato") else "") + \
                 (f" · {info['jornada']}" if info.get("jornada") else "")

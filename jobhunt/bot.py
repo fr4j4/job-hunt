@@ -362,10 +362,13 @@ def _do_sweep(cfg: Config) -> tuple[list[dict], dict]:
 
 
 def sweep(cfg: Config, state: dict):
-    """Barrido + refresh del pool + ancla (cron interno del daemon)."""
-    offers, _stats = _do_sweep(cfg)
-    state["offers"] = offers
-    _refresh_anchor(cfg, state)
+    """Barrido + refresh del pool + ancla (cron interno del daemon). Nunca mata el thread."""
+    try:
+        offers, _stats = _do_sweep(cfg)
+        state["offers"] = offers
+        _refresh_anchor(cfg, state)
+    except Exception as exc:
+        log.error("sweep del cron falló: %s", exc)
 
 
 def _refresh_anchor(cfg: Config, state: dict):

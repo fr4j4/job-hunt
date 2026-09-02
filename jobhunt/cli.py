@@ -28,73 +28,86 @@ def _now() -> str:
 
 def cmd_run(cfg, notify: bool = True) -> None:
     conn = database.connect(cfg)
-    database.init_db(conn)
-    version_id = "env-" + datetime.now(timezone.utc).strftime("%Y%m%d")
-    database.register_criteria_version(conn, version_id, cfg)
+    try:
+        database.init_db(conn)
+        version_id = "env-" + datetime.now(timezone.utc).strftime("%Y%m%d")
+        database.register_criteria_version(conn, version_id, cfg)
 
-    from .sources import linkedin, computrabajo, indeed, glassdoor
-    s = cfg.search
-    jobs = []
-    if cfg.sources.get("linkedin"):
-        jobs += linkedin.fetch_jobs(s.queries_linkedin, "perfil:")
-    if cfg.sources.get("computrabajo"):
-        jobs += computrabajo.jobs(s.queries_computrabajo, "perfil:")
-    if cfg.search.mode in ("both", "sample"):
-        # muestreo amplio: rotación para diversificar sin inflar requests
-        n = max(1, int(len(s.sample_linkedin) * s.sample_rotation))
-        jobs += linkedin.fetch_jobs(s.sample_linkedin[:n], "sample:")
-        jobs += computrabajo.jobs(s.sample_computrabajo[:n], "sample:")
-        if cfg.sources.get("indeed"):
-            jobs += indeed.jobs(s.sample_indeed[:n], "muestra:")
+        from .sources import linkedin, computrabajo, indeed, glassdoor
+        s = cfg.search
+        jobs = []
+        if cfg.sources.get("linkedin"):
+            jobs += linkedin.fetch_jobs(s.queries_linkedin, "perfil:")
+        if cfg.sources.get("computrabajo"):
+            jobs += computrabajo.jobs(s.queries_computrabajo, "perfil:")
+        if cfg.search.mode in ("both", "sample"):
+            # muestreo amplio: rotación para diversificar sin inflar requests
+            n = max(1, int(len(s.sample_linkedin) * s.sample_rotation))
+            jobs += linkedin.fetch_jobs(s.sample_linkedin[:n], "sample:")
+            jobs += computrabajo.jobs(s.sample_computrabajo[:n], "sample:")
+            if cfg.sources.get("indeed"):
+                jobs += indeed.jobs(s.sample_indeed[:n], "muestra:")
+            if cfg.sources.get("glassdoor") and _is_premium_tick(cfg):
+                jobs += glassdoor.jobs(s.sample_glassdoor[:2], "muestra:")
+        if cfg.sources.get("indeed") and _is_premium_tick(cfg):
+            jobs += indeed.jobs(s.queries_indeed, "perfil:")
         if cfg.sources.get("glassdoor") and _is_premium_tick(cfg):
-            jobs += glassdoor.jobs(s.sample_glassdoor[:2], "muestra:")
-    if cfg.sources.get("indeed") and _is_premium_tick(cfg):
-        jobs += indeed.jobs(s.queries_indeed, "perfil:")
-    if cfg.sources.get("glassdoor") and _is_premium_tick(cfg):
-        jobs += glassdoor.jobs(s.queries_glassdoor, "perfil:")
+            jobs += glassdoor.jobs(s.queries_glassdoor, "perfil:")
 
-    log.info("barrido iniciado: %d ofertas crudas (mode=%s)", len(jobs), s.mode)
+        log.info("barrido iniciado: %d ofertas crudas (mode=%s)", len(jobs), s.mode)
 
-    # dedup + index + score al indexar
-    seen_urls, new_jobs, total_seen = set(), [], 0
-    now = _now()
-    for j in jobs:
-        from .db import url_key
-        uk = url_key(j.get("url"))
-        if uk and uk in seen_urls:
-            continue
-        if uk:
-            seen_urls.add(uk)
-        j["uid"] = ""
-        gid, is_new = database.upsert(conn, j, now)
-        j["uid"] = gid
-        score, _ = compute_score(j, cfg)
-        conn.execute("UPDATE ofertas SET score=?, score_version=? WHERE group_id=?",
-                     (score, version_id, gid))
-        total_seen += 1
-        if is_new:
-            new_jobs.append({**j, "score": score, "group_id": gid})
-    conn.execute("""INSERT INTO scan_log (ts, total_seen, new_count) VALUES (?,?,?)""",
-                 (now, total_seen, len(new_jobs)))
-    conn.commit()
+        # dedup + index + score al indexar
+        seen_urls, new_jobs, total_seen = set(), [], 0
+        now = _now()
+        for j in jobs:
+            from .db import url_key
+            uk = url_key(j.get("url"))
+            if uk and uk in seen_urls:
+                continue
+            if uk:
+                seen_urls.add(uk)
+            j["uid"] = ""
+            gid, is_new = database.upsert(conn, j, now)
+            j["uid"] = gid
+            score, _ = compute_score(j, cfg)
+            conn.execute("UPDATE ofertas SET score=?, score_version=? WHERE group_id=?",
+                         (score, version_id, gid))
+            total_seen += 1
+            if is_new:
+                new_jobs.append({**j, "score": score, "group_id": gid})
+        conn.execute("""INSERT INTO scan_log (ts, total_seen, new_count) VALUES (?,?,?)""",
+                     (now, total_seen, len(new_jobs)))
+        conn.commit()
 
-    # auto-enrich de las nuevas (Anillo A, máx 8 para no frenar)
-    from .enrich import enrich_pending
-    enrich_pending(conn, cfg, max_n=8)
+        # auto-enrich de las nuevas (Anillo A, máx 8 para no frenar)
+        from .enrich import enrich_pending
+        try:
+            enrich_pending(conn, cfg, max_n=8)
+        except Exception as e:
+            conn.rollback()
+            log.warning("enrich falló (barrido continúa): %s", e)
 
-    # re-score de las que cambiaron (descripción nueva)
-    database.rescore_all(conn, compute_score, version_id, cfg)
+        # re-score de las que cambiaron (descripción nueva)
+        database.rescore_all(conn, compute_score, version_id, cfg)
 
-    # digest: solo >= ALERT_MIN_SCORE
-    threshold = cfg.alerts.min_score
-    alerts = conn.execute(
-        "SELECT * FROM ofertas WHERE active=1 AND score >= ? "
-        "ORDER BY score DESC LIMIT ?", (threshold, cfg.alerts.max_per_digest)).fetchall()
-    offers = [dict(r) for r in alerts]
-    sent = False
-    if notify:
-        sent = send_digest(cfg, offers) if new_jobs else send_digest(cfg, [])
-    log.info("digest enviado: %d ofertas >= %d" if sent else "digest NO enviado", len(offers), threshold)
+        # digest: solo >= ALERT_MIN_SCORE
+        threshold = cfg.alerts.min_score
+        alerts = conn.execute(
+            "SELECT * FROM ofertas WHERE active=1 AND score >= ? "
+            "ORDER BY score DESC LIMIT ?", (threshold, cfg.alerts.max_per_digest)).fetchall()
+        offers = [dict(r) for r in alerts]
+        sent = False
+        if notify:
+            sent = send_digest(cfg, offers) if new_jobs else send_digest(cfg, [])
+        log.info("digest enviado: %d ofertas >= %d" if sent else "digest NO enviado", len(offers), threshold)
+    except Exception:
+        try:
+            conn.rollback()      # no dejar transacción abierta → DB locked para otros
+        except Exception:
+            pass
+        raise
+    finally:
+        conn.close()
 
 
 def _is_premium_tick(cfg) -> bool:
