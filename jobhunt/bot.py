@@ -24,7 +24,7 @@ from .config import Config
 from . import db as database
 from .cli import cmd_run
 from .notify import (esc, score_emoji, score_style, modality_tag, role_tag, techs_tag,
-                     age_tag, salary_tag, compact_label, abbr_loc)
+                     age_tag, salary_tag, compact_label, abbr_loc, table_block)
 
 log = logging.getLogger("jobhunt.bot")
 
@@ -68,17 +68,20 @@ def render_page(offers: list[dict], page: int, page_size: int, cfg: Config,
         ]
         if best.get("ai_fit_reason"):
             lines.append(f"   🎯 <i>{esc(best['ai_fit_reason'][:140])}</i>")
-        lines += ["", "<b>Esta página:</b>"]
-        for i, j in enumerate(chunk, 1):
-            money = salary_tag(j)
-            title = esc((j.get("title") or "?")[:52])
-            lines.append(f"{i}. {title} ({j.get('score', '?')}%){money}")
+        lines += ["", "<b>Esta página</b> (toca el número para abrir):", table_block(chunk)]
     lines.append("")
-    lines.append("<i>Toca el botón para abrir — fila N = botón N</i>")
+    lines.append("<i>🧠 = procesada por IA · los números abren la oferta</i>")
     text = "\n".join(lines)[:4000]
 
-    kb = [[{"text": compact_label(j), "url": j.get("url", ""), "style": score_style(j.get("score", 0))}]
-          for j in chunk]
+    # grilla numerada (5 por fila): simétrica, nada descentrado
+    kb, row = [], []
+    for i, j in enumerate(chunk, 1):
+        row.append({"text": str(i), "url": j.get("url", "")})
+        if len(row) == 5:
+            kb.append(row)
+            row = []
+    if row:
+        kb.append(row)
 
     # navegación (todo botón debe tener acción: los inertes usan callback_data="noop")
     nav = []

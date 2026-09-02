@@ -182,9 +182,34 @@ def compact_label(j, cap: int = 64) -> str:
     return re.sub(r"\s+", " ", label).strip()[:cap]
 
 
+def table_block(offers: list[dict]) -> str:
+    """Lista de ofertas en bloque <code> — monoespaciado, columnas REALMENTE alineadas.
+
+    (En los botones Telegram centra el texto y no hay alineación nativa; en el
+    cuerpo del mensaje sí podemos alinear con fuente monoespaciada.)
+    """
+    def pad(s: str, n: int, right: bool = False) -> str:
+        return (s[:n].rjust(n) if right else s[:n].ljust(n))
+
+    lines = []
+    for i, j in enumerate(offers, 1):
+        title = esc((j.get("title") or "?").strip())
+        pct = f"{int(j.get('score') or 0)}%"
+        sal = salary_tag(j).replace("💵", "").strip() or "—"
+        m_raw = (j.get("modality") or "").lower()
+        mod = {"remoto": "R", "híbrido": "H", "presencial": "P"}.get(m_raw, "?")
+        age = age_tag(j.get("date_posted") or "").lstrip("📅")
+        if age == "ahora":
+            age = "0h"
+        ia = "*" if j.get("ia_model") else " "
+        # 35 chars visuales — cabe en móvil sin soft-wrap
+        lines.append(f"{i:>2} {pad(title, 16)} {pad(pct, 3, True)} {pad(sal, 5, True)} {mod} {pad(age, 3, True)}{ia}")
+    return "<code>" + "\n".join(lines) + "</code>"
+
+
 def build_digest_text(offers: list[dict], cfg) -> str:
-    """Texto = contexto: mejor match con detalle + lista numerada de la página.
-    La fila N del texto = botón N (los botones solo llevan tags, sin título)."""
+    """Texto = contexto: mejor match con detalle + tabla alineada de la página.
+    El botón N abre la oferta N (grilla de números bajo el mensaje)."""
     if not offers:
         return f"🔍 <i>Sin ofertas con score ≥ {cfg.alerts.min_score}</i> en este barrido."
     best = max(offers, key=lambda o: o.get("score", 0))
@@ -201,13 +226,9 @@ def build_digest_text(offers: list[dict], cfg) -> str:
     ]
     if best.get("ai_fit_reason"):
         lines.append(f"   🎯 <i>{esc(best['ai_fit_reason'][:140])}</i>")
-    lines += ["", "<b>Esta página:</b>"]
-    for i, j in enumerate(shown, 1):
-        money = salary_tag(j)
-        title = esc((j.get("title") or "?")[:52])
-        lines.append(f"{i}. {title} ({j.get('score', '?')}%){money}")
+    lines += ["", "<b>Esta página</b> (toca el número para abrir):", table_block(shown)]
     lines.append("")
-    lines.append("<i>Toca el botón para abrir la oferta — fila N = botón N</i>")
+    lines.append("<i>🧠 = procesada por IA · los números abren la oferta</i>")
     return "\n".join(lines)[:4000]
 
 
@@ -241,9 +262,21 @@ def align_kb(rows: list[list[dict]], max_w: int = 64) -> list[list[dict]]:
 
 
 def build_buttons(offers: list[dict], cfg) -> list[list[dict]]:
-    """1 botón por fila (ancho completo): tags compactos, sin título, cap 64 chars."""
-    return align_kb([[{"text": compact_label(j), "url": j.get("url", ""), "style": score_style(j.get("score", 0))}]
-                     for j in offers[:cfg.alerts.max_per_digest]])
+    """Grilla numerada (5 por fila): el número abre la oferta.
+
+    Los botones full-width con texto largo se ven descentrados (Telegram centra
+    y no hay alineación nativa); la grilla de números es simétrica y el cuerpo
+    del mensaje lleva la tabla alineada (table_block).
+    """
+    kb, row = [], []
+    for i, j in enumerate(offers[:cfg.alerts.max_per_digest], 1):
+        row.append({"text": str(i), "url": j.get("url", "")})
+        if len(row) == 5:
+            kb.append(row)
+            row = []
+    if row:
+        kb.append(row)
+    return kb
 
 
 
