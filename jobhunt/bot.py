@@ -15,6 +15,7 @@ import logging
 import re
 import threading
 import time
+import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 
@@ -24,6 +25,8 @@ from .cli import cmd_run
 from .notify import esc, score_emoji, score_style, modality_tag, role_tag, techs_tag, age_tag
 
 log = logging.getLogger("jobhunt.bot")
+
+_sweep_lock = threading.Lock()
 
 
 # ---------------------------------------------------------------- página render
@@ -78,19 +81,15 @@ def render_page(offers: list[dict], page: int, page_size: int, cfg: Config) -> d
         label = re.sub(r"\s+", " ", label).strip()[:140]
         kb.append([{"text": label, "url": j.get("url", ""), "style": score_style(pct)}])
 
-    # navegación
+    # navegación (todo botón debe tener acción: los inertes usan callback_data="noop")
     nav = []
     if page > 0:
         nav.append({"text": "«1", "callback_data": "jobs:page:0"})
         nav.append({"text": f"‹{page}", "callback_data": f"jobs:page:{page - 1}"})
-    else:
-        nav.append({"text": "·"})
-    nav.append({"text": f"· {page + 1}/{pages} ·"})
+    nav.append({"text": f"· {page + 1}/{pages} ·", "callback_data": "noop"})
     if page < pages - 1:
         nav.append({"text": f"{page + 2}›", "callback_data": f"jobs:page:{page + 1}"})
         nav.append({"text": f"{pages}»", "callback_data": f"jobs:page:{pages - 1}"})
-    else:
-        nav.append({"text": "·"})
     kb.append(nav)
     return {"text": text, "keyboard": kb}
 
@@ -107,8 +106,7 @@ def _chat_allowed(cfg: Config, chat_id) -> bool:
         return False
 
 
-def _tg_api(cfg: Config, method: str, payload: dict) -> dict:
-    # restricción dura: solo enviar a chats del allowlist
+def _tg_api(cfg: Config, method: str, payload: dict, retries: int = 2) -> dict:
     cid = payload.get("chat_id")
     if cid is not None and not _chat_allowed(cfg, cid):
         raise PermissionError(f"chat {cid} no está en TELEGRAM_ALLOWED_CHATS")
@@ -117,8 +115,18 @@ def _tg_api(cfg: Config, method: str, payload: dict) -> dict:
         data=json.dumps(payload).encode(),
         headers={"Content-Type": "application/json"},
     )
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        return json.loads(resp.read().decode())
+    last_exc: Exception | None = None
+    for attempt in range(retries + 1):
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                return json.loads(resp.read().decode())
+        except urllib.error.HTTPError as exc:
+            # 403/429 transitorios (membership lag / rate limit) → backoff corto y retry
+            if exc.code in (403, 429) and attempt < retries:
+                time.sleep(1.5 * (attempt + 1))
+                continue
+            raise
+    raise last_exc or RuntimeError("unreachable")
 
 
 def send_anchor(cfg: Config, offers: list[dict]) -> int | None:
@@ -180,15 +188,16 @@ def handle_callback(cfg: Config, query: dict, offers: list[dict]) -> None:
 # ---------------------------------------------------------------- daemon loop
 
 def sweep(cfg: Config, state: dict):
-    """Barrido completo + actualización del ancla."""
-    cmd_run(cfg)
-    conn = database.connect(cfg)
-    try:
-        state["offers"] = [dict(r) for r in conn.execute(
-            "SELECT * FROM ofertas WHERE active=1 AND score >= ? ORDER BY score DESC",
-            (cfg.alerts.min_score,)).fetchall()]
-    finally:
-        conn.close()
+    """Barrido completo (sin digest push) + refresh del pool + ancla."""
+    with _sweep_lock:
+        cmd_run(cfg, notify=False)          # barrido SIN mensaje push
+        conn = database.connect(cfg)
+        try:
+            state["offers"] = [dict(r) for r in conn.execute(
+                "SELECT * FROM ofertas WHERE active=1 AND score >= ? ORDER BY score DESC",
+                (cfg.alerts.min_score,)).fetchall()]
+        finally:
+            conn.close()
     _refresh_anchor(cfg, state)
 
 

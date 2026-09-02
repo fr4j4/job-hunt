@@ -26,7 +26,7 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-def cmd_run(cfg) -> None:
+def cmd_run(cfg, notify: bool = True) -> None:
     conn = database.connect(cfg)
     database.init_db(conn)
     version_id = "env-" + datetime.now(timezone.utc).strftime("%Y%m%d")
@@ -91,9 +91,9 @@ def cmd_run(cfg) -> None:
         "SELECT * FROM ofertas WHERE active=1 AND score >= ? "
         "ORDER BY score DESC LIMIT ?", (threshold, cfg.alerts.max_per_digest)).fetchall()
     offers = [dict(r) for r in alerts]
-    sent = send_digest(cfg, offers) if new_jobs else False
-    if not new_jobs:
-        sent = send_digest(cfg, [])
+    sent = False
+    if notify:
+        sent = send_digest(cfg, offers) if new_jobs else send_digest(cfg, [])
     log.info("digest enviado: %d ofertas >= %d" if sent else "digest NO enviado", len(offers), threshold)
 
 
