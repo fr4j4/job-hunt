@@ -398,10 +398,11 @@ def run_daemon(cfg: Config) -> None:
     interval_min = cfg.daemon.interval_min
     log.info("daemon iniciado · barrido cada %d min · callbacks + comandos activos", interval_min)
 
-    state: dict = {"offers": [], "anchor_id": None, "last_sweep": 0.0}
+    state: dict = {"offers": [], "anchor_id": None, "last_sweep": time.time()}
     _register_commands(cfg)
 
-    # primer barrido inmediato en background
+    # primer barrido inmediato en background (el cron interno no lo duplica:
+    # last_sweep parte en now, no en 0.0)
     threading.Thread(target=lambda: sweep(cfg, state), daemon=True).start()
 
     offset = 0
