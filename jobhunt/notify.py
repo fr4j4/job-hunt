@@ -168,6 +168,7 @@ def compact_label(j, cap: int = 64) -> str:
     techs = "[" + "·".join(found) + "]" if found else ""
     edad = age_tag(j.get("date_posted") or "")
     sal = salary_tag(j)
+    ia = "🧠" if j.get("ia_model") else ""      # marcador: procesada por IA
 
     emp = (j.get("company") or "").strip()
     loc = abbr_loc((j.get("location") or "").split(",")[0])
@@ -177,7 +178,7 @@ def compact_label(j, cap: int = 64) -> str:
     emp = emp[:max(6, int(libre * 0.62))]
     loc = loc[:max(0, int(libre * 0.38))]
     body = " · ".join(p for p in (emp, loc) if p)
-    label = f"{score_emoji(pct)}{pct}%{sal}{mod}{rol}{techs}{edad} {body}".strip()
+    label = f"{score_emoji(pct)}{pct}%{sal}{mod}{rol}{techs}{edad}{ia} {body}".strip()
     return re.sub(r"\s+", " ", label).strip()[:cap]
 
 

@@ -416,6 +416,7 @@ def _help_text() -> str:
         "/search — gatilla una búsqueda ahora (reporta inicio, término y error)",
         "/enrich — corre el batch IA ahora (modalidad, sueldo, inglés, techs…)",
         "/latest — últimas ofertas registradas",
+        "/stats — cobertura del pool (procesadas IA, datos faltantes)",
         "/score N — ofertas con score ≥ N (ej: /score 60)",
         "/jobs [filtros] — filtra el pool (combinables):",
         "    remote · hybrid · onsite · salary (con sueldo publicado) ·",
@@ -424,6 +425,34 @@ def _help_text() -> str:
         "    ej: <code>/jobs remote salary2.5</code> · <code>/jobs temuco</code> · <code>/jobs hybrid stgo</code>",
         "/help — esta ayuda",
     ])
+
+
+def _stats_text(cfg: Config) -> str:
+    """Cobertura del pool: procesadas IA, pendientes, qué datos faltan."""
+    conn = database.connect(cfg)
+    try:
+        q = lambda s: conn.execute(s).fetchone()[0]
+        total = q("SELECT COUNT(*) FROM ofertas WHERE active=1")
+        ia = q("SELECT COUNT(*) FROM ofertas WHERE active=1 AND ia_model != ''")
+        con_mod = q("SELECT COUNT(*) FROM ofertas WHERE active=1 AND modality != ''")
+        con_sal = q("SELECT COUNT(*) FROM ofertas WHERE active=1 AND salary != ''")
+        en_cola = q("SELECT COUNT(*) FROM ofertas WHERE active=1 AND ia_model='' "
+                    "AND (modality='' OR salary='' OR ai_fit_reason='')")
+        model = conn.execute("SELECT ia_model FROM ofertas WHERE ia_model != '' "
+                             "ORDER BY last_seen DESC LIMIT 1").fetchone()
+        lines = [
+            "📊 <b>Estado del pool</b>",
+            "",
+            f"Activas: <code>{total}</code>",
+            f"🧠 Procesadas por IA: <code>{ia}</code> ({ia * 100 // max(total, 1)}%)",
+            f"   Modelo: <code>{model[0] if model else '—'}</code>",
+            f"   En cola IA: <code>{en_cola}</code> (batch nocturno 03:00 UTC o /enrich)",
+            "",
+            f"Con modalidad: <code>{con_mod}</code> · Con sueldo: <code>{con_sal}</code>",
+        ]
+        return "\n".join(lines)
+    finally:
+        conn.close()
 
 
 def _handle_command(cfg: Config, message: dict, state: dict) -> None:
@@ -444,6 +473,9 @@ def _handle_command(cfg: Config, message: dict, state: dict) -> None:
             threading.Thread(target=_run_search_async, args=(cfg, chat_id), daemon=True).start()
         elif cmd == "/enrich":
             threading.Thread(target=_ia_batch_async, args=(cfg, chat_id), daemon=True).start()
+        elif cmd == "/stats":
+            _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
+                                         "text": _stats_text(cfg)})
         elif cmd == "/latest":
             offers = _latest_offers(cfg)
             rendered = render_page(offers, 0, cfg.telegram.digest_page_size, cfg,
@@ -561,6 +593,7 @@ def _register_commands(cfg: Config) -> None:
         {"command": "search", "description": "Gatilla una búsqueda ahora"},
         {"command": "enrich", "description": "Corre el batch IA ahora (rellena datos faltantes)"},
         {"command": "latest", "description": "Últimas ofertas registradas"},
+        {"command": "stats",  "description": "Cobertura IA y datos del pool"},
         {"command": "score",  "description": "Ofertas con score ≥ N (ej: /score 60)"},
         {"command": "jobs",   "description": "Filtra: remote, salary2.5, temuco… combinables"},
         {"command": "help",   "description": "Ayuda"},
