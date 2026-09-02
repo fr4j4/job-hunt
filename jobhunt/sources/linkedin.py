@@ -3,6 +3,10 @@ import re, time, urllib.request, urllib.parse
 
 UA = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120 Safari/537.36"}
 
+from ..logging_setup import get_logger
+
+log = get_logger(__name__)
+
 def fetch(url, retries=2):
     for i in range(retries):
         try:
@@ -11,7 +15,7 @@ def fetch(url, retries=2):
                 return r.read().decode("utf-8", "replace")
         except Exception as e:
             if i == retries - 1:
-                print(f"WARN fetch {url}: {e}", file=__import__("sys").stderr)
+                log.warning("fetch falló %s: %s", url, e)
                 return ""
             time.sleep(3)
     return ""

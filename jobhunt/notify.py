@@ -7,6 +7,9 @@ import urllib.request
 from datetime import datetime, timezone
 
 from .config import Config
+from .logging_setup import get_logger
+
+log = get_logger(__name__)
 
 
 
@@ -145,5 +148,5 @@ def send_digest(cfg, offers: list[dict]) -> bool:
         with urllib.request.urlopen(req, timeout=20) as r:
             return json.loads(r.read()).get("ok", False)
     except Exception as e:
-        print(f"WARN telegram send: {e}", file=__import__("sys").stderr)
+        log.warning("telegram send falló: %s", e)
         return False

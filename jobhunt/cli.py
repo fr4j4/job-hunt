@@ -13,6 +13,9 @@ import sys
 from datetime import datetime, timezone
 
 from .config import load_config
+from .logging_setup import get_logger
+
+log = get_logger(__name__)
 from . import db as database
 from .scoring import compute_score
 from .dedup import find_duplicate
@@ -50,7 +53,7 @@ def cmd_run(cfg) -> None:
     if cfg.sources.get("glassdoor") and _is_premium_tick(cfg):
         jobs += glassdoor.jobs(s.queries_glassdoor, "perfil:")
 
-    print(f"barrido: {len(jobs)} ofertas crudas (mode={s.search.mode})")
+    log.info("barrido iniciado: %d ofertas crudas (mode=%s)", len(jobs), s.mode)
 
     # dedup + index + score al indexar
     seen_urls, new_jobs, total_seen = set(), [], 0
@@ -91,8 +94,7 @@ def cmd_run(cfg) -> None:
     sent = send_digest(cfg, offers) if new_jobs else False
     if not new_jobs:
         sent = send_digest(cfg, [])
-    print(("DIGEST ENVIADO: " + str(len(offers)) + " ofertas ≥" + str(threshold)) if sent
-          else "digest no enviado (telegram deshabilitado o error)")
+    log.info("digest enviado: %d ofertas >= %d" if sent else "digest NO enviado", len(offers), threshold)
 
 
 def _is_premium_tick(cfg) -> bool:

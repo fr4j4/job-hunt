@@ -15,6 +15,9 @@ from html import unescape as _u
 import requests
 
 from .config import Config
+from .logging_setup import get_logger
+
+log = get_logger(__name__)
 
 
 # ============ Anillo A: JSON-LD ============
@@ -164,7 +167,7 @@ def ia_extract(cfg: Config, job: dict, profile_desc: str) -> dict | None:
             return json.loads(content)
         except Exception as e:
             if attempt == cfg.ia.retries:
-                print(f"WARN IA: {e}", file=__import__("sys").stderr)
+                log.warning("IA batch falló: %s", e)
                 return None
             time.sleep(2)
     return None

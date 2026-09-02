@@ -227,8 +227,11 @@ def load_config(env_file: Path | None = None) -> Config:
         "glassdoor": _env_bool("ENABLE_GLASSDOOR", True),
     }
     premium_hours = [int(h) for h in _env_list("PREMIUM_TICK_HOURS_UTC", "00,12")]
-    ia_key_ref = _env("IA_API_KEY", "OLLAMA_API_KEY")
-    ia_key = _env(ia_key_ref) or os.environ.get(ia_key_ref, "")
+    ia_key = _env("IA_API_KEY")
+    # IA_API_KEY puede ser la key directa O el nombre de otra variable de entorno
+    if not ia_key or ia_key.startswith("your_"):
+        ref = os.environ.get("IA_API_KEY_NAME", "OLLAMA_API_KEY")
+        ia_key = os.environ.get(ref, "")
     ia = IaConfig(
         enabled=_env_bool("IA_ENABLED", True),
         model=_env("IA_MODEL", "deepseek-v4-flash"),

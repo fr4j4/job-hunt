@@ -47,7 +47,7 @@ def init_db(conn: sqlite3.Connection) -> None:
         score_version TEXT DEFAULT '',
         staffing    INTEGER DEFAULT 0,
         seniority_real TEXT DEFAULT '',
-        ai_summary  TEXT DEFAULT '',
+        ai_resumen TEXT DEFAULT '',
         ai_red_flags TEXT DEFAULT '',
         ai_green_flags TEXT DEFAULT '',
         ai_benefits TEXT DEFAULT '',

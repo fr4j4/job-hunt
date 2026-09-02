@@ -1,7 +1,7 @@
 """Glassdoor Chile: tls_client + CSRF + GraphQL — self-contained, sin jobspy.
 
-Constantes (query_template, headers) viven en sources/constants/ extraídas del
-fork de jobspy (SCAPING_CHILE.md §4). Requiere `tls-client` en requirements.
+Constantes en sources/constants/ extraídas del fork de jobspy (SCRAPING_CHILE.md §4).
+Requiere tls-client en requirements.
 """
 from __future__ import annotations
 
@@ -13,7 +13,9 @@ from pathlib import Path
 
 import tls_client
 
-from .linkedin import fetch  # reusar el fetch genérico
+from ..logging_setup import get_logger
+
+log = get_logger(__name__)
 
 CONST_DIR = Path(__file__).parent / "constants"
 _HEADERS = json.loads((CONST_DIR / "glassdoor_headers.json").read_text())
@@ -22,7 +24,8 @@ _QUERY_TEMPLATE = (CONST_DIR / "glassdoor_query.graphql").read_text()
 _LOCATION_ID_CHILE = 49  # COUNTRY (ver SCRAPING_CHILE.md §4.3)
 
 
-def _session() -> "tls_client.Session":
+def _session():
+    """Nueva sesión con cookies CF + token CSRF. (session, token)"""
     s = tls_client.Session(client_identifier="chrome_131", random_tls_extension_order=True)
     s.headers.update(_HEADERS)
     # warm-up cookies (obligatorio: gdsid, gdId, asst, __cf_bm)
@@ -40,7 +43,7 @@ def jobs(queries: list[str], found_by_prefix: str = "") -> list[dict]:
     try:
         s, token = _session()
     except Exception as e:
-        print(f"WARN glassdoor session: {e}", file=__import__("sys").stderr)
+        log.warning("glassdoor sesión falló: %s", e)
         return out
 
     for q in queries:
@@ -69,7 +72,7 @@ def jobs(queries: list[str], found_by_prefix: str = "") -> list[dict]:
                 hdr = jv.get("header") or {}
                 job = jv.get("job") or {}
                 age = hdr.get("ageInDays")
-                date = (datetime.now(timezone.utc) - __import__("datetime").timedelta(days=int(age))).date().isoformat() if age is not None else ""
+                date = (datetime.now(timezone.utc) - timedelta(days=int(age))).date().isoformat() if age is not None else ""
                 lid = job.get("listingId")
                 if not lid:
                     continue
@@ -83,11 +86,6 @@ def jobs(queries: list[str], found_by_prefix: str = "") -> list[dict]:
                     "found_by": f"{found_by_prefix}{q}",
                 })
         except Exception as e:
-            print(f"WARN glassdoor '{q}': {e}", file=__import__("sys").stderr)
-        import time
+            log.warning("glassdoor query '%s' falló: %s", q, e)
         time.sleep(4)
     return out
-
-
-def _QUERY() -> str:
-    return (CONST_DIR / "glassdoor_query.graphql").read_text()

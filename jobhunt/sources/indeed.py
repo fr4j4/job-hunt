@@ -20,6 +20,11 @@ _QUERY = """query GetJobData {
   }
 }"""
 
+import sys  # noqa: F401
+from ..logging_setup import get_logger
+
+log = get_logger(__name__)
+
 def _iso(v):
     from datetime import datetime, timezone
     if v is None: return ""
@@ -38,7 +43,7 @@ def jobs(queries, found_by_prefix=""):
             with urllib.request.urlopen(req, timeout=25, context=_CTX) as r:
                 d = json.loads(r.read())
         except Exception as e:
-            print(f"WARN indeed '{q}': {e}", file=__import__("sys").stderr); continue
+            log.warning("indeed query '%s' falló: %s", q, e); continue
         for r2 in (d.get("data", {}).get("jobSearch", {}) or {}).get("results", []):
             j = r2.get("job") or {}
             if not j.get("title"): continue
