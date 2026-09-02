@@ -112,8 +112,8 @@ def salary_tag(j) -> str:
 
 def compact_label(j, cap: int = 64) -> str:
     """Botón compacto ≤cap chars:
-    emoji+score+[Mod][Rol][Techs][Edad]+ 💵 · empresa · ciudad
-    (el título NO va: la lista numerada del texto lo muestra)."""
+    emoji+score+ 💵+[Mod][Rol][Techs][Edad]+ empresa · ciudad
+    (el monto va justo después del %; el título NO va: la lista numerada del texto lo muestra)."""
     pct = int(j.get("score") or 0)
     # modalidad abreviada
     m_raw = (j.get("modality") or "").lower()
@@ -149,8 +149,8 @@ def compact_label(j, cap: int = 64) -> str:
     libre = max(10, cap - fixed)
     emp = emp[:max(6, int(libre * 0.62))]
     loc = loc[:max(0, int(libre * 0.38))]
-    body = f"{emp}{' · ' + loc if loc else ''}"
-    label = f"{score_emoji(pct)}{pct}%{mod}{rol}{techs}{edad}{sal} {body}".strip()
+    body = " · ".join(p for p in (emp, loc) if p)
+    label = f"{score_emoji(pct)}{pct}%{sal}{mod}{rol}{techs}{edad} {body}".strip()
     return re.sub(r"\s+", " ", label).strip()[:cap]
 
 
