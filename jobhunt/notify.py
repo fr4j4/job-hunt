@@ -182,12 +182,14 @@ def compact_label(j, cap: int = 64) -> str:
     return re.sub(r"\s+", " ", label).strip()[:cap]
 
 
-def table_block(offers: list[dict]) -> str:
-    """Lista de ofertas en bloque <code> — monoespaciado, columnas REALMENTE alineadas.
+def _attr_esc(u: str) -> str:
+    """Escapa un URL para atributo HTML (href)."""
+    return (u or "").replace("&", "&amp;").replace('"', "%22")
 
-    (En los botones Telegram centra el texto y no hay alineación nativa; en el
-    cuerpo del mensaje sí podemos alinear con fuente monoespaciada.)
-    """
+
+def table_block(offers: list[dict], links: bool = True) -> str:
+    """Lista de ofertas en bloque <code> — monoespaciado, columnas REALMENTE alineadas,
+    con link-emoji 🔗 al final de cada fila (clickeable, parece botón)."""
     def pad(s: str, n: int, right: bool = False) -> str:
         return (s[:n].rjust(n) if right else s[:n].ljust(n))
 
@@ -202,8 +204,10 @@ def table_block(offers: list[dict]) -> str:
         if age == "ahora":
             age = "0h"
         ia = "*" if j.get("ia_model") else " "
-        # 35 chars visuales — cabe en móvil sin soft-wrap
-        lines.append(f"{i:>2} {pad(title, 16)} {pad(pct, 3, True)} {pad(sal, 5, True)} {mod} {pad(age, 3, True)}{ia}")
+        url = _attr_esc(j.get("url") or "")
+        link = f' <a href="{url}">🔗</a>' if links and url else ""
+        # 35 chars visuales + link — cabe en móvil sin soft-wrap
+        lines.append(f"{i:>2} {pad(title, 16)} {pad(pct, 3, True)} {pad(sal, 5, True)} {mod} {pad(age, 3, True)}{ia}{link}")
     return "<code>" + "\n".join(lines) + "</code>"
 
 
