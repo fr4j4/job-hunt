@@ -164,7 +164,7 @@ def handle_callback(cfg: Config, query: dict, state: dict) -> None:
         if data == "noop":
             _tg_api(cfg, "answerCallbackQuery", {"callback_query_id": qid})
             return
-        m = re.fullmatch(r"(jobs|latest|sc\d+):page:(\d+)", data)
+        m = re.fullmatch(r"(jobs|latest|sc\d+|f[a-z0-9.\-]*):page:(\d+)", data)
         if not m:
             _tg_api(cfg, "answerCallbackQuery", {"callback_query_id": qid})
             return
@@ -174,6 +174,10 @@ def handle_callback(cfg: Config, query: dict, state: dict) -> None:
         elif prefix == "latest":
             rendered = render_page(_latest_offers(cfg), page, cfg.telegram.digest_page_size, cfg,
                                    label="🆕 <b>Últimas registradas</b>", cb_prefix=prefix)
+        elif prefix.startswith("f"):
+            f = _dec_filters(prefix[1:])
+            rendered = render_page(_filter_offers(cfg, f), page, cfg.telegram.digest_page_size, cfg,
+                                   label=f"🔎 <b>Ofertas — {_describe_filters(f)}</b>", cb_prefix=prefix)
         else:
             th = int(prefix[2:])
             offers = _score_offers(cfg, th)
@@ -199,6 +203,125 @@ def handle_callback(cfg: Config, query: dict, state: dict) -> None:
 
 # ---------------------------------------------------------------- comandos del bot
 
+USD_CLP_RATE_DEFAULT = 950      # tasa de referencia para sueldos USD (filtros)
+
+
+def _norm_txt(s: str) -> str:
+    from .db import _norm_text
+    return _norm_text(s or "")
+
+
+def _salary_clp(cfg: Config, j: dict) -> float | None:
+    """Salario mensual numérico en CLP (USD convertido con tasa de referencia)."""
+    raw = (j.get("salary") or "").strip()
+    if not raw or raw == "-":
+        return None
+    is_usd = "usd" in raw.lower()
+    if not is_usd and not raw.lstrip().startswith(("$", "clp", "CLP")):
+        digits = re.sub(r"\D", "", raw.split(",")[0])
+        if digits and 0 < int(digits) < 10000:
+            is_usd = True
+    m = re.search(r"(\d[\d.,]*)", raw)
+    if not m:
+        return None
+    rawnum = m.group(1)
+    if rawnum.count(".") >= 1 and "," in rawnum:
+        num = rawnum.replace(".", "").replace(",", ".")
+    else:
+        num = rawnum.replace(",", "")
+    try:
+        val = float(num)
+    except ValueError:
+        return None
+    if is_usd:
+        rate = getattr(cfg, "usd_clp_rate", None) or USD_CLP_RATE_DEFAULT
+        return val * rate
+    return val
+
+
+def _parse_filters(tokens: list[str]) -> dict:
+    """'remoto sueldo2.5 stgo' → {'modality': {...}, 'min_salary': 2.5e6, 'has_salary': False, 'loc': ['santiago']}"""
+    f: dict = {"modality": set(), "min_salary": None, "has_salary": False, "loc": []}
+    _MOD = {"remoto": "remoto", "remote": "remoto", "remota": "remoto",
+            "hibrido": "híbrido", "hibrida": "híbrido", "hybrid": "híbrido",
+            "presencial": "presencial", "onsite": "presencial"}
+    _LOC = {"stgo": "santiago", "valpo": "valparaiso", "conce": "concepcion",
+            "araucania": "araucania", "temuco": "temuco"}
+    for t in tokens:
+        tl = _norm_txt(t).replace(":", "")
+        if tl in _MOD:
+            f["modality"].add(_MOD[tl])
+            continue
+        m_num = re.fullmatch(r"(?:sueldo|min|pago|>|>=)?([\d.,]+)\s*([mk]?)", tl)
+        if m_num and any(ch.isdigit() for ch in tl) and tl not in ("min",):
+            numstr = m_num.group(1)
+            try:
+                val = float(numstr.replace(",", "."))       # '2.5' / '2,5' → decimal
+            except ValueError:
+                try:
+                    val = float(re.sub(r"\.(\d{3})", r"\1", numstr))  # '2.500.000' → miles
+                except ValueError:
+                    val = None
+            if val is not None:
+                suf = m_num.group(2)
+                if suf == "k":
+                    val *= 1_000
+                elif suf == "m":
+                    val *= 1_000_000
+                elif val < 100:          # '2.5' → millones (convención chilena)
+                    val *= 1_000_000
+                f["min_salary"] = val
+                continue
+        if tl in ("sueldo", "pago", "salary"):
+            f["has_salary"] = True
+            continue
+        f["loc"].append(_LOC.get(tl, tl))
+    return f
+
+
+def _describe_filters(f: dict) -> str:
+    parts = []
+    if f["modality"]:
+        parts.append("/".join(sorted(f["modality"])))
+    if f["has_salary"]:
+        parts.append("con sueldo")
+    if f["min_salary"] is not None:
+        v = f["min_salary"]
+        parts.append(f"≥${v / 1_000_000:.1f}M" if v >= 1_000_000 else f"≥${v:,.0f}")
+    if f["loc"]:
+        parts.append(" · ".join(f["loc"]))
+    return " + ".join(parts) or "sin filtro"
+
+
+def _filter_offers(cfg: Config, f: dict) -> list[dict]:
+    """Aplica los filtros sobre el pool activo (ordenado por score)."""
+    conn = database.connect(cfg)
+    try:
+        rows = [dict(r) for r in conn.execute(
+            "SELECT * FROM ofertas WHERE active=1 ORDER BY score DESC").fetchall()]
+    finally:
+        conn.close()
+    out = []
+    for j in rows:
+        mod = (j.get("modality") or "").lower()
+        if f["modality"] and not (
+                mod in f["modality"]
+                or ("remoto" in f["modality"] and j.get("remote_official") == 1)):
+            continue
+        if f["has_salary"] and not (j.get("salary") or "").strip():
+            continue
+        if f["min_salary"] is not None:
+            v = _salary_clp(cfg, j)
+            if v is None or v < f["min_salary"]:
+                continue
+        if f["loc"]:
+            hay = " ".join([_norm_txt(j.get("location") or ""), _norm_txt(j.get("title") or "")])
+            if not any(t in hay for t in f["loc"]):
+                continue
+        out.append(j)
+    return out
+
+
 def _score_offers(cfg: Config, threshold: int) -> list[dict]:
     """Ofertas activas ≥ threshold, máx 50, ordenadas por score."""
     conn = database.connect(cfg)
@@ -208,6 +331,40 @@ def _score_offers(cfg: Config, threshold: int) -> list[dict]:
             "ORDER BY score DESC LIMIT 50", (threshold,)).fetchall()]
     finally:
         conn.close()
+
+
+def _enc_filters(f: dict) -> str:
+    """Serializa filtros para callback_data: {'remoto', ≥2.5M, santiago} → 'r-s2.5-lstgo'."""
+    parts = []
+    for m in sorted(f["modality"]):
+        parts.append({"remoto": "r", "híbrido": "h", "presencial": "p"}.get(m, ""))
+    if f["min_salary"] is not None:
+        parts.append(f"s{f['min_salary'] / 1_000_000:.1f}")
+    for loc in f["loc"]:
+        parts.append("l" + loc.replace(" ", "")[:12])
+    if f["has_salary"]:
+        parts.append("q")
+    return "-".join(parts)
+
+
+def _dec_filters(enc: str) -> dict:
+    """Inverso de _enc_filters (fallback si el daemon se reinició entre páginas)."""
+    f: dict = {"modality": set(), "min_salary": None, "has_salary": False, "loc": []}
+    for p in (enc or "").split("-"):
+        if not p:
+            continue
+        if p in ("r", "h", "p"):
+            f["modality"].add({"r": "remoto", "h": "híbrido", "p": "presencial"}[p])
+        elif p == "q":
+            f["has_salary"] = True
+        elif p.startswith("s"):
+            try:
+                f["min_salary"] = float(p[1:]) * 1_000_000
+            except ValueError:
+                pass
+        elif p.startswith("l"):
+            f["loc"].append(p[1:])
+    return f
 
 
 def _latest_offers(cfg: Config, n: int = 5) -> list[dict]:
@@ -257,6 +414,10 @@ def _help_text() -> str:
         "/search — gatilla una búsqueda ahora (reporta inicio, término y error)",
         "/latest — últimas ofertas registradas",
         "/score N — ofertas con score ≥ N (ej: /score 60)",
+        "/jobs [filtros] — filtra el pool: remoto · hibrido · presencial ·",
+        "    sueldo (con sueldo publicado) · sueldo2.5 (≥$2.5M) · 2.5 (≥2.5M) ·",
+        "    500k · ubicación: stgo, temuco, valpo, conce, araucania, o texto libre",
+        "    ej: <code>/jobs remoto sueldo2.5</code> · <code>/jobs temuco</code> · <code>/jobs hibrido stgo</code>",
         "/help — esta ayuda",
     ])
 
@@ -281,6 +442,24 @@ def _handle_command(cfg: Config, message: dict, state: dict) -> None:
             offers = _latest_offers(cfg)
             rendered = render_page(offers, 0, cfg.telegram.digest_page_size, cfg,
                                    label="🆕 <b>Últimas registradas</b>", cb_prefix="latest")
+            kb = [[{k: v for k, v in b.items() if k != "style"} for b in row]
+                  for row in rendered["keyboard"]]
+            _tg_api(cfg, "sendMessage", {
+                "chat_id": chat_id, "text": rendered["text"], "parse_mode": "HTML",
+                "disable_web_page_preview": True,
+                "reply_markup": json.dumps({"inline_keyboard": kb})})
+        elif cmd == "/jobs":
+            f = _parse_filters(parts[1:])
+            offers = _filter_offers(cfg, f)
+            if not offers:
+                _tg_api(cfg, "sendMessage", {
+                    "chat_id": chat_id, "parse_mode": "HTML",
+                    "text": f"Nada con <b>{_describe_filters(f)}</b> en el pool activo."})
+                return
+            prefix = "f" + _enc_filters(f)
+            rendered = render_page(offers, 0, cfg.telegram.digest_page_size, cfg,
+                                   label=f"🔎 <b>Ofertas — {_describe_filters(f)}</b>",
+                                   cb_prefix=prefix)
             kb = [[{k: v for k, v in b.items() if k != "style"} for b in row]
                   for row in rendered["keyboard"]]
             _tg_api(cfg, "sendMessage", {
@@ -333,6 +512,7 @@ def _register_commands(cfg: Config) -> None:
         {"command": "search", "description": "Gatilla una búsqueda ahora"},
         {"command": "latest", "description": "Últimas ofertas registradas"},
         {"command": "score",  "description": "Ofertas con score ≥ N (ej: /score 60)"},
+        {"command": "jobs",   "description": "Filtra: remoto, sueldo2.5, temuco… combinables"},
         {"command": "help",   "description": "Ayuda"},
     ]
     try:
@@ -418,7 +598,7 @@ def run_daemon(cfg: Config) -> None:
             for upd in data.get("result", []):
                 offset = upd["update_id"] + 1
                 cq = upd.get("callback_query")
-                if cq and (cq.get("data") or "").startswith(("jobs:", "sc", "latest", "noop")):
+                if cq and (cq.get("data") or "").startswith(("jobs:", "sc", "latest", "f", "noop")):
                     handle_callback(cfg, cq, state)
                     continue
                 msg = upd.get("message")
