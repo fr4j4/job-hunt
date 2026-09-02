@@ -143,6 +143,7 @@ class Telegram:
     bot_token: str
     chat_id: str
     digest_page_size: int
+    allowed_chats: tuple[int, ...] = ()
 
 
 @dataclass
@@ -256,6 +257,9 @@ def load_config(env_file: Path | None = None) -> Config:
         bot_token=_env("TELEGRAM_BOT_TOKEN"),
         chat_id=_env("TELEGRAM_CHAT_ID"),
         digest_page_size=_env_int("TELEGRAM_DIGEST_PAGE_SIZE", 5),
+        allowed_chats=tuple(
+            int(x.strip()) for x in _env("TELEGRAM_ALLOWED_CHATS", "").split(",") if x.strip()
+        ),
     )
     alerts = Alerts(
         min_score=_env_int("ALERT_MIN_SCORE", 70),

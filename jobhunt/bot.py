@@ -97,7 +97,21 @@ def render_page(offers: list[dict], page: int, page_size: int, cfg: Config) -> d
 
 # ---------------------------------------------------------------- telegram api
 
+def _chat_allowed(cfg: Config, chat_id) -> bool:
+    """True si el chat está en TELEGRAM_ALLOWED_CHATS (vacío = sin restricción)."""
+    if not cfg.telegram.allowed_chats:
+        return True
+    try:
+        return int(chat_id) in cfg.telegram.allowed_chats
+    except (TypeError, ValueError):
+        return False
+
+
 def _tg_api(cfg: Config, method: str, payload: dict) -> dict:
+    # restricción dura: solo enviar a chats del allowlist
+    cid = payload.get("chat_id")
+    if cid is not None and not _chat_allowed(cfg, cid):
+        raise PermissionError(f"chat {cid} no está en TELEGRAM_ALLOWED_CHATS")
     req = urllib.request.Request(
         f"https://api.telegram.org/bot{cfg.telegram.bot_token}/{method}",
         data=json.dumps(payload).encode(),
@@ -132,6 +146,13 @@ def handle_callback(cfg: Config, query: dict, offers: list[dict]) -> None:
     data = query.get("data") or ""
     msg = query.get("message") or {}
     chat_id = msg.get("chat", {}).get("id")
+    if not _chat_allowed(cfg, chat_id):
+        log.warning("callback ignorado: chat %s fuera del allowlist", chat_id)
+        try:
+            _tg_api(cfg, "answerCallbackQuery", {"callback_query_id": qid})
+        except Exception:
+            pass
+        return
     try:
         if data == "noop" or not data.startswith("jobs:page:"):
             _tg_api(cfg, "answerCallbackQuery", {"callback_query_id": qid})
