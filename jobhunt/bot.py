@@ -23,7 +23,7 @@ from .config import Config
 from . import db as database
 from .cli import cmd_run
 from .notify import (esc, score_emoji, score_style, modality_tag, role_tag, techs_tag,
-                     age_tag, salary_tag, compact_label)
+                     age_tag, salary_tag, compact_label, abbr_loc)
 
 log = logging.getLogger("jobhunt.bot")
 
@@ -58,7 +58,8 @@ def render_page(offers: list[dict], page: int, page_size: int, cfg: Config) -> d
             f"{score_emoji(best.get('score', 0))} <b>Mejor match:</b> {esc(best['title'][:70])}",
             f"   <code>{best.get('score', '?')}%</code>{salary_tag(best)}"
             f" · {modality_tag(best.get('modality'))} {role_tag(best['title'])}"
-            f" · {age_tag(best.get('date_posted', ''))} · {esc((best.get('company') or '')[:24])}",
+            f" · {age_tag(best.get('date_posted', ''))} · {esc((best.get('company') or '')[:24])}"
+            f" · {esc(abbr_loc(best.get('location') or ''))}",
         ]
         if best.get("ai_fit_reason"):
             lines.append(f"   🎯 <i>{esc(best['ai_fit_reason'][:140])}</i>")

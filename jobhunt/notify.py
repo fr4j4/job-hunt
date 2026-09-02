@@ -63,16 +63,43 @@ def age_tag(date_posted: str) -> str:
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
     except Exception:
-        return "[?]"
+        return "📅?"
     delta = datetime.now(timezone.utc) - dt
     hours = int(delta.total_seconds() // 3600)
-    if hours < 1: return "[ahora]"
-    if hours < 24: return f"[{hours}h]"
+    if hours < 1: return "📅ahora"
+    if hours < 24: return f"📅{hours}h"
     days = hours // 24
-    if days < 14: return f"[{days}d]"
+    if days < 14: return f"📅{days}d"
     weeks = days // 7
-    if weeks < 5: return f"[{weeks}w]"
-    return f"[{days // 30}m]"
+    if weeks < 5: return f"📅{weeks}w"
+    return f"📅{days // 30}m"
+
+
+# ---------- helpers de ubicación ----------
+
+_LOC_ABBR = [  # orden importa: específico → general
+    ("región metropolitana", "RM"),
+    ("metropolitana", "RM"),
+    ("metropolitan", "RM"),
+    ("santiago", "Stgo"),
+    ("valparaíso", "Valpo"),
+    ("valparaiso", "Valpo"),
+    ("concepción", "Conce"),
+    ("concepcion", "Conce"),
+    ("antofagasta", "Antofa"),
+    ("viña del mar", "Viña"),
+    ("vina del mar", "Viña"),
+    ("chile", "CL"),
+]
+
+
+def abbr_loc(loc: str) -> str:
+    """'Santiago Met' → 'Stgo', 'Chile' → 'CL', 'Las Condes' queda tal cual."""
+    low = (loc or "").strip().lower()
+    for full, ab in _LOC_ABBR:
+        if full in low:
+            return ab
+    return (loc or "").strip()
 
 
 # ---------- helpers de salario ----------
@@ -143,7 +170,7 @@ def compact_label(j, cap: int = 64) -> str:
     sal = salary_tag(j)
 
     emp = (j.get("company") or "").strip()
-    loc = (j.get("location") or "").split(",")[0].strip()
+    loc = abbr_loc((j.get("location") or "").split(",")[0])
     # presupuesto: fijo ≈ 6+3+6+7+4+len(sal) → libre para emp+loc
     fixed = 6 + len(mod) + len(rol) + len(techs) + len(edad) + len(sal) + 3
     libre = max(10, cap - fixed)
@@ -168,7 +195,8 @@ def build_digest_text(offers: list[dict], cfg) -> str:
         f"{score_emoji(best.get('score', 0))} <b>Mejor match:</b> {esc(best['title'][:70])}",
         f"   <code>{best.get('score', '?')}%</code>{salary_tag(best)}"
         f" · {modality_tag(best.get('modality'))} {role_tag(best['title'])}"
-        f" · {age_tag(best.get('date_posted', ''))} · {esc((best.get('company') or '')[:24])}",
+        f" · {age_tag(best.get('date_posted', ''))} · {esc((best.get('company') or '')[:24])}"
+        f" · {esc(abbr_loc(best.get('location') or ''))}",
     ]
     if best.get("ai_fit_reason"):
         lines.append(f"   🎯 <i>{esc(best['ai_fit_reason'][:140])}</i>")
