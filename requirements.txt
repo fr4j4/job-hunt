@@ -1,6 +1,4 @@
 python-dotenv>=1.0
 requests>=2.31
-# opcional (digest con style en botones)
 python-telegram-bot>=22.7
-# para Glassdoor (o usar ~/.venvs/buscador existente)
-# tls-client>=0.2
+tls-client>=0.2
