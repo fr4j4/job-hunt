@@ -130,6 +130,14 @@ class Alerts:
 
 
 @dataclass
+class Daemon:
+    interval_min: int = 240        # minutos entre barridos del cron interno
+    page_size: int = 5             # ofertas por página del digest paginado
+
+
+
+
+@dataclass
 class Telegram:
     enabled: bool
     bot_token: str
@@ -146,6 +154,7 @@ class Config:
     premium_hours: list[int]
     ia: IaConfig
     telegram: Telegram
+    daemon: Daemon
     alerts: Alerts
     project_root: Path = PROJECT_ROOT
     data_dir: Path = field(default_factory=lambda: PROJECT_ROOT / "data")
@@ -253,6 +262,10 @@ def load_config(env_file: Path | None = None) -> Config:
         max_per_digest=_env_int("ALERT_MAX_PER_DIGEST", 10),
         worth_it_score=_env_int("ALERT_WORTH_IT_SCORE", 60),
     )
+    daemon = Daemon(
+        interval_min=_env_int("DAEMON_INTERVAL_MIN", 240),
+        page_size=_env_int("TELEGRAM_DIGEST_PAGE_SIZE", 5),
+    )
     cfg = Config(
         profile=profile,
         scoring=scoring,
@@ -262,6 +275,7 @@ def load_config(env_file: Path | None = None) -> Config:
         ia=ia,
         telegram=tg,
         alerts=alerts,
+        daemon=daemon,
     )
     cfg.data_dir.mkdir(exist_ok=True)
     return cfg

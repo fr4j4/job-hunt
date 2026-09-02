@@ -166,6 +166,9 @@ def main():
                         f"inglés {p.english_level}")
         done = run_ia_batch(conn, cfg, profile_desc)
         print(f"IA batch: {done} ofertas enriquecidas")
+    elif cmd == "watch":
+        from .bot import run_daemon
+        run_daemon(cfg)
     elif cmd == "report":
         cmd_report(cfg)
     else:

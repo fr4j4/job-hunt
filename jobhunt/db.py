@@ -15,8 +15,10 @@ from .config import Config
 
 
 def connect(cfg: Config) -> sqlite3.Connection:
-    conn = sqlite3.connect(cfg.db_path)
+    conn = sqlite3.connect(cfg.db_path, timeout=30)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")   # lecturas concurrentes sin lock
+    conn.execute("PRAGMA busy_timeout=15000")
     return conn
 
 
