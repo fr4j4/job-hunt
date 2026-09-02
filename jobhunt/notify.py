@@ -211,10 +211,39 @@ def build_digest_text(offers: list[dict], cfg) -> str:
     return "\n".join(lines)[:4000]
 
 
+def _vis_len(s: str) -> int:
+    """Ancho visual del texto: emoji/símbolos anchos cuentan 2, resto 1."""
+    return sum(2 if ord(ch) > 0x1000 else 1 for ch in s)
+
+
+def align_kb(rows: list[list[dict]], max_w: int = 64) -> list[list[dict]]:
+    """Paddea los textos de los botones de ancho completo a un mismo ancho visual.
+
+    Telegram centra el texto de los botones y no ofrece alineación; si TODOS
+    los textos miden lo mismo, el centrado produce el mismo borde izquierdo
+    → se ven alineados a la izquierda. Pad con NBSP (U+00A0) porque Telegram
+    recorta espacios normales al final del texto del botón. Las filas con
+    varios botones (navegación) quedan intactas.
+    """
+    singles = [r[0] for r in rows if len(r) == 1]
+    if len(singles) < 2:
+        return rows
+    width = min(max((_vis_len(b.get("text", "")) for b in singles), default=0), max_w)
+    out = []
+    for row in rows:
+        if len(row) == 1:
+            b = row[0]
+            pad = "\u00A0" * max(0, width - _vis_len(b.get("text", "")))
+            out.append([{**b, "text": b.get("text", "") + pad}])
+        else:
+            out.append(row)
+    return out
+
+
 def build_buttons(offers: list[dict], cfg) -> list[list[dict]]:
     """1 botón por fila (ancho completo): tags compactos, sin título, cap 64 chars."""
-    return [[{"text": compact_label(j), "url": j.get("url", ""), "style": score_style(j.get("score", 0))}]
-            for j in offers[:cfg.alerts.max_per_digest]]
+    return align_kb([[{"text": compact_label(j), "url": j.get("url", ""), "style": score_style(j.get("score", 0))}]
+                     for j in offers[:cfg.alerts.max_per_digest]])
 
 
 

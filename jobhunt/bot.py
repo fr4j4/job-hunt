@@ -95,6 +95,14 @@ def render_page(offers: list[dict], page: int, page_size: int, cfg: Config,
 
 # ---------------------------------------------------------------- telegram api
 
+def _kb_json(rows: list[list[dict]]) -> str:
+    """Keyboard para la API: paddea botones full-width al mismo ancho visual
+    (Telegram centra el texto; igualar anchos → borde izquierdo uniforme)."""
+    from .notify import align_kb
+    kb = [[{k: v for k, v in b.items() if k != "style"} for b in row] for row in rows]
+    return json.dumps({"inline_keyboard": align_kb(kb)})
+
+
 def _chat_allowed(cfg: Config, chat_id) -> bool:
     """True si el chat está en TELEGRAM_ALLOWED_CHATS (vacío = sin restricción)."""
     if not cfg.telegram.allowed_chats:
@@ -138,7 +146,7 @@ def send_anchor(cfg: Config, offers: list[dict]) -> int | None:
             "parse_mode": "HTML",
             "disable_web_page_preview": True,
             "text": page["text"],
-            "reply_markup": json.dumps({"inline_keyboard": kb}),
+            "reply_markup": _kb_json(kb),
         }
         resp = _tg_api(cfg, "sendMessage", body)
         return resp.get("result", {}).get("message_id")
@@ -190,7 +198,7 @@ def handle_callback(cfg: Config, query: dict, state: dict) -> None:
             "text": rendered["text"],
             "parse_mode": "HTML",
             "disable_web_page_preview": True,
-            "reply_markup": json.dumps({"inline_keyboard": kb}),
+            "reply_markup": _kb_json(kb),
         })
         _tg_api(cfg, "answerCallbackQuery", {"callback_query_id": qid})
     except Exception as exc:
@@ -485,7 +493,7 @@ def _handle_command(cfg: Config, message: dict, state: dict) -> None:
             _tg_api(cfg, "sendMessage", {
                 "chat_id": chat_id, "text": rendered["text"], "parse_mode": "HTML",
                 "disable_web_page_preview": True,
-                "reply_markup": json.dumps({"inline_keyboard": kb})})
+                "reply_markup": _kb_json(kb)})
         elif cmd == "/jobs":
             f = _parse_filters(parts[1:])
             offers = _filter_offers(cfg, f)
@@ -503,7 +511,7 @@ def _handle_command(cfg: Config, message: dict, state: dict) -> None:
             _tg_api(cfg, "sendMessage", {
                 "chat_id": chat_id, "text": rendered["text"], "parse_mode": "HTML",
                 "disable_web_page_preview": True,
-                "reply_markup": json.dumps({"inline_keyboard": kb})})
+                "reply_markup": _kb_json(kb)})
         elif cmd == "/score":
             try:
                 th = int(arg)
@@ -527,7 +535,7 @@ def _handle_command(cfg: Config, message: dict, state: dict) -> None:
             _tg_api(cfg, "sendMessage", {
                 "chat_id": chat_id, "text": rendered["text"], "parse_mode": "HTML",
                 "disable_web_page_preview": True,
-                "reply_markup": json.dumps({"inline_keyboard": kb})})
+                "reply_markup": _kb_json(kb)})
         elif cmd in ("/help", "/start"):
             _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
                                          "text": _help_text()})
@@ -642,7 +650,7 @@ def _refresh_anchor(cfg: Config, state: dict):
         "text": rendered["text"],
         "parse_mode": "HTML",
         "disable_web_page_preview": True,
-        "reply_markup": json.dumps({"inline_keyboard": kb}),
+        "reply_markup": _kb_json(kb),
     }
     try:
         if state["anchor_id"]:
