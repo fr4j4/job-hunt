@@ -1,9 +1,10 @@
-"""Modo daemon/bot: proceso residente con cron interno + paginación navegable.
+"""Modo daemon/bot: proceso residente con cron interno + paginación navegable + comandos.
 
 Dos modos de operación del proyecto:
   jobhunt run    → ejecución simple: un barrido + 1 mensaje con las n ofertas nuevas
   jobhunt watch  → daemon: cron interno cada POLL_INTERVAL_MIN + digest paginado
                    navegable (callback_query → edit_message_text del mismo mensaje)
+                   + comandos Telegram: /search /latest /score N /help
 
 Requiere TELEGRAM_BOT_TOKEN propio (no compartido con hermes): Telegram permite
 un solo consumidor de getUpdates por token.
@@ -36,10 +37,13 @@ def _score_row(j: dict) -> int:
     return int(j.get("score") or 0)
 
 
-def render_page(offers: list[dict], page: int, page_size: int, cfg: Config) -> dict:
+def render_page(offers: list[dict], page: int, page_size: int, cfg: Config,
+                label: str | None = None, cb_prefix: str = "jobs") -> dict:
     """Renderiza página N: texto con títulos numerados + botones compactos (≤64 chars).
 
     La fila N del texto = botón N. El pago va después del porcentaje.
+    label = encabezado alternativo (ej: "🎯 Ofertas ≥60"); cb_prefix = namespace
+    de callback_data para la navegación (jobs = ancla, sc<umbral> = /score).
     """
     total = len(offers)
     pages = max(1, (total + page_size - 1) // page_size)
@@ -47,8 +51,9 @@ def render_page(offers: list[dict], page: int, page_size: int, cfg: Config) -> d
     chunk = offers[page * page_size:(page + 1) * page_size]
 
     stamp = datetime.now(timezone.utc).strftime("%d %b %H:%M")
+    head = label or f"📬 <b>Ofertas ≥{cfg.alerts.min_score}</b>"
     lines = [
-        f"📬 <b>Ofertas ≥{cfg.alerts.min_score}</b> · <i>{total} activas</i> · {stamp}",
+        f"{head} · <i>{total} activas</i> · {stamp}",
         f"Página <b>{page + 1}/{pages}</b>",
     ]
     if chunk:
@@ -78,12 +83,12 @@ def render_page(offers: list[dict], page: int, page_size: int, cfg: Config) -> d
     # navegación (todo botón debe tener acción: los inertes usan callback_data="noop")
     nav = []
     if page > 0:
-        nav.append({"text": "«1", "callback_data": "jobs:page:0"})
-        nav.append({"text": f"‹{page}", "callback_data": f"jobs:page:{page - 1}"})
+        nav.append({"text": "«1", "callback_data": f"{cb_prefix}:page:0"})
+        nav.append({"text": f"‹{page}", "callback_data": f"{cb_prefix}:page:{page - 1}"})
     nav.append({"text": f"· {page + 1}/{pages} ·", "callback_data": "noop"})
     if page < pages - 1:
-        nav.append({"text": f"{page + 2}›", "callback_data": f"jobs:page:{page + 1}"})
-        nav.append({"text": f"{pages}»", "callback_data": f"jobs:page:{pages - 1}"})
+        nav.append({"text": f"{page + 2}›", "callback_data": f"{cb_prefix}:page:{page + 1}"})
+        nav.append({"text": f"{pages}»", "callback_data": f"{cb_prefix}:page:{pages - 1}"})
     kb.append(nav)
     return {"text": text, "keyboard": kb}
 
@@ -142,8 +147,8 @@ def send_anchor(cfg: Config, offers: list[dict]) -> int | None:
         return None
 
 
-def handle_callback(cfg: Config, query: dict, offers: list[dict]) -> None:
-    """callback jobs:page:N → edit_message_text del ancla con la página pedida."""
+def handle_callback(cfg: Config, query: dict, state: dict) -> None:
+    """callback jobs:page:N (ancla) o sc<umbral>:page:N (vista /score) → edit_message_text."""
     qid = query.get("id")
     data = query.get("data") or ""
     msg = query.get("message") or {}
@@ -156,11 +161,24 @@ def handle_callback(cfg: Config, query: dict, offers: list[dict]) -> None:
             pass
         return
     try:
-        if data == "noop" or not data.startswith("jobs:page:"):
+        if data == "noop":
             _tg_api(cfg, "answerCallbackQuery", {"callback_query_id": qid})
             return
-        page = int(data.split(":")[2])
-        rendered = render_page(offers, page, cfg.telegram.digest_page_size, cfg)
+        m = re.fullmatch(r"(jobs|latest|sc\d+):page:(\d+)", data)
+        if not m:
+            _tg_api(cfg, "answerCallbackQuery", {"callback_query_id": qid})
+            return
+        prefix, page = m.group(1), int(m.group(2))
+        if prefix == "jobs":
+            rendered = render_page(state["offers"], page, cfg.telegram.digest_page_size, cfg)
+        elif prefix == "latest":
+            rendered = render_page(_latest_offers(cfg), page, cfg.telegram.digest_page_size, cfg,
+                                   label="🆕 <b>Últimas registradas</b>", cb_prefix=prefix)
+        else:
+            th = int(prefix[2:])
+            offers = _score_offers(cfg, th)
+            rendered = render_page(offers, page, cfg.telegram.digest_page_size, cfg,
+                                   label=f"🎯 <b>Ofertas ≥{th}</b>", cb_prefix=prefix)
         kb = [[{k: v for k, v in b.items() if k != "style"} for b in row] for row in rendered["keyboard"]]
         _tg_api(cfg, "editMessageText", {
             "chat_id": chat_id,
@@ -179,19 +197,174 @@ def handle_callback(cfg: Config, query: dict, offers: list[dict]) -> None:
             pass
 
 
+# ---------------------------------------------------------------- comandos del bot
+
+def _score_offers(cfg: Config, threshold: int) -> list[dict]:
+    """Ofertas activas ≥ threshold, máx 50, ordenadas por score."""
+    conn = database.connect(cfg)
+    try:
+        return [dict(r) for r in conn.execute(
+            "SELECT * FROM ofertas WHERE active=1 AND score >= ? "
+            "ORDER BY score DESC LIMIT 50", (threshold,)).fetchall()]
+    finally:
+        conn.close()
+
+
+def _latest_offers(cfg: Config, n: int = 5) -> list[dict]:
+    """Últimas n ofertas registradas (por primera vez vistas), activas."""
+    conn = database.connect(cfg)
+    try:
+        return [dict(r) for r in conn.execute(
+            "SELECT * FROM ofertas WHERE active=1 ORDER BY first_seen DESC, score DESC LIMIT ?",
+            (n,)).fetchall()]
+    finally:
+        conn.close()
+
+
+def _run_search_async(cfg: Config, chat_id: int):
+    """Barrido en background con reporte de inicio/término/error al chat."""
+    try:
+        _tg_api(cfg, "sendMessage", {"chat_id": chat_id,
+                                     "text": "🔍 <b>Búsqueda iniciada</b> — barriendo fuentes…",
+                                     "parse_mode": "HTML"})
+        offers, stats = _do_sweep(cfg)
+        stamp = datetime.now(timezone.utc).strftime("%H:%M:%S")
+        msg = (f"✅ <b>Búsqueda terminada</b> ({stamp})\n"
+               f"   Vistas: <code>{stats.get('total_seen', 0)}</code> · "
+               f"Nuevas: <code>{stats.get('new_count', 0)}</code>\n"
+               f"   Activas ≥{cfg.alerts.min_score}: <code>{len(offers)}</code>")
+        if offers:
+            best = max(offers, key=lambda o: o.get("score", 0))
+            msg += f"\n   Mejor: {esc((best.get('title') or '?')[:60])} ({best.get('score', 0)}%)"
+        _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "text": msg, "parse_mode": "HTML",
+                                     "disable_web_page_preview": True})
+        log.info("/search: barrido OK (%d vistas, %d nuevas)", stats.get("total_seen", 0),
+                 stats.get("new_count", 0))
+    except Exception as exc:
+        log.error("/search falló: %s", exc)
+        try:
+            _tg_api(cfg, "sendMessage", {
+                "chat_id": chat_id, "parse_mode": "HTML",
+                "text": f"⚠️ <b>Error en la búsqueda</b>\n<code>{esc(str(exc)[:300])}</code>"})
+        except Exception:
+            pass
+
+
+def _help_text() -> str:
+    return "\n".join([
+        "🤖 <b>Comandos del bot</b>",
+        "",
+        "/search — gatilla una búsqueda ahora (reporta inicio, término y error)",
+        "/latest — últimas ofertas registradas",
+        "/score N — ofertas con score ≥ N (ej: /score 60)",
+        "/help — esta ayuda",
+    ])
+
+
+def _handle_command(cfg: Config, message: dict, state: dict) -> None:
+    """Despacha comandos de texto. Solo chats del allowlist."""
+    chat_id = (message.get("chat") or {}).get("id")
+    text = (message.get("text") or "").strip()
+    if not chat_id or not text.startswith("/"):
+        return
+    if not _chat_allowed(cfg, chat_id):
+        log.warning("comando ignorado: chat %s fuera del allowlist", chat_id)
+        return
+    parts = text.split()
+    cmd = parts[0].split("@")[0].lower()      # /score@MiBot → /score
+    arg = parts[1] if len(parts) > 1 else ""
+    log.info("comando %s (chat %s)", cmd, chat_id)
+    try:
+        if cmd == "/search":
+            threading.Thread(target=_run_search_async, args=(cfg, chat_id), daemon=True).start()
+        elif cmd == "/latest":
+            offers = _latest_offers(cfg)
+            rendered = render_page(offers, 0, cfg.telegram.digest_page_size, cfg,
+                                   label="🆕 <b>Últimas registradas</b>", cb_prefix="latest")
+            kb = [[{k: v for k, v in b.items() if k != "style"} for b in row]
+                  for row in rendered["keyboard"]]
+            _tg_api(cfg, "sendMessage", {
+                "chat_id": chat_id, "text": rendered["text"], "parse_mode": "HTML",
+                "disable_web_page_preview": True,
+                "reply_markup": json.dumps({"inline_keyboard": kb})})
+        elif cmd == "/score":
+            try:
+                th = int(arg)
+            except ValueError:
+                _tg_api(cfg, "sendMessage", {
+                    "chat_id": chat_id, "parse_mode": "HTML",
+                    "text": "Uso: <code>/score N</code> — ej: <code>/score 60</code>"})
+                return
+            th = max(0, min(100, th))
+            offers = _score_offers(cfg, th)
+            if not offers:
+                _tg_api(cfg, "sendMessage", {
+                    "chat_id": chat_id, "parse_mode": "HTML",
+                    "text": f"Nada con score ≥{th} en el pool activo."})
+                return
+            prefix = f"sc{th}"
+            rendered = render_page(offers, 0, cfg.telegram.digest_page_size, cfg,
+                                   label=f"🎯 <b>Ofertas ≥{th}</b>", cb_prefix=prefix)
+            kb = [[{k: v for k, v in b.items() if k != "style"} for b in row]
+                  for row in rendered["keyboard"]]
+            _tg_api(cfg, "sendMessage", {
+                "chat_id": chat_id, "text": rendered["text"], "parse_mode": "HTML",
+                "disable_web_page_preview": True,
+                "reply_markup": json.dumps({"inline_keyboard": kb})})
+        elif cmd in ("/help", "/start"):
+            _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
+                                         "text": _help_text()})
+        else:
+            _tg_api(cfg, "sendMessage", {
+                "chat_id": chat_id, "parse_mode": "HTML",
+                "text": "Comando no reconocido. <code>/help</code> para ver los disponibles."})
+    except Exception as exc:
+        log.error("comando %s falló: %s", cmd, exc)
+        try:
+            _tg_api(cfg, "sendMessage", {"chat_id": chat_id,
+                                         "text": f"⚠️ Error ejecutando {cmd}: {esc(str(exc)[:200])}"})
+        except Exception:
+            pass
+
+
+def _register_commands(cfg: Config) -> None:
+    """Registra los comandos en Telegram (menú "/" del cliente)."""
+    commands = [
+        {"command": "search", "description": "Gatilla una búsqueda ahora"},
+        {"command": "latest", "description": "Últimas ofertas registradas"},
+        {"command": "score",  "description": "Ofertas con score ≥ N (ej: /score 60)"},
+        {"command": "help",   "description": "Ayuda"},
+    ]
+    try:
+        _tg_api(cfg, "setMyCommands", {"commands": commands})
+        log.info("comandos registrados en Telegram")
+    except Exception as exc:
+        log.warning("setMyCommands falló: %s", exc)
+
+
 # ---------------------------------------------------------------- daemon loop
 
-def sweep(cfg: Config, state: dict):
-    """Barrido completo (sin digest push) + refresh del pool + ancla."""
+def _do_sweep(cfg: Config) -> tuple[list[dict], dict]:
+    """Barrido completo + pool refrescado. Retorna (ofertas ≥min_score, stats del scan_log)."""
     with _sweep_lock:
         cmd_run(cfg, notify=False)          # barrido SIN mensaje push
         conn = database.connect(cfg)
         try:
-            state["offers"] = [dict(r) for r in conn.execute(
+            offers = [dict(r) for r in conn.execute(
                 "SELECT * FROM ofertas WHERE active=1 AND score >= ? ORDER BY score DESC",
                 (cfg.alerts.min_score,)).fetchall()]
+            row = conn.execute(
+                "SELECT ts, total_seen, new_count FROM scan_log ORDER BY id DESC LIMIT 1").fetchone()
+            stats = dict(row) if row else {"ts": "", "total_seen": 0, "new_count": 0}
         finally:
             conn.close()
+    return offers, stats
+
+
+def sweep(cfg: Config, state: dict):
+    """Barrido + refresh del pool + ancla (cron interno del daemon)."""
+    offers, _stats = _do_sweep(cfg)
+    state["offers"] = offers
     _refresh_anchor(cfg, state)
 
 
@@ -218,29 +391,35 @@ def _refresh_anchor(cfg: Config, state: dict):
 
 
 def run_daemon(cfg: Config) -> None:
-    """Proceso residente: barrido periódico (cron interno) + polling de callbacks."""
+    """Proceso residente: barrido periódico (cron interno) + polling de callbacks y comandos."""
     interval_min = cfg.daemon.interval_min
-    log.info("daemon iniciado · barrido cada %d min · callbacks activos", interval_min)
+    log.info("daemon iniciado · barrido cada %d min · callbacks + comandos activos", interval_min)
 
     state: dict = {"offers": [], "anchor_id": None, "last_sweep": 0.0}
+    _register_commands(cfg)
 
     # primer barrido inmediato en background
     threading.Thread(target=lambda: sweep(cfg, state), daemon=True).start()
 
     offset = 0
     while True:
-        # 1. polling de callbacks (getUpdates — requiere token exclusivo del bot)
+        # 1. polling: comandos de texto + callbacks de paginación
         try:
             req = urllib.request.Request(
                 f"https://api.telegram.org/bot{cfg.telegram.bot_token}/getUpdates"
-                f"?timeout=50&offset={offset}&allowed_updates=%5B%22callback_query%22%5D")
+                f"?timeout=50&offset={offset}"
+                f"&allowed_updates=%5B%22callback_query%22%2C%22message%22%5D")
             with urllib.request.urlopen(req, timeout=60) as resp:
                 data = json.loads(resp.read().decode())
             for upd in data.get("result", []):
                 offset = upd["update_id"] + 1
                 cq = upd.get("callback_query")
-                if cq and (cq.get("data") or "").startswith(("jobs:page:", "noop")):
-                    handle_callback(cfg, cq, state["offers"])
+                if cq and (cq.get("data") or "").startswith(("jobs:", "sc", "latest", "noop")):
+                    handle_callback(cfg, cq, state)
+                    continue
+                msg = upd.get("message")
+                if msg:
+                    _handle_command(cfg, msg, state)
         except Exception as exc:
             log.warning("poll error: %s", str(exc)[:120])
             time.sleep(5)
