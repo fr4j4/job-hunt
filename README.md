@@ -35,3 +35,18 @@ Todo vive en `.env`:
 ## Cron sugerido
 
     0 */4 * * *  cd /mnt/data2/projects/jobhunt && .venv/bin/python -m jobhunt run
+
+## Fuentes
+
+LinkedIn · Computrabajo · Indeed · Glassdoor · Laborum (API searchV2) · Accenture (findjobs) · Jooble (scraping headless).
+
+### Jooble (scraping headless) — dependencia extra
+
+La API REST de Jooble exige sesión de usuario, así que usa Playwright + Xvfb:
+
+    pip install playwright
+    playwright install chromium
+    sudo apt install xvfb
+
+El barrido debe correr con `xvfb-run` para Jooble (o el daemon detecta Xvfb
+y lanza headed automáticamente). Sin playwright la fuente se salta con warning.

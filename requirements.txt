@@ -4,3 +4,4 @@ python-telegram-bot>=22.7
 tls-client>=0.2
 matplotlib>=3.8        # solo /report (gráficos del análisis de mercado)
 reportlab>=4.0         # solo /report (composición del PDF)
+playwright>=1.62        # solo jooble (scraping headless, requiere: playwright install chromium + xvfb)

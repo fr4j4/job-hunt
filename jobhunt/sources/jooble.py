@@ -70,11 +70,21 @@ def _parse_card(texto: str) -> dict:
 
 def jobs(queries: list[str], found_by_prefix: str = "", max_pages: int = 2) -> list[dict]:
     """Ofertas de Jooble Chile vía browser headless. ~25s por página SERP."""
-    from playwright.sync_api import sync_playwright
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        log.warning("jooble: playwright no instalado "
+                    "(pip install playwright && playwright install chromium && apt install xvfb) — saltado")
+        return []
 
     out: dict[str, dict] = {}
     now = datetime.now(timezone.utc)
-    with sync_playwright() as p:
+    try:
+        pw = sync_playwright().start()
+    except Exception as e:
+        log.warning("jooble: playwright no disponible: %s", e)
+        return []
+    with pw:
         browser = p.chromium.launch(
             headless=False,  # headed bajo Xvfb: el challenge CF resuelve
             args=["--no-sandbox", "--disable-blink-features=AutomationControlled"])
