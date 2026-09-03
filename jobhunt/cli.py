@@ -125,16 +125,18 @@ def cmd_run(cfg, notify: bool = True, on_phase=None) -> None:
         conn.commit()
 
         # IA complementaria para las NUEVAS (si IA_ENABLED) — llena modality/salary/
-        # seniority/flags al indexarse, no espera al batch nocturno
+        # seniority/flags al indexarse. TODAS las nuevas, sin tope: el usuario definió
+        # que si IA está activa, cada oferta indexada debe pasar por IA.
         if new_jobs and cfg.ia.enabled and cfg.ia.api_key:
-            phase("IA complementaria", f"{min(cfg.ia.batch_size, len(new_jobs))} nuevas", 0)
+            n_new = len(new_jobs)
+            phase("IA complementaria", f"{n_new} nuevas", 0)
             try:
                 from .enrich import run_ia_batch, profile_description
                 n_ia = run_ia_batch(conn, cfg, profile_description(cfg),
-                                    max_n=cfg.ia.batch_size,
+                                    max_n=None,
                                     groups={j["group_id"] for j in new_jobs})
                 log.info("IA complementaria: %d/%d ofertas nuevas enriquecidas",
-                         n_ia, len(new_jobs))
+                         n_ia, n_new)
             except Exception as e:
                 try:
                     conn.rollback()

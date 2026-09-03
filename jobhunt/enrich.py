@@ -335,7 +335,10 @@ def run_ia_batch(conn, cfg: Config, profile_desc: str, max_n: int | None = None,
             "WHERE active=1 AND ia_model='' AND length(description)>400 AND "
             "(modality='' OR salary='' OR description IS NULL) "
             "ORDER BY score DESC").fetchall()   # primero las de mejor score (las visibles)
-    pending = [dict(r) for r in rows][:max_n or cfg.ia.batch_size]
+    # max_n=None con groups = TODAS las ofertas del grupo (sin tope de batch);
+    # sin groups, el default sigue siendo cfg.ia.batch_size (batch nocturno controlado)
+    limit = max_n if (max_n is not None or groups) else cfg.ia.batch_size
+    pending = [dict(r) for r in rows][:limit] if limit else [dict(r) for r in rows]
     total = len(pending)
     done = 0
     for i, r in enumerate(pending, 1):
