@@ -107,6 +107,29 @@ def _chat_allowed(cfg: Config, chat_id) -> bool:
         return False
 
 
+def _tg_edit_or_send(cfg: Config, chat_id: int, message_id: int | None,
+                     body: dict) -> int | None:
+    """Edita el mensaje con body; si no existe (borrado por el usuario) manda uno nuevo.
+
+    Retorna el message_id vigente tras la operación (el nuevo si recreó).
+    """
+    if message_id:
+        try:
+            _tg_api(cfg, "editMessageText", {**body, "chat_id": chat_id,
+                                             "message_id": message_id})
+            return message_id
+        except Exception as exc:
+            # "message is not modified" = el mensaje existe, solo no cambió → NO recrear
+            if "not modified" in str(exc).lower():
+                return message_id
+            if "not found" in str(exc).lower() or "message to edit" in str(exc).lower():
+                log.info("mensaje vivo %s ya no existe (borrado) — recreando", message_id)
+            else:
+                log.warning("editMessageText falló (%.80s) — intentando recrear", str(exc))
+    resp = _tg_api(cfg, "sendMessage", {**body, "chat_id": chat_id})
+    return (resp or {}).get("result", {}).get("message_id")
+
+
 def _tg_api(cfg: Config, method: str, payload: dict, retries: int = 2) -> dict:
     cid = payload.get("chat_id")
     if cid is not None and not _chat_allowed(cfg, cid):
@@ -508,8 +531,7 @@ def _run_search_async(cfg: Config, chat_id: int):
             if page:
                 linea += f" · pág {page}"
             try:
-                _tg_api(cfg, "editMessageText", {
-                    "chat_id": chat_id, "message_id": msg_id,
+                msg_id = _tg_edit_or_send(cfg, chat_id, msg_id, {
                     "text": (f"🔍 <b>Búsqueda en curso</b> ({mins}m)\n{linea}"),
                     "parse_mode": "HTML"})
             except Exception:
@@ -909,13 +931,9 @@ def _mk_progress_cb(cfg: Config, chat_id: int):
         txt = (f"🧠 Batch IA — <code>{done}/{total}</code>\n"
                f"   {esc(title[:50])}")
         try:
-            if st["msg_id"]:
-                _tg_api(cfg, "editMessageText", {
-                    "chat_id": chat_id, "message_id": st["msg_id"],
-                    "text": txt, "parse_mode": "HTML"})
-            elif now - st["t"] >= 30:
-                r = _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML", "text": txt})
-                st["msg_id"] = r.get("result", {}).get("message_id")
+            if st["msg_id"] or now - st["t"] >= 30:
+                st["msg_id"] = _tg_edit_or_send(cfg, chat_id, st["msg_id"],
+                                                {"text": txt, "parse_mode": "HTML"})
             st["t"] = now
         except Exception:
             pass
@@ -1006,8 +1024,19 @@ def _refresh_anchor(cfg: Config, state: dict):
     }
     try:
         if state["anchor_id"]:
-            _tg_api(cfg, "editMessageText", {**body, "message_id": state["anchor_id"]})
-            log.info("ancla actualizada (%d ofertas)", len(state["offers"]))
+            try:
+                _tg_api(cfg, "editMessageText", {**body, "chat_id": cfg.telegram.chat_id,
+                                                 "message_id": state["anchor_id"]})
+                log.info("ancla actualizada (%d ofertas)", len(state["offers"]))
+            except Exception as exc:
+                # ancla borrada por el usuario → recrear (conserva el estado de página)
+                if "not modified" in str(exc).lower():
+                    log.info("ancla sin cambios (%d ofertas)", len(state["offers"]))
+                else:
+                    resp = _tg_api(cfg, "sendMessage", body)
+                    state["anchor_id"] = resp.get("result", {}).get("message_id")
+                    log.info("ancla recreada: message_id=%s (%d ofertas) — la anterior fue borrada",
+                             state["anchor_id"], len(state["offers"]))
         else:
             resp = _tg_api(cfg, "sendMessage", body)
             state["anchor_id"] = resp.get("result", {}).get("message_id")
