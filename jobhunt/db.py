@@ -66,6 +66,7 @@ def init_db(conn: sqlite3.Connection) -> None:
     cols = {r[1] for r in conn.execute("PRAGMA table_info(ofertas)")}
     for col, ddl in [
         ("ai_idiomas", "ALTER TABLE ofertas ADD COLUMN ai_idiomas TEXT DEFAULT ''"),
+        ("rol_categoria", "ALTER TABLE ofertas ADD COLUMN rol_categoria TEXT DEFAULT ''"),
     ]:
         if col not in cols:
             conn.execute(ddl)

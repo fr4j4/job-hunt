@@ -177,8 +177,8 @@ IA_SCHEMA = ('{"modalidad": "R"|"H"|"P"|"?", "salario_clp_mensual": numero|null,
              '"seniority_real": "junior"|"semi"|"senior"|"lead", '
              '"techs": ["Py","Java","AWS","React","Angular","K8s","Docker","SQL","Node","TS","NiFi","Spring"], '
              '"red_flags": ["..."], "green_flags": ["..."], "benefits": ["..."], '
-             '"idiomas": [{"idioma": "inglés|alemán|francés|portugués|chino|japonés|italiano|otro", '
-             '"nivel": "básico|intermedio|avanzado|nativo|fluido", "excluyente": true|false}], '
+             '"idiomas": [{"idioma": "inglés|alemán|francés|portugués|chino|japonés|italiano|otro", "nivel": "básico|intermedio|avanzado|nativo|fluido", "excluyente": true|false}], '
+             '"rol_categoria": "Full Stack"|"Backend"|"Frontend"|"Data"|"Mobile"|"AI/ML"|"Tech Lead"|"DevOps/Cloud"|"QA"|"Software"|"Seguridad"|"Ingeniería no-software"|"Analista/Empresa"|"Profesor/Formación"|"Soporte/TI"|"No-tech"|"Otro", '
              '"resumen": "max 120 chars", "fit_reason": "max 140 chars por qué conviene o no al perfil"}')
 
 
@@ -334,6 +334,11 @@ def run_ia_batch(conn, cfg: Config, profile_desc: str, max_n: int | None = None,
                 sets.append(f"ai_{field}=?")
                 params.append(str(parsed[field])[:300])
                 ia_fields.append(field)
+        # categoría de rol según IA (complementa el regex de market.py)
+        if parsed.get("rol_categoria"):
+            sets.append("rol_categoria=?")
+            params.append(str(parsed["rol_categoria"])[:40])
+            ia_fields.append("rol_categoria")
         # idiomas solicitados en la oferta (inglés y otros) — JSON [{idioma, nivel, excluyente}]
         if parsed.get("idiomas") and isinstance(parsed["idiomas"], list) and parsed["idiomas"]:
             idiomas_limpio = [

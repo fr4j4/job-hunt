@@ -131,9 +131,15 @@ def _agregar(con: sqlite3.Connection, cfg: Config) -> dict:
                 tech[t] += 1
     agg["techs"] = {k: [v, pct(v)] for k, v in tech.most_common(15)}
 
-    # categorías de rol por regex de título
+    # categorías de rol: IA primero (rol_categoria), regex como fallback
     cats: Counter = Counter()
+    n_ia_rol = 0
     for r in rows:
+        cat_ia = (r.get("rol_categoria") or "").strip()
+        if cat_ia and cat_ia != "Otro":
+            cats[cat_ia] += 1
+            n_ia_rol += 1
+            continue
         t = _norm(r["title"])
         matched = False
         for nombre, pat in ROL_CATEGORIAS:
@@ -142,8 +148,10 @@ def _agregar(con: sqlite3.Connection, cfg: Config) -> dict:
                 matched = True
                 break
         if not matched:
-            cats["Otro"] += 1
+            # sin regex ni IA → si la IA lo marcó Otro, agrupar ahí
+            cats[cat_ia if cat_ia else "Otro"] += 1
     agg["roles"] = {k: [v, pct(v)] for k, v in cats.most_common()}
+    agg["roles_via_ia"] = n_ia_rol
 
     # salarios
     sal = _extraer_salarios_clp(rows, cfg.report.max_salary_samples)
