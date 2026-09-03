@@ -6,11 +6,14 @@
 """
 from __future__ import annotations
 
+import sqlite3
+
 from .db import url_key, norm_title, norm_company, companies_match, similar
 
 
 def find_duplicate(conn, job: dict) -> str | None:
     """Retorna group_id del duplicado, o None si es nueva."""
+    conn.row_factory = sqlite3.Row
     # capa 1: URL con ID
     uk = url_key(job.get("url"))
     if uk:

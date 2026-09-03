@@ -33,9 +33,11 @@ def cmd_run(cfg, notify: bool = True) -> None:
         version_id = "env-" + datetime.now(timezone.utc).strftime("%Y%m%d")
         database.register_criteria_version(conn, version_id, cfg)
 
-        from .sources import linkedin, computrabajo, indeed, glassdoor
+        from .sources import linkedin, computrabajo, indeed, glassdoor, laborum
         s = cfg.search
         jobs = []
+        if cfg.sources.get("laborum", True):
+            jobs += laborum.jobs(s.queries_laborum, "perfil:")
         if cfg.sources.get("linkedin"):
             jobs += linkedin.fetch_jobs(s.queries_linkedin, "perfil:")
         if cfg.sources.get("computrabajo"):

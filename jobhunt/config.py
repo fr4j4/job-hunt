@@ -104,6 +104,7 @@ class Search:
     queries_computrabajo: list[str]
     queries_indeed: list[str]
     queries_glassdoor: list[str]
+    queries_laborum: list[str]
     sample_linkedin: list[str]
     sample_indeed: list[str]
     sample_computrabajo: list[str]
@@ -235,6 +236,7 @@ def load_config(env_file: Path | None = None) -> Config:
         queries_computrabajo=_env_list("QUERIES_COMPUTRABAJO"),
         queries_indeed=_env_list("QUERIES_INDEED"),
         queries_glassdoor=_env_list("QUERIES_GLASSDOOR"),
+        queries_laborum=_env_list("QUERIES_LABORUM", "python,desarrollador,full stack,backend,java"),
         sample_linkedin=_env_list("SAMPLE_QUERIES_LINKEDIN"),
         sample_indeed=_env_list("SAMPLE_QUERIES_INDEED"),
         sample_computrabajo=_env_list("SAMPLE_QUERIES_COMPUTRABAJO"),
@@ -242,6 +244,7 @@ def load_config(env_file: Path | None = None) -> Config:
         sample_rotation=_env_float("SAMPLE_ROTATION", 0.33),
     )
     sources = {
+        "laborum": _env_bool("ENABLE_LABORUM", True),
         "linkedin": _env_bool("ENABLE_LINKEDIN", True),
         "computrabajo": _env_bool("ENABLE_COMPUTRABAJO", True),
         "indeed": _env_bool("ENABLE_INDEED", True),
