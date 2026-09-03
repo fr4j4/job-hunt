@@ -1,83 +1,120 @@
-"""Jooble — fuente vía API REST oficial (regional cl.jooble.org).
+"""Jooble — fuente vía scraping headless (Playwright + Xvfb).
 
-Requiere JOOBLE_API_KEY en .env (gratuita: formulario en cl.jooble.org/api/about,
-llega por email en 1-2 días hábiles; 500 requests lifetime por key).
-Endpoint: POST https://cl.jooble.org/api/{api_key}
-Body: {"keywords": str, "location": str, "page": 1..N}
-Response: {"totalCount": N, "jobs": [{title, location, snippet, salary, source, link, company, updated, id}]}
+La API REST /api/{key} exige sesión de usuario logueado (403 "sólo usuarios
+registrados" con la key sola, incluso con curl-impersonate). El SERP en cambio
+renderiza server-side y el browser headless lo resuelve (challenge CF incluido).
+
+Selector validado: h2 a.job_card_link; el texto del contenedor padre trae
+empresa/ubicación/fecha/snippet. Paginación: /SearchResult?ukw=<query>&page=N.
+
+Dependencias: playwright (pip) + xvfb (apt). Lanzamiento headed bajo Xvfb
+(el challenge CF resuelve mejor que en headless puro).
 """
+import json
 import re
 import time
 from datetime import datetime, timedelta, timezone
-from html import unescape as _u
-
-import requests
 
 from ..logging_setup import get_logger
 
 log = get_logger(__name__)
 
-_UA = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                     "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-       "Content-Type": "application/json"}
+_UA = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+       "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+
+_EXTRACT_JS = """
+[...document.querySelectorAll('h2 a.job_card_link')].map(a => {
+  let el = a;
+  for (let i = 0; i < 5; i++) {
+    el = el.parentElement;
+    if (!el) break;
+    const t = el.innerText || '';
+    if ((t.match(/\\n/g) || []).length >= 3) {
+      return {titulo: a.innerText.trim(), url: a.href, texto: t.slice(0, 600)};
+    }
+  }
+  return {titulo: a.innerText.trim(), url: a.href, texto: ''};
+})
+"""
 
 
-def jobs(queries: list[str], api_key: str, found_by_prefix: str = "",
-         location: str = "Chile") -> list[dict]:
-    """Busca ofertas en Jooble Chile vía API oficial. Dedup por id."""
-    if not api_key:
-        log.warning("jooble: sin JOOBLE_API_KEY — fuente deshabilitada")
-        return []
+def _parse_card(texto: str) -> dict:
+    """Parsea 'Título\\nempresa/industriaUbicación, Región, Chile...Publicado el X...'"""
+    partes = [p.strip() for p in texto.split("\n") if p.strip() and p.strip() != "\xa0..."]
+    company = ""
+    # la empresa suele ser la 2a línea (a veces con industria pegada) o está en el snippet
+    # jooble SERP no muestra empresa: la línea 2 es industria+ubicación; no inventar company
+    company = ""
+    fecha = ""
+    mfecha = re.search(r"Publicado el (\d{1,2}) de (\w+)(?:,? (\d{4}))?", texto)
+    if mfecha:
+        meses = {"enero": 1, "febrero": 2, "marzo": 3, "abril": 4, "mayo": 5, "junio": 6,
+                 "julio": 7, "agosto": 8, "septiembre": 9, "octubre": 10,
+                 "noviembre": 11, "diciembre": 12}
+        mes = meses.get(mfecha.group(2).lower())
+        if mes:
+            anio = int(mfecha.group(3) or datetime.now(timezone.utc).year)
+            fecha = f"{anio}-{mes:02d}-{int(mfecha.group(1)):02d}"
+    # snippet: texto después del título
+    snippet = ""
+    msnip = re.search(r"\xa0\.\.\.(.{80,})", texto)
+    if msnip:
+        snippet = msnip.group(1)[:1500]
+    # salario en el texto de la card (formato $X.XXX.XXX o "sin sueldo")
+    salary = ""
+    msal = re.search(r"\$\s?([\d.]{5,12})", texto)
+    if msal:
+        salary = f"CLP {msal.group(1)}"
+    return {"company": "", "date": fecha, "snippet": snippet, "salary": salary}
+
+
+def jobs(queries: list[str], found_by_prefix: str = "", max_pages: int = 2) -> list[dict]:
+    """Ofertas de Jooble Chile vía browser headless. ~25s por página SERP."""
+    from playwright.sync_api import sync_playwright
+
     out: dict[str, dict] = {}
     now = datetime.now(timezone.utc)
-    for q in queries:
-        page = 1
-        while page <= 2:                     # 2 páginas × 20 = 40 por query (ahorra quota)
-            try:
-                r = requests.post(f"https://cl.jooble.org/api/{api_key}",
-                                  json={"keywords": q, "location": location, "page": page},
-                                  headers=_UA, timeout=25)
-                if r.status_code != 200:
-                    log.warning("jooble %s p%s: HTTP %s — %s", q[:25], page, r.status_code,
-                                r.text[:80])
-                    break
-                d = r.json()
-            except Exception as e:
-                log.warning("jooble fetch falló (%s): %s", q[:30], e)
-                break
-            for a in d.get("jobs") or []:
-                jid = str(a.get("id") or "")
-                if not jid or jid in out:
-                    continue
-                # updated: "2026-09-01T12:33:02.0387335+00:00" o similar
-                fecha = ""
+    with sync_playwright() as p:
+        browser = p.chromium.launch(
+            headless=False,  # headed bajo Xvfb: el challenge CF resuelve
+            args=["--no-sandbox", "--disable-blink-features=AutomationControlled"])
+        ctx = browser.new_context(
+            user_agent=_UA, locale="es-CL", viewport={"width": 1366, "height": 900})
+        page = ctx.new_page()
+        for q in queries:
+            for pag in range(1, max_pages + 1):
+                url = (f"https://cl.jooble.org/SearchResult?ukw={q}"
+                       + (f"&page={pag}" if pag > 1 else ""))
                 try:
-                    fecha = (a.get("updated") or "")[:19].replace("T", " ")
-                    fecha = datetime.fromisoformat(fecha).date().isoformat()
-                except Exception:
-                    fecha = now.date().isoformat()
-                desc = re.sub(r"\s+", " ", _u(re.sub(r"<[^>]+>", " ", a.get("snippet") or ""))).strip()[:2000]
-                out[jid] = {
-                    "title": _clean(a.get("title") or "")[:150],
-                    "company": _clean(a.get("company") or ""),
-                    "location": _clean(a.get("location") or ""),
-                    "date": fecha,
-                    "url": a.get("link") or "",
-                    "source": f"jooble:{q}",
-                    "found_by": f"{found_by_prefix}{q}",
-                    "salary": _clean(a.get("salary") or ""),
-                    "modality": "",
-                    "_desc": desc,
-                    "description_source": "jooble-api",
-                }
-            total = d.get("totalCount") or 0
-            if page * 20 >= total or not d.get("jobs"):
-                break
-            page += 1
-            time.sleep(2)
-        time.sleep(3)
+                    page.goto(url, wait_until="domcontentloaded", timeout=60000)
+                    page.wait_for_timeout(7000)
+                except Exception as e:
+                    log.warning("jooble SERP falló (%s p%s): %s", q[:30], pag, e)
+                    break
+                cards = page.evaluate(_EXTRACT_JS)
+                if not cards:
+                    break
+                fb = f"{found_by_prefix}{q}"
+                for c in cards:
+                    parsed = _parse_card(c.get("texto", ""))
+                    # dedup por url de redirección (el /away/<id> es estable por oferta)
+                    m = re.search(r"/away/(-?\d+)", c.get("url", ""))
+                    uid = m.group(1) if m else c.get("url", "")[:120]
+                    if not uid or uid in out:
+                        continue
+                    out[uid] = {
+                        "title": (c.get("titulo") or "")[:150],
+                        "company": parsed["company"],
+                        "location": "",
+                        "date": parsed["date"] or now.date().isoformat(),
+                        "url": c.get("url") or "",
+                        "source": f"jooble:{q}",
+                        "found_by": fb,
+                        "salary": parsed.get("salary", ""),
+                        "modality": "",
+                        "_desc": parsed["snippet"],
+                        "description_source": "jooble-serp",
+                    }
+                time.sleep(3)
+        browser.close()
     return list(out.values())
-
-
-def _clean(s: str) -> str:
-    return re.sub(r"\s+", " ", _u(s or "")).strip()

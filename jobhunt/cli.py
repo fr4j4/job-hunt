@@ -37,10 +37,12 @@ def cmd_run(cfg, notify: bool = True) -> None:
                               jooble, accenture)
         s = cfg.search
         jobs = []
-        if cfg.sources.get("jooble") and cfg.jooble_api_key:
-            jobs += jooble.jobs(s.queries_jooble, cfg.jooble_api_key, "perfil:")
-        elif cfg.sources.get("jooble"):
-            log.warning("jooble habilitado pero sin JOOBLE_API_KEY — saltado")
+        if cfg.sources.get("jooble"):
+            # jooble usa browser headless bajo xvfb (la API REST exige login de usuario)
+            try:
+                jobs += jooble.jobs(s.queries_jooble, "perfil:")
+            except Exception as e:
+                log.warning("jooble falló (continúa el barrido): %s", e)
         if cfg.sources.get("accenture", True):
             jobs += accenture.jobs(s.queries_accenture, "perfil:")
         if cfg.sources.get("laborum", True):
