@@ -106,6 +106,18 @@ def jobs(feeds: list[str], found_by_prefix: str = "", on_feed=None) -> list[dict
                 on_feed(fname, len(offers))
             except Exception:
                 pass
+        # feeds dormidos: last_access_offer viejo = ofertas cerradas (el feed no se refresca)
+        from datetime import datetime as _dt
+        laos = [str(a.get("last_access_offer") or "") for a in offers if a.get("last_access_offer")]
+        if laos:
+            try:
+                freshest = max(_dt.fromisoformat(x) for x in laos if x[:4].isdigit())
+                if (_dt.now() - freshest).days > 45:
+                    log.warning("aira %s: feed dormido (último acceso %s) — skip", fname, freshest.date())
+                    time.sleep(1)
+                    continue
+            except ValueError:
+                pass
         for a in offers:
             j = _parse_offer(a, feed)
             if not j:
