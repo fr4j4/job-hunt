@@ -177,6 +177,8 @@ IA_SCHEMA = ('{"modalidad": "R"|"H"|"P"|"?", "salario_clp_mensual": numero|null,
              '"seniority_real": "junior"|"semi"|"senior"|"lead", '
              '"techs": ["Py","Java","AWS","React","Angular","K8s","Docker","SQL","Node","TS","NiFi","Spring"], '
              '"red_flags": ["..."], "green_flags": ["..."], "benefits": ["..."], '
+             '"idiomas": [{"idioma": "inglés|alemán|francés|portugués|chino|japonés|italiano|otro", '
+             '"nivel": "básico|intermedio|avanzado|nativo|fluido", "excluyente": true|false}], '
              '"resumen": "max 120 chars", "fit_reason": "max 140 chars por qué conviene o no al perfil"}')
 
 
@@ -332,6 +334,18 @@ def run_ia_batch(conn, cfg: Config, profile_desc: str, max_n: int | None = None,
                 sets.append(f"ai_{field}=?")
                 params.append(str(parsed[field])[:300])
                 ia_fields.append(field)
+        # idiomas solicitados en la oferta (inglés y otros) — JSON [{idioma, nivel, excluyente}]
+        if parsed.get("idiomas") and isinstance(parsed["idiomas"], list) and parsed["idiomas"]:
+            idiomas_limpio = [
+                {"idioma": str(i.get("idioma", ""))[:20].lower(),
+                 "nivel": str(i.get("nivel", ""))[:20].lower(),
+                 "excluyente": bool(i.get("excluyente"))}
+                for i in parsed["idiomas"] if isinstance(i, dict) and i.get("idioma")
+            ]
+            if idiomas_limpio:
+                sets.append("ai_idiomas=?")
+                params.append(json.dumps(idiomas_limpio, ensure_ascii=False)[:400])
+                ia_fields.append("idiomas")
         for field in ("red_flags", "green_flags", "benefits"):
             if parsed.get(field):
                 sets.append(f"ai_{field}=?")

@@ -137,6 +137,39 @@ def salary_tag(j) -> str:
     return f" 💵${int(val)}"
 
 
+def lang_tag(j) -> str:
+    """' 🗣ENreq' / ' 🗣ENint' — idiomas pedidos por la oferta (desde ai_idiomas).
+
+    Prioridad: idiomas excluyentes primero. Abrevia: EN/AL/FR/PT/CN/JP/IT + ! (excluyente)
+    o nivel inicial. Máx 2 idiomas para no saturar la línea.
+    """
+    import json as _json
+    raw = (j.get("ai_idiomas") or "").strip()
+    if not raw:
+        return ""
+    try:
+        idiomas = _json.loads(raw)
+    except Exception:
+        return ""
+    if not isinstance(idiomas, list):
+        return ""
+    ABBR = {"inglés": "EN", "ingles": "EN", "alemán": "AL", "aleman": "AL", "german": "AL",
+            "francés": "FR", "frances": "FR", "portugués": "PT", "portugues": "PT",
+            "chino": "CN", "mandarín": "CN", "japonés": "JP", "italiano": "IT"}
+    out = []
+    for i in idiomas[:2]:
+        if not isinstance(i, dict):
+            continue
+        ab = ABBR.get((i.get("idioma") or "").lower().strip())
+        if not ab:
+            continue
+        flag = "!" if i.get("excluyente") else ""
+        out.append(f"{ab}{flag}")
+    if not out:
+        return ""
+    return " 🗣" + "/".join(out)
+
+
 def compact_label(j, cap: int = 64) -> str:
     """Botón compacto ≤cap chars:
     emoji+score+ 💵+[Mod][Rol][Techs][Edad]+ empresa · ciudad
@@ -249,7 +282,7 @@ def table_block(offers: list[dict], links: bool = True) -> str:
     lines = []
     # header: mismo emoji que las filas; 3 espacios calzan con el ancho real
     # de "⭐ 98%" de los datos (pct:>3 → 1 espacio + 2 dígitos) — delta 0 medido
-    lines.append("⭐<code>   %│  $$$│M│cargo       │exp │techs       │ant│empresa │IA</code>")
+    lines.append("⭐<code>   %│  $$$│M│cargo       │exp │idi│techs       │ant│empresa │IA</code>")
     for j in offers:
         pct = int(j.get("score") or 0)
         emoji = score_emoji(pct)
@@ -278,8 +311,25 @@ def table_block(offers: list[dict], links: bool = True) -> str:
         rol = _role_short(j)[:12].ljust(12)
         exp = {"lead": "Lead", "senior": "Sr", "semi": "sSr", "junior": "Jr"}.get(
             (j.get("seniority_real") or "").strip().lower(), "   ")[:4].ljust(4)
+        # idiomas pedidos: EN!/PT en 3 chars (vacío = sin dato o sin idiomas)
+        idi = ""
+        try:
+            import json as _j
+            lst = _j.loads(j.get("ai_idiomas") or "[]")
+            ABBR = {"inglés": "EN", "ingles": "EN", "alemán": "AL", "aleman": "AL",
+                    "francés": "FR", "frances": "FR", "portugués": "PT", "portugues": "PT",
+                    "chino": "CN", "mandarín": "CN", "japonés": "JP", "italiano": "IT"}
+            if isinstance(lst, list) and lst:
+                primero = lst[0]
+                if isinstance(primero, dict):
+                    ab = ABBR.get((primero.get("idioma") or "").lower().strip())
+                    if ab:
+                        idi = (ab + ("!" if primero.get("excluyente") else "")).ljust(3)
+        except Exception:
+            pass
+        idi = idi.ljust(3)
         ia = "*" if j.get("ia_model") else " "
-        row = f"{emoji}{pct:>3}%│{sal:>5}│{mod}│{rol}│{exp}│{techs}│{age}│{co}│{ia} "
+        row = f"{emoji}{pct:>3}%│{sal:>5}│{mod}│{rol}│{exp}│{idi}│{techs}│{age}│{co}│{ia} "
         url = _attr_esc(j.get("url") or "")
         link = f' <a href="{url}">🔗</a>' if links and url else ""
         lines.append(f"<code>{row}</code>{link}")

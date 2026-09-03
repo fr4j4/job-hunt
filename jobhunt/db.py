@@ -62,6 +62,13 @@ def init_db(conn: sqlite3.Connection) -> None:
         occurrences INTEGER DEFAULT 1,
         active      INTEGER DEFAULT 1
     )""")
+    # migraciones ligeras: columnas añadidas post-v1
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(ofertas)")}
+    for col, ddl in [
+        ("ai_idiomas", "ALTER TABLE ofertas ADD COLUMN ai_idiomas TEXT DEFAULT ''"),
+    ]:
+        if col not in cols:
+            conn.execute(ddl)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_ofertas_score ON ofertas(score)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_ofertas_active ON ofertas(active)")
     conn.execute("""CREATE TABLE IF NOT EXISTS score_versions (
