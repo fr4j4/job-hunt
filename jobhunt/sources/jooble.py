@@ -90,40 +90,46 @@ def jobs(queries: list[str], found_by_prefix: str = "", max_pages: int = 2) -> l
             user_agent=_UA, locale="es-CL", viewport={"width": 1366, "height": 900})
         page = ctx.new_page()
         for q in queries:
-            for pag in range(1, max_pages + 1):
-                url = (f"https://cl.jooble.org/SearchResult?ukw={q}"
-                       + (f"&page={pag}" if pag > 1 else ""))
-                try:
-                    page.goto(url, wait_until="domcontentloaded", timeout=60000)
-                    page.wait_for_timeout(7000)
-                except Exception as e:
-                    log.warning("jooble SERP falló (%s p%s): %s", q[:30], pag, e)
+            try:
+                page.goto(f"https://cl.jooble.org/SearchResult?ukw={q}",
+                          wait_until="domcontentloaded", timeout=60000)
+                page.wait_for_timeout(7000)
+            except Exception as e:
+                log.warning("jooble SERP falló (%s): %s", q[:30], e)
+                continue
+            # paginación por SCROLL infinito (el &page=N de la URL es cosmético):
+            # cada scroll al fondo carga +20, techo observado ~100
+            prev = 0
+            for _ in range(max_pages * 2):
+                page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                page.wait_for_timeout(2500)
+                n = len(page.evaluate("[...document.querySelectorAll('h2 a.job_card_link')]"))
+                if n == prev:
                     break
-                cards = page.evaluate(_EXTRACT_JS)
-                if not cards:
-                    break
-                fb = f"{found_by_prefix}{q}"
-                for c in cards:
-                    parsed = _parse_card(c.get("texto", ""))
-                    # dedup por url de redirección (el /away/<id> es estable por oferta)
-                    m = re.search(r"/away/(-?\d+)", c.get("url", ""))
-                    uid = m.group(1) if m else c.get("url", "")[:120]
-                    if not uid or uid in out:
-                        continue
-                    out[uid] = {
-                        "title": (c.get("titulo") or "")[:150],
-                        "company": parsed["company"],
-                        "location": "",
-                        "date": parsed["date"] or now.date().isoformat(),
-                        "url": c.get("url") or "",
-                        "source": f"jooble:{q}",
-                        "found_by": fb,
-                        "salary": parsed.get("salary", ""),
-                        "modality": "",
-                        "_desc": parsed["snippet"],
-                        "description_source": "jooble-serp",
-                    }
-                time.sleep(3)
+                prev = n
+            cards = page.evaluate(_EXTRACT_JS)
+            fb = f"{found_by_prefix}{q}"
+            for c in cards:
+                parsed = _parse_card(c.get("texto", ""))
+                # dedup por url de redirección (el /away/<id> es estable por oferta)
+                m = re.search(r"/away/(-?\d+)", c.get("url", ""))
+                uid = m.group(1) if m else c.get("url", "")[:120]
+                if not uid or uid in out:
+                    continue
+                out[uid] = {
+                    "title": (c.get("titulo") or "")[:150],
+                    "company": parsed["company"],
+                    "location": "",
+                    "date": parsed["date"] or now.date().isoformat(),
+                    "url": c.get("url") or "",
+                    "source": f"jooble:{q}",
+                    "found_by": fb,
+                    "salary": parsed.get("salary", ""),
+                    "modality": "",
+                    "_desc": parsed["snippet"],
+                    "description_source": "jooble-serp",
+                }
+            time.sleep(3)
     except Exception as e:
         log.warning("jooble: error en scraping: %s", e)
     finally:

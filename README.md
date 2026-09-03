@@ -50,3 +50,16 @@ La API REST de Jooble exige sesión de usuario, así que usa Playwright + Xvfb:
 
 El barrido debe correr con `xvfb-run` para Jooble (o el daemon detecta Xvfb
 y lanza headed automáticamente). Sin playwright la fuente se salta con warning.
+
+## Paginación — límites verificados (sep 2026)
+
+| Fuente | Páginas | Límite |
+|---|---|---|
+| Laborum | 3 × 3 modalidades | API real (corta por `total`) |
+| Accenture | 2 | API pública |
+| Jooble | scroll infinito (~100) | requiere Playwright+xvfb; `&page=N` es cosmético |
+| LinkedIn | 1 (guest, últimos 7 días) | paginar dispara rate-limit |
+| Indeed | 1 (20/query) | GraphQL móvil sin cursor/offset (introspección off); web tras Security Check |
+| Glassdoor | 1 (20/query) | `pageNumber` y `paginationCursors` ignorados por el API en búsquedas COUNTRY |
+
+Compensación en fuentes de 20/query: más queries distintas en `QUERIES_*`/`SAMPLE_*`.
