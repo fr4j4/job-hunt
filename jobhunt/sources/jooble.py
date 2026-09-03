@@ -79,13 +79,11 @@ def jobs(queries: list[str], found_by_prefix: str = "", max_pages: int = 2) -> l
 
     out: dict[str, dict] = {}
     now = datetime.now(timezone.utc)
+    pw = None
+    browser = None
     try:
         pw = sync_playwright().start()
-    except Exception as e:
-        log.warning("jooble: playwright no disponible: %s", e)
-        return []
-    with pw:
-        browser = p.chromium.launch(
+        browser = pw.chromium.launch(
             headless=False,  # headed bajo Xvfb: el challenge CF resuelve
             args=["--no-sandbox", "--disable-blink-features=AutomationControlled"])
         ctx = browser.new_context(
@@ -126,5 +124,17 @@ def jobs(queries: list[str], found_by_prefix: str = "", max_pages: int = 2) -> l
                         "description_source": "jooble-serp",
                     }
                 time.sleep(3)
-        browser.close()
+    except Exception as e:
+        log.warning("jooble: error en scraping: %s", e)
+    finally:
+        if browser:
+            try:
+                browser.close()
+            except Exception:
+                pass
+        if pw:
+            try:
+                pw.stop()
+            except Exception:
+                pass
     return list(out.values())
