@@ -163,6 +163,13 @@ def cmd_ia(conn_unused=None) -> None:
     from .enrich import run_ia_batch, profile_description
     done = run_ia_batch(conn, cfg, profile_description(cfg))
     print(f"IA enriqueció: {done} ofertas")
+    # re-score con los datos nuevos de IA (salary/modality/seniority cambian el score)
+    from .scoring import compute_score
+    version_id = database.current_version(conn) or (
+        "env-" + datetime.now(timezone.utc).strftime("%Y%m%d%H%M"))
+    database.register_criteria_version(conn, version_id, cfg)
+    rescored = database.rescore_all(conn, compute_score, version_id, cfg)
+    print(f"rescore: {rescored} ofertas → versión {version_id}")
 
 
 def cmd_report(cfg) -> None:

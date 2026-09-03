@@ -631,11 +631,25 @@ def _ia_batch_async(cfg: Config, chat_id: int | None):
         except Exception:
             cola_fin = None
         cola_txt = f" · quedan {cola_fin} en cola" if cola_fin is not None else ""
+        # re-score con los datos nuevos de IA (salary/modality/seniority cambian el score)
+        rescored = 0
+        try:
+            conn3 = database.connect(cfg)
+            try:
+                from .scoring import compute_score
+                version_id = database.current_version(conn3) or (
+                    "env-" + datetime.now(timezone.utc).strftime("%Y%m%d%H%M"))
+                database.register_criteria_version(conn3, version_id, cfg)
+                rescored = database.rescore_all(conn3, compute_score, version_id, cfg)
+            finally:
+                conn3.close()
+        except Exception as e:
+            log.warning("rescore post-IA falló (batch OK): %s", e)
         if chat_id:
             _tg_api(cfg, "sendMessage", {
                 "chat_id": chat_id, "parse_mode": "HTML",
-                "text": f"🧠 <b>Batch IA terminado</b> — {done} ofertas enriquecidas{cola_txt} · {dur // 60}m{dur % 60:02d}s"})
-        log.info("batch IA OK: %d ofertas (%ds)", done, dur)
+                "text": f"🧠 <b>Batch IA terminado</b> — {done} ofertas enriquecidas{cola_txt} · rescore: {rescored} · {dur // 60}m{dur % 60:02d}s"})
+        log.info("batch IA OK: %d ofertas, rescore %d (%ds)", done, rescored, dur)
     except Exception as exc:
         _IA_STATE["running"] = False
         log.error("batch IA falló: %s", exc)
