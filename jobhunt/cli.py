@@ -33,9 +33,13 @@ def cmd_run(cfg, notify: bool = True) -> None:
         version_id = "env-" + datetime.now(timezone.utc).strftime("%Y%m%d")
         database.register_criteria_version(conn, version_id, cfg)
 
-        from .sources import linkedin, computrabajo, indeed, glassdoor, laborum
+        from .sources import linkedin, computrabajo, indeed, glassdoor, laborum, jooble
         s = cfg.search
         jobs = []
+        if cfg.sources.get("jooble") and cfg.jooble_api_key:
+            jobs += jooble.jobs(s.queries_jooble, cfg.jooble_api_key, "perfil:")
+        elif cfg.sources.get("jooble"):
+            log.warning("jooble habilitado pero sin JOOBLE_API_KEY — saltado")
         if cfg.sources.get("laborum", True):
             jobs += laborum.jobs(s.queries_laborum, "perfil:")
         if cfg.sources.get("linkedin"):

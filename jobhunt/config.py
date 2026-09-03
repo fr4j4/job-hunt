@@ -105,6 +105,7 @@ class Search:
     queries_indeed: list[str]
     queries_glassdoor: list[str]
     queries_laborum: list[str]
+    queries_jooble: list[str]
     sample_linkedin: list[str]
     sample_indeed: list[str]
     sample_computrabajo: list[str]
@@ -169,6 +170,7 @@ class Config:
     daemon: Daemon
     alerts: Alerts
     report: ReportCfg
+    jooble_api_key: str = ""
     project_root: Path = PROJECT_ROOT
     data_dir: Path = field(default_factory=lambda: PROJECT_ROOT / "data")
 
@@ -237,6 +239,7 @@ def load_config(env_file: Path | None = None) -> Config:
         queries_indeed=_env_list("QUERIES_INDEED"),
         queries_glassdoor=_env_list("QUERIES_GLASSDOOR"),
         queries_laborum=_env_list("QUERIES_LABORUM", "python,desarrollador,full stack,backend,java"),
+        queries_jooble=_env_list("QUERIES_JOOBLE", "python,desarrollador full stack,backend"),
         sample_linkedin=_env_list("SAMPLE_QUERIES_LINKEDIN"),
         sample_indeed=_env_list("SAMPLE_QUERIES_INDEED"),
         sample_computrabajo=_env_list("SAMPLE_QUERIES_COMPUTRABAJO"),
@@ -244,6 +247,7 @@ def load_config(env_file: Path | None = None) -> Config:
         sample_rotation=_env_float("SAMPLE_ROTATION", 0.33),
     )
     sources = {
+        "jooble": _env_bool("ENABLE_JOOBLE", True),
         "laborum": _env_bool("ENABLE_LABORUM", True),
         "linkedin": _env_bool("ENABLE_LINKEDIN", True),
         "computrabajo": _env_bool("ENABLE_COMPUTRABAJO", True),
@@ -251,6 +255,7 @@ def load_config(env_file: Path | None = None) -> Config:
         "glassdoor": _env_bool("ENABLE_GLASSDOOR", True),
     }
     premium_hours = [int(h) for h in _env_list("PREMIUM_TICK_HOURS_UTC", "00,12")]
+    jooble_key = _env("JOOBLE_API_KEY")
     ia_key = _env("IA_API_KEY")
     # IA_API_KEY puede ser la key directa O el nombre de otra variable de entorno
     if not ia_key or ia_key.startswith("your_"):
@@ -302,6 +307,7 @@ def load_config(env_file: Path | None = None) -> Config:
         alerts=alerts,
         daemon=daemon,
         report=report,
+        jooble_api_key=jooble_key,
     )
     cfg.data_dir.mkdir(exist_ok=True)
     return cfg
