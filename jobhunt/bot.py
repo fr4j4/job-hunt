@@ -149,7 +149,13 @@ def _tg_api(cfg: Config, method: str, payload: dict, retries: int = 2) -> dict:
             if exc.code in (403, 429) and attempt < retries:
                 time.sleep(1.5 * (attempt + 1))
                 continue
-            raise
+            # incluir el body de Telegram en el error: la causa real vive ahí
+            # ("message is not modified", "message ... not found", etc.)
+            try:
+                detail = exc.read().decode()[:200]
+            except Exception:
+                detail = ""
+            raise RuntimeError(f"{exc} {detail}".strip()) from None
     raise last_exc or RuntimeError("unreachable")
 
 
