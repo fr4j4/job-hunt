@@ -56,10 +56,11 @@ def cmd_run(cfg, notify: bool = True) -> None:
 
         log.info("barrido iniciado: %d ofertas crudas (mode=%s)", len(jobs), s.mode)
 
-        # dedup + index + score al indexar
+        # dedup + index + score al indexar (commit cada 25 filas: el lock de
+        # SQLite se retiene <1s por vez — batches IA / comandos no quedan fuera)
         seen_urls, new_jobs, total_seen = set(), [], 0
         now = _now()
-        for j in jobs:
+        for n, j in enumerate(jobs, 1):
             from .db import url_key
             uk = url_key(j.get("url"))
             if uk and uk in seen_urls:
@@ -75,6 +76,8 @@ def cmd_run(cfg, notify: bool = True) -> None:
             total_seen += 1
             if is_new:
                 new_jobs.append({**j, "score": score, "group_id": gid})
+            if n % 25 == 0:
+                conn.commit()
         conn.execute("""INSERT INTO scan_log (ts, total_seen, new_count) VALUES (?,?,?)""",
                      (now, total_seen, len(new_jobs)))
         conn.commit()

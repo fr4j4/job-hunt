@@ -16,7 +16,8 @@ load_dotenv(PROJECT_ROOT := PROJECT_ROOT)
 
 
 def _env(key: str, default: str = "") -> str:
-    return os.environ.get(key, "").strip()
+    val = os.environ.get(key, "")
+    return val.strip() if val.strip() else default
 
 
 def _env_int(key: str, default: int) -> int:
@@ -131,8 +132,9 @@ class Alerts:
 
 @dataclass
 class Daemon:
-    interval_min: int = 240        # minutos entre barridos del cron interno
+    interval_min: int = 240        # (legacy) minutos entre barridos — reemplazado por sweep_hours
     page_size: int = 5             # ofertas por página del digest paginado
+    sweep_hours_utc: list[int] = field(default_factory=lambda: [0, 4, 8, 12, 16, 20])
 
 
 
@@ -269,6 +271,7 @@ def load_config(env_file: Path | None = None) -> Config:
     daemon = Daemon(
         interval_min=_env_int("DAEMON_INTERVAL_MIN", 240),
         page_size=_env_int("TELEGRAM_DIGEST_PAGE_SIZE", 5),
+        sweep_hours_utc=[int(h) for h in _env_list("DAEMON_SWEEP_HOURS_UTC", "0,4,8,12,16,20")],
     )
     cfg = Config(
         profile=profile,

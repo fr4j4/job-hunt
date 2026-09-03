@@ -187,33 +187,108 @@ def _attr_esc(u: str) -> str:
     return (u or "").replace("&", "&amp;").replace('"', "%22")
 
 
-def table_block(offers: list[dict], links: bool = True) -> str:
-    """Lista de ofertas en bloque <code> — monoespaciado, columnas REALMENTE alineadas,
-    con link-emoji 🔗 al final de cada fila (clickeable, parece botón)."""
-    def pad(s: str, n: int, right: bool = False) -> str:
-        return (s[:n].rjust(n) if right else s[:n].ljust(n))
+def _mod_short(j: dict) -> str:
+    """Modalidad corta [R]/[H]/[P]/[?] para vista tabular."""
+    import unicodedata as _ud
+    m_raw = (j.get("modality") or "").lower()
+    m_norm = "".join(c for c in _ud.normalize("NFD", m_raw) if _ud.category(c) != "Mn")
+    if "remot" in m_norm or "remote" in m_norm or "telecommute" in m_norm or j.get("remote_official") == 1:
+        return "[R]"
+    if "hibrid" in m_norm or "hybrid" in m_norm:
+        return "[H]"
+    if "presencial" in m_norm or "on-site" in m_norm:
+        return "[P]"
+    return "[?]"
 
+
+def _role_short(j: dict) -> str:
+    """Cargo corto de ancho fijo ≤8: TechLead Full Back Front Data IA Mob Ops QA Dev."""
+    t = (j.get("title") or "").lower()
+    for tag, pat in [("TechLead", r"tech lead|\bcto\b|lider técnico|líder técnico"),
+                    ("Data", r"\bdata\b|datos|etl|databricks|snowflake|analytics"),
+                    ("IA", r"\bia\b|\bai\b|machine learning|\bml\b|llm|generativa"),
+                    ("Mobile", r"mobile|android|ios\b|flutter|react native"),
+                    ("DevOps", r"devops|sre\b|infraestructura|platform engineer"),
+                    ("QA", r"\bqa\b|testing|tester|calidad"),
+                    ("Front", r"frontend|front-end|front end|vue\b|svelte"),
+                    ("Back", r"backend|back-end|back end|\.net|java developer|python developer|node"),
+                    ("Full", r"full ?stack|fullstack|software engineer|desarrollador|developer|programador|ingeniero")]:
+        if re.search(pat, t):
+            return tag
+    return "Dev"
+
+
+def _techs_short(j: dict, width: int = 8) -> str:
+    """Techs abreviadas [Py·Jav]; si excede el ancho deja solo la primera."""
+    found = []
+    tl = (j.get("title") or "").lower() + " " + (j.get("techs") or "").lower()
+    for k, abbr in [("python", "Py"), ("java", "Jav"), ("angular", "Ang"), ("react", "Rct"),
+                    ("aws", "AWS"), ("node", "Node"), ("typescript", "TS"), (".net", ".NET"),
+                    ("sql", "SQL"), ("kubernetes", "K8s"), ("docker", "Dkr"), ("golang", "Go"),
+                    ("vue", "Vue"), ("spring", "Spr")]:
+        if k in tl and abbr.lower() not in [f.lower() for f in found]:
+            found.append(abbr)
+        if len(found) == 2:
+            break
+    if not found:
+        return " " * width
+    s = "[" + "·".join(found) + "]"
+    if len(s) > width:
+        s = f"[{found[0]}]"
+    return s.ljust(width)
+
+
+def _age_short(date_posted: str) -> str:
+    """Edad sin emoji (para vista tabular — 📅 no renderiza en todos los clientes)."""
+    return age_tag(date_posted).lstrip("📅")
+
+
+def table_block(offers: list[dict], links: bool = True) -> str:
+    """Vista tabular con header: columnas fijas separadas por │, blanco si falta.
+    score│sueldo│M│cargo│exp│techs│edad│empresa│IA — el 🔗 final abre la oferta."""
     lines = []
-    for i, j in enumerate(offers, 1):
-        title = esc((j.get("title") or "?").strip())
-        pct = f"{int(j.get('score') or 0)}%"
-        sal = salary_tag(j).replace("💵", "").strip() or "—"
-        m_raw = (j.get("modality") or "").lower()
-        mod = {"remoto": "R", "híbrido": "H", "presencial": "P"}.get(m_raw, "?")
-        age = age_tag(j.get("date_posted") or "").lstrip("📅")
-        if age == "ahora":
-            age = "0h"
+    # header: mismo emoji que las filas; 3 espacios calzan con el ancho real
+    # de "⭐ 98%" de los datos (pct:>3 → 1 espacio + 2 dígitos) — delta 0 medido
+    lines.append("⭐<code>   %│  $$$│M│cargo       │exp │techs       │ant│empresa │IA</code>")
+    for j in offers:
+        pct = int(j.get("score") or 0)
+        emoji = score_emoji(pct)
+        sal = salary_tag(j).replace("💵", "").replace("USD", "$").strip()[:5]
+        mod = _mod_short(j).strip("[]")
+        if mod == "?":
+            mod = " "
+        tl = ((j.get("title") or "") + " " + (j.get("techs") or "")).lower()
+        found = []
+        for k, ab in [("python", "Py"), ("java", "Jav"), ("angular", "Ang"), ("react", "Rct"),
+                      ("aws", "AWS"), ("node", "Node"), ("typescript", "TS"), ("kubernetes", "K8s"),
+                      ("docker", "Dkr"), ("golang", "Go"), ("vue", "Vue"), ("spring", "Spr"),
+                      (".net", ".NET"), ("sql", "SQL")]:
+            if k in tl and ab.lower() not in [f.lower() for f in found]:
+                found.append(ab)
+            if len(found) == 3:
+                break
+        joined = "-".join(found)
+        while joined and len(joined) > 11:
+            found.pop()
+            joined = "-".join(found)
+        techs = joined.ljust(12) if joined else " " * 12
+        raw_age = _age_short(j.get("date_posted") or "")
+        age = "   " if "?" in raw_age else raw_age.replace("ahora", "0h")[:3].rjust(3)
+        co = (j.get("company") or "").strip()[:8].ljust(8)
+        rol = _role_short(j)[:12].ljust(12)
+        exp = {"lead": "Lead", "senior": "Sr", "semi": "sSr", "junior": "Jr"}.get(
+            (j.get("seniority_real") or "").strip().lower(), "   ")[:4].ljust(4)
         ia = "*" if j.get("ia_model") else " "
+        row = f"{emoji}{pct:>3}%│{sal:>5}│{mod}│{rol}│{exp}│{techs}│{age}│{co}│{ia} "
         url = _attr_esc(j.get("url") or "")
         link = f' <a href="{url}">🔗</a>' if links and url else ""
-        # 35 chars visuales + link — cabe en móvil sin soft-wrap
-        lines.append(f"{i:>2} {pad(title, 16)} {pad(pct, 3, True)} {pad(sal, 5, True)} {mod} {pad(age, 3, True)}{ia}{link}")
-    return "<code>" + "\n".join(lines) + "</code>"
+        lines.append(f"<code>{row}</code>{link}")
+    return "\n".join(lines)
 
 
 def build_digest_text(offers: list[dict], cfg) -> str:
-    """Texto = contexto: mejor match con detalle + tabla alineada de la página.
-    El botón N abre la oferta N (grilla de números bajo el mensaje)."""
+    """Texto = contexto: mejor match con detalle + tabla tabular de la página.
+    El 🔗 de cada fila abre la oferta."""
     if not offers:
         return f"🔍 <i>Sin ofertas con score ≥ {cfg.alerts.min_score}</i> en este barrido."
     best = max(offers, key=lambda o: o.get("score", 0))
@@ -225,62 +300,23 @@ def build_digest_text(offers: list[dict], cfg) -> str:
         f"{score_emoji(best.get('score', 0))} <b>Mejor match:</b> {esc(best['title'][:70])}",
         f"   <code>{best.get('score', '?')}%</code>{salary_tag(best)}"
         f" · {modality_tag(best.get('modality'))} {role_tag(best['title'])}"
-        f" · {age_tag(best.get('date_posted', ''))} · {esc((best.get('company') or '')[:24])}"
+        f" · {_age_short(best.get('date_posted', ''))} · {esc((best.get('company') or '')[:24])}"
         f" · {esc(abbr_loc(best.get('location') or ''))}",
     ]
     if best.get("ai_fit_reason"):
         lines.append(f"   🎯 <i>{esc(best['ai_fit_reason'][:140])}</i>")
-    lines += ["", "<b>Esta página</b> (toca el número para abrir):", table_block(shown)]
+    lines += ["", "<b>Esta página</b> (toca el 🔗 para abrir):", table_block(shown)]
     lines.append("")
-    lines.append("<i>🧠 = procesada por IA · los números abren la oferta</i>")
+    lines.append("<i>⭐ ≥85 · 🟢 ≥70 · 🟡 ≥55 · ⚪ resto · * = IA · toca el 🔗 para abrir</i>")
     return "\n".join(lines)[:4000]
 
 
-def _vis_len(s: str) -> int:
-    """Ancho visual del texto: emoji/símbolos anchos cuentan 2, resto 1."""
-    return sum(2 if ord(ch) > 0x1000 else 1 for ch in s)
-
-
-def align_kb(rows: list[list[dict]], max_w: int = 64) -> list[list[dict]]:
-    """Paddea los textos de los botones de ancho completo a un mismo ancho visual.
-
-    Telegram centra el texto de los botones y no ofrece alineación; si TODOS
-    los textos miden lo mismo, el centrado produce el mismo borde izquierdo
-    → se ven alineados a la izquierda. Pad con NBSP (U+00A0) porque Telegram
-    recorta espacios normales al final del texto del botón. Las filas con
-    varios botones (navegación) quedan intactas.
-    """
-    singles = [r[0] for r in rows if len(r) == 1]
-    if len(singles) < 2:
-        return rows
-    width = min(max((_vis_len(b.get("text", "")) for b in singles), default=0), max_w)
-    out = []
-    for row in rows:
-        if len(row) == 1:
-            b = row[0]
-            pad = "\u00A0" * max(0, width - _vis_len(b.get("text", "")))
-            out.append([{**b, "text": b.get("text", "") + pad}])
-        else:
-            out.append(row)
-    return out
-
-
 def build_buttons(offers: list[dict], cfg) -> list[list[dict]]:
-    """Grilla numerada (5 por fila): el número abre la oferta.
-
-    Los botones full-width con texto largo se ven descentrados (Telegram centra
-    y no hay alineación nativa); la grilla de números es simétrica y el cuerpo
-    del mensaje lleva la tabla alineada (table_block).
-    """
-    kb, row = [], []
-    for i, j in enumerate(offers[:cfg.alerts.max_per_digest], 1):
-        row.append({"text": str(i), "url": j.get("url", "")})
-        if len(row) == 5:
-            kb.append(row)
-            row = []
-    if row:
-        kb.append(row)
-    return kb
+    """Solo botones de paginación inertes (el link está en el 🔗 de cada fila).
+    Mantenido por compatibilidad con send_digest (modo `jobhunt run`)."""
+    n = min(len(offers), cfg.alerts.max_per_digest)
+    pages = max(1, (n + 4) // 5)
+    return [[{"text": f"· {n} ofertas ·", "callback_data": "noop"}]] if pages else []
 
 
 
@@ -294,7 +330,11 @@ def send_digest(cfg, offers: list[dict]) -> bool:
         for row in build_buttons(offers, cfg):
             btns = []
             for b in row:
-                kw = {"url": b["url"]}
+                kw = {}
+                if b.get("url"):
+                    kw["url"] = b["url"]
+                if b.get("callback_data"):
+                    kw["callback_data"] = b["callback_data"]
                 if b.get("style"):
                     kw["style"] = b["style"]
                 btns.append(InlineKeyboardButton(b["text"], **kw))

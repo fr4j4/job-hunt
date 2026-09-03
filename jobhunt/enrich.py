@@ -236,12 +236,20 @@ def profile_description(cfg: Config) -> str:
             f"banda {p.salary_min}-{p.salary_max} CLP")
 
 
+def ia_queue_count(conn) -> int:
+    """Ofertas en cola para el batch IA (con descripción, faltan datos, sin IA)."""
+    return conn.execute(
+        "SELECT COUNT(*) FROM ofertas WHERE active=1 AND length(description)>400 AND "
+        "(modality='' OR salary='' OR description IS NULL) AND ia_model=''").fetchone()[0]
+
+
 def run_ia_batch(conn, cfg: Config, profile_desc: str, max_n: int | None = None,
-                 groups: set[str] | None = None) -> int:
+                 groups: set[str] | None = None, progress=None) -> int:
     """Anillo C: IA para los que A+B no resolvieron. 1x/día (o grupos específicos).
 
     groups: si se pasa, procesa SOLO esos group_id (ofertas recién indexadas),
     sin exigir descripción larga — la IA trabaja con lo que haya.
+    progress: callback opcional (done, total, título) para reportar avance.
     """
     if not cfg.ia.enabled:
         return 0
@@ -254,12 +262,22 @@ def run_ia_batch(conn, cfg: Config, profile_desc: str, max_n: int | None = None,
     else:
         rows = conn.execute(
             "SELECT group_id, title, company, location, description, modality, salary FROM ofertas "
-            "WHERE active=1 AND length(description)>400 AND "
-            "(modality='' OR salary='' OR description IS NULL)").fetchall()
+            "WHERE active=1 AND ia_model='' AND length(description)>400 AND "
+            "(modality='' OR salary='' OR description IS NULL) "
+            "ORDER BY score DESC").fetchall()   # primero las de mejor score (las visibles)
     pending = [dict(r) for r in rows][:max_n or cfg.ia.batch_size]
+    total = len(pending)
     done = 0
-    for r in pending:
+    for i, r in enumerate(pending, 1):
+        t0 = time.time()
         parsed = ia_extract(cfg, r, profile_desc)
+        log.info("IA %d/%d %s — %s (%.1fs)", i, total, r["group_id"][:20],
+                 (r.get("title") or "")[:40], time.time() - t0)
+        if progress:
+            try:
+                progress(i, total, r.get("title") or "")
+            except Exception:
+                pass
         if not parsed:
             continue
         mod = {"R": "remoto", "H": "híbrido", "P": "presencial"}.get(parsed.get("modalidad"), "")

@@ -24,7 +24,7 @@ from .config import Config
 from . import db as database
 from .cli import cmd_run
 from .notify import (esc, score_emoji, score_style, modality_tag, role_tag, techs_tag,
-                     age_tag, salary_tag, compact_label, abbr_loc, table_block)
+                     age_tag, salary_tag, compact_label, abbr_loc, table_block, _age_short)
 
 log = logging.getLogger("jobhunt.bot")
 
@@ -63,25 +63,17 @@ def render_page(offers: list[dict], page: int, page_size: int, cfg: Config,
             f"{score_emoji(best.get('score', 0))} <b>Mejor match:</b> {esc(best['title'][:70])}",
             f"   <code>{best.get('score', '?')}%</code>{salary_tag(best)}"
             f" · {modality_tag(best.get('modality'))} {role_tag(best['title'])}"
-            f" · {age_tag(best.get('date_posted', ''))} · {esc((best.get('company') or '')[:24])}"
+            f" · {_age_short(best.get('date_posted', ''))} · {esc((best.get('company') or '')[:24])}"
             f" · {esc(abbr_loc(best.get('location') or ''))}",
         ]
         if best.get("ai_fit_reason"):
             lines.append(f"   🎯 <i>{esc(best['ai_fit_reason'][:140])}</i>")
-        lines += ["", "<b>Esta página</b> (toca el número para abrir):", table_block(chunk)]
+        lines += ["", "<b>Esta página</b> (toca el 🔗 para abrir):", table_block(chunk)]
     lines.append("")
-    lines.append("<i>🧠 = procesada por IA · los números abren la oferta</i>")
+    lines.append("<i>⭐ ≥85 · 🟢 ≥70 · 🟡 ≥55 · ⚪ resto · * = IA · toca el 🔗 para abrir</i>")
     text = "\n".join(lines)[:4000]
 
-    # grilla numerada (5 por fila): simétrica, nada descentrado
-    kb, row = [], []
-    for i, j in enumerate(chunk, 1):
-        row.append({"text": str(i), "url": j.get("url", "")})
-        if len(row) == 5:
-            kb.append(row)
-            row = []
-    if row:
-        kb.append(row)
+    kb = []   # solo navegación — el link está en el título de cada fila
 
     # navegación (todo botón debe tener acción: los inertes usan callback_data="noop")
     nav = []
@@ -99,11 +91,9 @@ def render_page(offers: list[dict], page: int, page_size: int, cfg: Config,
 # ---------------------------------------------------------------- telegram api
 
 def _kb_json(rows: list[list[dict]]) -> str:
-    """Keyboard para la API: paddea botones full-width al mismo ancho visual
-    (Telegram centra el texto; igualar anchos → borde izquierdo uniforme)."""
-    from .notify import align_kb
+    """Keyboard para la API de Telegram (style no va en el JSON crudo)."""
     kb = [[{k: v for k, v in b.items() if k != "style"} for b in row] for row in rows]
-    return json.dumps({"inline_keyboard": align_kb(kb)})
+    return json.dumps({"inline_keyboard": kb})
 
 
 def _chat_allowed(cfg: Config, chat_id) -> bool:
@@ -380,7 +370,7 @@ def _dec_filters(enc: str) -> dict:
     return f
 
 
-def _latest_offers(cfg: Config, n: int = 5) -> list[dict]:
+def _latest_offers(cfg: Config, n: int = 10) -> list[dict]:
     """Últimas n ofertas registradas (por primera vez vistas), activas."""
     conn = database.connect(cfg)
     try:
@@ -391,9 +381,27 @@ def _latest_offers(cfg: Config, n: int = 5) -> list[dict]:
         conn.close()
 
 
+_SEARCH_STATE: dict = {"running": False, "t0": 0.0}
+
+
+def _op_busy() -> str | None:
+    """'search' | 'ia' si hay una operación pesada corriendo, None si libre."""
+    if _SEARCH_STATE["running"]:
+        return "search"
+    if _IA_STATE["running"]:
+        return "ia"
+    return None
+
+
+def _op_minutes(op: str) -> int:
+    t0 = _SEARCH_STATE["t0"] if op == "search" else _IA_STATE["t0"]
+    return int(time.time() - t0) // 60 if t0 else 0
+
+
 def _run_search_async(cfg: Config, chat_id: int):
     """Barrido en background con reporte de inicio/término/error al chat."""
     try:
+        _SEARCH_STATE.update(running=True, t0=time.time())
         _tg_api(cfg, "sendMessage", {"chat_id": chat_id,
                                      "text": "🔍 <b>Búsqueda iniciada</b> — barriendo fuentes…",
                                      "parse_mode": "HTML"})
@@ -418,6 +426,8 @@ def _run_search_async(cfg: Config, chat_id: int):
                 "text": f"⚠️ <b>Error en la búsqueda</b>\n<code>{esc(str(exc)[:300])}</code>"})
         except Exception:
             pass
+    finally:
+        _SEARCH_STATE.update(running=False, t0=0.0)
 
 
 def _help_text() -> str:
@@ -426,7 +436,8 @@ def _help_text() -> str:
         "",
         "/search — gatilla una búsqueda ahora (reporta inicio, término y error)",
         "/enrich — corre el batch IA ahora (modalidad, sueldo, inglés, techs…)",
-        "/latest — últimas ofertas registradas",
+        "/enrich status — avance del batch IA (o tamaño de la cola)",
+        "/latest — últimas ofertas registradas (default 10, /latest 20 para más)",
         "/stats — cobertura del pool (procesadas IA, datos faltantes)",
         "/score N — ofertas con score ≥ N (ej: /score 60)",
         "/jobs [filtros] — filtra el pool (combinables):",
@@ -481,16 +492,37 @@ def _handle_command(cfg: Config, message: dict, state: dict) -> None:
     log.info("comando %s (chat %s)", cmd, chat_id)
     try:
         if cmd == "/search":
+            busy = _op_busy()
+            if busy:
+                _tg_api(cfg, "sendMessage", {
+                    "chat_id": chat_id, "parse_mode": "HTML",
+                    "text": f"⏳ Hay una operación en curso ({busy}, {_op_minutes(busy)}m) — "
+                            f"espera que termine antes de lanzar otra"})
+                return
             threading.Thread(target=_run_search_async, args=(cfg, chat_id), daemon=True).start()
         elif cmd == "/enrich":
-            threading.Thread(target=_ia_batch_async, args=(cfg, chat_id), daemon=True).start()
+            if arg.lower() == "status":
+                _enrich_status(cfg, chat_id)
+            else:
+                busy = _op_busy()
+                if busy:
+                    _tg_api(cfg, "sendMessage", {
+                        "chat_id": chat_id, "parse_mode": "HTML",
+                        "text": f"⏳ Hay una operación en curso ({busy}, {_op_minutes(busy)}m) — "
+                                f"espera que termine antes de lanzar el batch IA"})
+                    return
+                threading.Thread(target=_ia_batch_async, args=(cfg, chat_id), daemon=True).start()
         elif cmd == "/stats":
             _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
                                          "text": _stats_text(cfg)})
         elif cmd == "/latest":
-            offers = _latest_offers(cfg)
+            try:
+                n = max(1, min(25, int(arg))) if arg else 10
+            except ValueError:
+                n = 10
+            offers = _latest_offers(cfg, n)
             rendered = render_page(offers, 0, cfg.telegram.digest_page_size, cfg,
-                                   label="🆕 <b>Últimas registradas</b>", cb_prefix="latest")
+                                   label=f"🆕 <b>Últimas registradas</b>", cb_prefix="latest")
             kb = [[{k: v for k, v in b.items() if k != "style"} for b in row]
                   for row in rendered["keyboard"]]
             _tg_api(cfg, "sendMessage", {
@@ -555,21 +587,57 @@ def _handle_command(cfg: Config, message: dict, state: dict) -> None:
             pass
 
 
+_IA_STATE: dict = {"running": False, "done": 0, "total": 0, "current": "", "t0": 0.0}
+
+
 def _ia_batch_async(cfg: Config, chat_id: int | None):
-    """Batch IA nocturno con reporte opcional al chat. Nunca tumba el daemon."""
+    """Batch IA con ACK inicial, progreso por oferta y resumen final.
+    Nunca tumba el daemon."""
+    if _IA_STATE["running"]:
+        if chat_id:
+            _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
+                                         "text": "🧠 Ya hay un batch IA corriendo — "
+                                                 "<code>/enrich status</code> para ver el avance"})
+        return
     try:
         conn = database.connect(cfg)
         try:
-            from .enrich import run_ia_batch, profile_description
-            done = run_ia_batch(conn, cfg, profile_description(cfg))
+            from .enrich import run_ia_batch, profile_description, ia_queue_count
+            cola = ia_queue_count(conn)
         finally:
             conn.close()
         if chat_id:
             _tg_api(cfg, "sendMessage", {
                 "chat_id": chat_id, "parse_mode": "HTML",
-                "text": f"🧠 <b>Batch IA terminado</b> — {done} ofertas enriquecidas"})
-        log.info("batch IA OK: %d ofertas", done)
+                "text": f"🧠 <b>Batch IA iniciado</b> — {cola} ofertas en cola · "
+                        f"avance con <code>/enrich status</code>"})
+        _IA_STATE.update(running=True, done=0, total=0, t0=time.time())
+        t0 = time.time()
+        conn = database.connect(cfg)
+        try:
+            done = run_ia_batch(conn, cfg, profile_description(cfg),
+                                progress=(_mk_progress_cb(cfg, chat_id) if chat_id else None))
+        finally:
+            conn.close()
+        dur = int(time.time() - t0)
+        _IA_STATE["running"] = False
+        # recalcular cola real tras el batch (la variable `cola` era previa al inicio)
+        try:
+            conn2 = database.connect(cfg)
+            try:
+                cola_fin = ia_queue_count(conn2)
+            finally:
+                conn2.close()
+        except Exception:
+            cola_fin = None
+        cola_txt = f" · quedan {cola_fin} en cola" if cola_fin is not None else ""
+        if chat_id:
+            _tg_api(cfg, "sendMessage", {
+                "chat_id": chat_id, "parse_mode": "HTML",
+                "text": f"🧠 <b>Batch IA terminado</b> — {done} ofertas enriquecidas{cola_txt} · {dur // 60}m{dur % 60:02d}s"})
+        log.info("batch IA OK: %d ofertas (%ds)", done, dur)
     except Exception as exc:
+        _IA_STATE["running"] = False
         log.error("batch IA falló: %s", exc)
         if chat_id:
             try:
@@ -577,6 +645,47 @@ def _ia_batch_async(cfg: Config, chat_id: int | None):
                                              "text": f"⚠️ Batch IA falló: <code>{esc(str(exc)[:200])}</code>"})
             except Exception:
                 pass
+
+
+def _enrich_status(cfg: Config, chat_id: int) -> None:
+    """Reporta el avance del batch IA en curso (o la cola si está libre)."""
+    if _IA_STATE["running"]:
+        mins = int(time.time() - _IA_STATE["t0"]) // 60
+        txt = (f"🧠 Batch IA en curso — <code>{_IA_STATE['done']}/{_IA_STATE['total']}</code> "
+               f"({mins}m)\n   {esc(_IA_STATE['current'][:50])}")
+    else:
+        conn = database.connect(cfg)
+        try:
+            from .enrich import ia_queue_count
+            n = ia_queue_count(conn)
+        finally:
+            conn.close()
+        txt = (f"🧠 Sin batch en curso. En cola: <code>{n}</code> ofertas\n"
+               f"(batch nocturno 03:00 UTC · o lánzalo con <code>/enrich</code>)")
+    _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML", "text": txt})
+
+
+def _mk_progress_cb(cfg: Config, chat_id: int):
+    """Callback de progreso: actualiza 1 mensaje de estado (throttle 1 msg/30s)."""
+    st = {"msg_id": None, "t": 0.0}
+
+    def cb(done: int, total: int, title: str) -> None:
+        _IA_STATE.update(done=done, total=total, current=title)
+        now = time.time()
+        txt = (f"🧠 Batch IA — <code>{done}/{total}</code>\n"
+               f"   {esc(title[:50])}")
+        try:
+            if st["msg_id"]:
+                _tg_api(cfg, "editMessageText", {
+                    "chat_id": chat_id, "message_id": st["msg_id"],
+                    "text": txt, "parse_mode": "HTML"})
+            elif now - st["t"] >= 30:
+                r = _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML", "text": txt})
+                st["msg_id"] = r.get("result", {}).get("message_id")
+            st["t"] = now
+        except Exception:
+            pass
+    return cb
 
 
 def _ia_hours_due(cfg: Config, last_ia: dict) -> bool:
@@ -636,7 +745,12 @@ def _do_sweep(cfg: Config) -> tuple[list[dict], dict]:
 
 
 def sweep(cfg: Config, state: dict):
-    """Barrido + refresh del pool + ancla (cron interno del daemon). Nunca mata el thread."""
+    """Barrido + refresh del pool + ancla (cron interno del daemon). Nunca mata el thread.
+    Se SALTA si hay operación manual pesada en curso (reintenta la próxima hora agendada)."""
+    busy = _op_busy()
+    if busy:
+        log.info("barrido agendado saltado: %s en curso", busy)
+        return
     try:
         offers, _stats = _do_sweep(cfg)
         state["offers"] = offers
@@ -667,17 +781,35 @@ def _refresh_anchor(cfg: Config, state: dict):
         log.error("anchor refresh failed: %s", str(exc)[:200])
 
 
-def run_daemon(cfg: Config) -> None:
-    """Proceso residente: barrido periódico (cron interno) + polling de callbacks y comandos."""
-    interval_min = cfg.daemon.interval_min
-    log.info("daemon iniciado · barrido cada %d min · callbacks + comandos activos", interval_min)
+def _load_pool(cfg: Config) -> list[dict]:
+    """Carga el pool activo ≥min_score desde la DB (sin barrido de fuentes)."""
+    conn = database.connect(cfg)
+    try:
+        return [dict(r) for r in conn.execute(
+            "SELECT * FROM ofertas WHERE active=1 AND score >= ? ORDER BY score DESC",
+            (cfg.alerts.min_score,)).fetchall()]
+    finally:
+        conn.close()
 
-    state: dict = {"offers": [], "anchor_id": None, "last_sweep": time.time()}
+
+def _sweep_hours_due(cfg: Config, state: dict) -> bool:
+    """True si la hora UTC actual está agendada y no se barrió en esa hora exacta."""
+    now = datetime.now(timezone.utc)
+    key = now.strftime("%Y-%m-%d-%H")
+    return now.hour in cfg.daemon.sweep_hours_utc and state.get("last_sweep_key") != key
+
+
+def run_daemon(cfg: Config) -> None:
+    """Proceso residente: sin barridos al arrancar (carga pool desde DB) +
+    barridos por horas agendadas (DAEMON_SWEEP_HOURS_UTC) + comandos/callbacks."""
+    log.info("daemon iniciado · barridos agendados %s UTC · callbacks + comandos activos",
+             cfg.daemon.sweep_hours_utc)
+
+    state: dict = {"offers": _load_pool(cfg), "anchor_id": None, "last_sweep_key": ""}
     _register_commands(cfg)
 
-    # primer barrido inmediato en background (el cron interno no lo duplica:
-    # last_sweep parte en now, no en 0.0)
-    threading.Thread(target=lambda: sweep(cfg, state), daemon=True).start()
+    # ancla inicial con el pool existente — SIN barrido de fuentes al arrancar
+    _refresh_anchor(cfg, state)
 
     offset = 0
     while True:
@@ -702,9 +834,10 @@ def run_daemon(cfg: Config) -> None:
             log.warning("poll error: %s", str(exc)[:120])
             time.sleep(5)
 
-        # 2. cron interno: ¿toca barrido?
-        if time.time() - state["last_sweep"] >= interval_min * 60:
-            state["last_sweep"] = time.time()
+        # 2. barrido por horas agendadas (una vez por hora agendada)
+        if _sweep_hours_due(cfg, state):
+            state["last_sweep_key"] = datetime.now(timezone.utc).strftime("%Y-%m-%d-%H")
+            log.info("barrido agendado (%s UTC)", datetime.now(timezone.utc).hour)
             threading.Thread(target=lambda: sweep(cfg, state), daemon=True).start()
 
         # 3. batch IA nocturno (hora agendada en IA_RUN_HOURS_UTC, default 03)
