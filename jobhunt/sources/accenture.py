@@ -40,13 +40,18 @@ def _search_session() -> requests.Session:
     return s
 
 
-def jobs(queries: list[str], found_by_prefix: str = "", max_pages: int = 2) -> list[dict]:
+def jobs(queries: list[str], found_by_prefix: str = "", max_pages: int = 2, on_query=None) -> list[dict]:
     """Ofertas de Accenture Chile por keywords. Sin API key — endpoint público."""
     out: dict[str, dict] = {}
     now = datetime.now(timezone.utc)
     s = _search_session()
     for q in queries:
         for page in range(max_pages):
+            if on_query:
+                try:
+                    on_query(q, page + 1)
+                except Exception:
+                    pass
             try:
                 r = s.post(_URL,
                            files={"startIndex": (None, str(page * 12)),

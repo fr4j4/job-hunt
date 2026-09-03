@@ -78,7 +78,7 @@ def _clean(s: str) -> str:
     return re.sub(r"\s+", " ", _u(re.sub(r"<[^>]+>", " ", s or ""))).strip()
 
 
-def jobs(queries: list[str], found_by_prefix: str = "", max_pages: int = 3) -> list[dict]:
+def jobs(queries: list[str], found_by_prefix: str = "", max_pages: int = 3, on_query=None) -> list[dict]:
     """Listado de ofertas por query. Combina modalidades (remoto/híbrido) Y pagina
     hasta max_pages (la API ordena por RELEVANTES; página 0 sola deja fuera ofertas).
     Corta antes si la página viene vacía o el total ya fue cubierto."""
@@ -90,6 +90,11 @@ def jobs(queries: list[str], found_by_prefix: str = "", max_pages: int = 3) -> l
         for filtro in modalidades:
             total = None
             for pag in range(max_pages):
+                if on_query:
+                    try:
+                        on_query(q, pag + 1)
+                    except Exception:
+                        pass
                 d = _search(q, filtros=[filtro] if filtro else None, page=pag)
                 if not d.get("content"):
                     break

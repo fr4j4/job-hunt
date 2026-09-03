@@ -4,10 +4,15 @@ from html import unescape as _u
 from datetime import datetime, timedelta, timezone
 from .linkedin import fetch
 
-def jobs(queries, found_by_prefix=""):
+def jobs(queries, found_by_prefix="", on_query=None):
     out = []
     now = datetime.now(timezone.utc)
     for q in queries:
+        if on_query:
+            try:
+                on_query(q, 1)
+            except Exception:
+                pass
         html_ = fetch(f"https://www.computrabajo.cl/empleos-de-{q}")
         if not html_: continue
         for card in re.split(r'<article class="box_offer', html_)[1:]:

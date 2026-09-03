@@ -37,7 +37,7 @@ def _session():
     return s, toks[0]
 
 
-def jobs(queries: list[str], found_by_prefix: str = "", max_pages: int = 2) -> list[dict]:
+def jobs(queries: list[str], found_by_prefix: str = "", max_pages: int = 2, on_query=None) -> list[dict]:
     """Busca ofertas en Glassdoor Chile (locationId=49, COUNTRY). Pagina hasta max_pages
     ( pageNumber es un arg real del GraphQL; páginas >1 traen ofertas distintas)."""
     out: dict[str, dict] = {}
@@ -49,6 +49,11 @@ def jobs(queries: list[str], found_by_prefix: str = "", max_pages: int = 2) -> l
 
     for q in queries:
         for pag in range(1, max_pages + 1):
+            if on_query:
+                try:
+                    on_query(q, pag)
+                except Exception:
+                    pass
             payload = {
                 "operationName": "JobSearchResultsQuery",
                 "variables": {

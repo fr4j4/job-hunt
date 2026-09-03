@@ -484,7 +484,7 @@ def _op_minutes(op: str) -> int:
 
 
 def _run_search_async(cfg: Config, chat_id: int):
-    """Barrido en background con mensaje vivo que muta por fase (edit_message_text)."""
+    """Barrido en background con mensaje vivo que muta por fuente/query/página."""
     msg_id = None
     try:
         _SEARCH_STATE.update(running=True, t0=time.time())
@@ -493,18 +493,24 @@ def _run_search_async(cfg: Config, chat_id: int):
                                             "parse_mode": "HTML"})
         msg_id = (sent or {}).get("result", {}).get("message_id")
         t0 = time.time()
+        fase = {"fuente": "preparando", "query": "", "page": 0}
 
-        def on_phase(nombre: str):
-            """Edita el MISMO mensaje con la fase actual (throttle 20s)."""
+        def on_phase(fuente: str, query: str = "", page: int = 0):
+            """Actualiza estado y edita el MISMO mensaje (throttle 15s)."""
+            fase.update(fuente=fuente, query=query, page=page)
             nonlocal msg_id
-            if not msg_id or time.time() - t0 < 20:
+            if not msg_id or time.time() - t0 < 15:
                 return
             mins = int(time.time() - t0) // 60
+            linea = f"   ▸ <b>{esc(fuente)}</b>"
+            if query:
+                linea += f' — "{esc(query[:40])}"'
+            if page:
+                linea += f" · pág {page}"
             try:
                 _tg_api(cfg, "editMessageText", {
                     "chat_id": chat_id, "message_id": msg_id,
-                    "text": (f"🔍 <b>Búsqueda en curso</b> ({mins}m)\n"
-                             f"   ▸ {esc(nombre)}"),
+                    "text": (f"🔍 <b>Búsqueda en curso</b> ({mins}m)\n{linea}"),
                     "parse_mode": "HTML"})
             except Exception:
                 pass  # flood o mensaje igual → no tumba el barrido

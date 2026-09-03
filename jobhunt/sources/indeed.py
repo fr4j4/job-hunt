@@ -33,9 +33,14 @@ def _iso(v):
         except Exception: return ""
     return str(v)[:10]
 
-def jobs(queries, found_by_prefix=""):
+def jobs(queries, found_by_prefix="", on_query=None):
     out = []
     for q in queries:
+        if on_query:
+            try:
+                on_query(q, 1)
+            except Exception:
+                pass
         body = {"query": _QUERY % {"what": q}}
         req = urllib.request.Request("https://apis.indeed.com/graphql",
             data=json.dumps(body).encode(), headers=_HEADERS, method="POST")

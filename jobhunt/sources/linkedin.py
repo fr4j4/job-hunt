@@ -39,9 +39,14 @@ def parse_cards(html, source):
                      "source": source})
     return jobs
 
-def fetch_jobs(queries, found_by_prefix=""):
+def fetch_jobs(queries, found_by_prefix="", on_query=None):
     out = []
     for q in queries:
+        if on_query:
+            try:
+                on_query(q, 1)
+            except Exception:
+                pass
         url = ("https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search?"
                + urllib.parse.urlencode({"keywords": q, "location": "Chile", "start": 0, "f_TPR": "r604800"}))
         fb = f"{found_by_prefix}{q}"

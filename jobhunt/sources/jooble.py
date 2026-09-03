@@ -68,7 +68,7 @@ def _parse_card(texto: str) -> dict:
     return {"company": "", "date": fecha, "snippet": snippet, "salary": salary}
 
 
-def jobs(queries: list[str], found_by_prefix: str = "", max_pages: int = 2) -> list[dict]:
+def jobs(queries: list[str], found_by_prefix: str = "", max_pages: int = 2, on_query=None) -> list[dict]:
     """Ofertas de Jooble Chile vía browser headless. ~25s por página SERP."""
     try:
         from playwright.sync_api import sync_playwright
@@ -90,6 +90,11 @@ def jobs(queries: list[str], found_by_prefix: str = "", max_pages: int = 2) -> l
             user_agent=_UA, locale="es-CL", viewport={"width": 1366, "height": 900})
         page = ctx.new_page()
         for q in queries:
+            if on_query:
+                try:
+                    on_query(q, 1)
+                except Exception:
+                    pass
             try:
                 page.goto(f"https://cl.jooble.org/SearchResult?ukw={q}",
                           wait_until="domcontentloaded", timeout=60000)
@@ -100,10 +105,15 @@ def jobs(queries: list[str], found_by_prefix: str = "", max_pages: int = 2) -> l
             # paginación por SCROLL infinito (el &page=N de la URL es cosmético):
             # cada scroll al fondo carga +20, techo observado ~100
             prev = 0
-            for _ in range(max_pages * 2):
+            for sc in range(max_pages * 2):
                 page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
                 page.wait_for_timeout(2500)
                 n = len(page.evaluate("[...document.querySelectorAll('h2 a.job_card_link')]"))
+                if on_query and (sc == 0 or n // 20 > prev // 20):
+                    try:
+                        on_query(q, min(n // 20 + 1, 5))
+                    except Exception:
+                        pass
                 if n == prev:
                     break
                 prev = n

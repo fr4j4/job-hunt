@@ -27,13 +27,17 @@ def _now() -> str:
 
 
 def cmd_run(cfg, notify: bool = True, on_phase=None) -> None:
-    """on_phase(nombre, detalle) — callback opcional para reportar progreso por fuente."""
-    def phase(nombre: str):
+    """on_phase(fuente, query, page) — callback opcional para progreso por fuente/query/página."""
+    def phase(fuente: str, query: str = "", page: int = 0):
         if on_phase:
             try:
-                on_phase(nombre)
+                on_phase(fuente, query, page)
             except Exception:
                 pass
+
+    def qcb(fuente: str):
+        """callback on_query estándar para los módulos de fuente"""
+        return lambda q, pag: phase(fuente, q, pag)
 
     conn = database.connect(cfg)
     try:
@@ -46,24 +50,24 @@ def cmd_run(cfg, notify: bool = True, on_phase=None) -> None:
         s = cfg.search
         jobs = []
         if cfg.sources.get("jooble"):
-            phase("jooble (browser headless — la lenta)")
+            phase("jooble")
             # jooble usa browser headless bajo xvfb (la API REST exige login de usuario)
             try:
-                jobs += jooble.jobs(s.queries_jooble, "perfil:")
+                jobs += jooble.jobs(s.queries_jooble, "perfil:", on_query=qcb("jooble"))
             except Exception as e:
                 log.warning("jooble falló (continúa el barrido): %s", e)
         if cfg.sources.get("accenture", True):
             phase("accenture")
-            jobs += accenture.jobs(s.queries_accenture, "perfil:")
+            jobs += accenture.jobs(s.queries_accenture, "perfil:", on_query=qcb("accenture"))
         if cfg.sources.get("laborum", True):
             phase("laborum")
-            jobs += laborum.jobs(s.queries_laborum, "perfil:")
+            jobs += laborum.jobs(s.queries_laborum, "perfil:", on_query=qcb("laborum"))
         if cfg.sources.get("linkedin"):
-            phase("linkedin (perfil)")
-            jobs += linkedin.fetch_jobs(s.queries_linkedin, "perfil:")
+            phase("linkedin")
+            jobs += linkedin.fetch_jobs(s.queries_linkedin, "perfil:", on_query=qcb("linkedin"))
         if cfg.sources.get("computrabajo"):
-            phase("computrabajo (perfil)")
-            jobs += computrabajo.jobs(s.queries_computrabajo, "perfil:")
+            phase("computrabajo")
+            jobs += computrabajo.jobs(s.queries_computrabajo, "perfil:", on_query=qcb("computrabajo"))
         if cfg.search.mode in ("both", "sample"):
             # muestreo amplio: rotación para diversificar sin inflar requests
             phase("linkedin/computrabajo (muestreo)")
@@ -71,16 +75,16 @@ def cmd_run(cfg, notify: bool = True, on_phase=None) -> None:
             jobs += linkedin.fetch_jobs(s.sample_linkedin[:n], "sample:")
             jobs += computrabajo.jobs(s.sample_computrabajo[:n], "sample:")
             if cfg.sources.get("indeed"):
-                phase("indeed (muestra)")
-                jobs += indeed.jobs(s.sample_indeed[:n], "muestra:")
+                phase("indeed")
+                jobs += indeed.jobs(s.sample_indeed[:n], "muestra:", on_query=qcb("indeed"))
             if cfg.sources.get("glassdoor") and _is_premium_tick(cfg):
-                jobs += glassdoor.jobs(s.sample_glassdoor[:2], "muestra:")
+                jobs += glassdoor.jobs(s.sample_glassdoor[:2], "muestra:", on_query=qcb("glassdoor"))
         if cfg.sources.get("indeed") and _is_premium_tick(cfg):
-            phase("indeed (perfil)")
-            jobs += indeed.jobs(s.queries_indeed, "perfil:")
+            phase("indeed")
+            jobs += indeed.jobs(s.queries_indeed, "perfil:", on_query=qcb("indeed"))
         if cfg.sources.get("glassdoor") and _is_premium_tick(cfg):
             phase("glassdoor (perfil)")
-            jobs += glassdoor.jobs(s.queries_glassdoor, "perfil:")
+            jobs += glassdoor.jobs(s.queries_glassdoor, "perfil:", on_query=qcb("glassdoor"))
 
         log.info("barrido iniciado: %d ofertas crudas (mode=%s)", len(jobs), s.mode)
 
@@ -113,7 +117,7 @@ def cmd_run(cfg, notify: bool = True, on_phase=None) -> None:
         # IA complementaria para las NUEVAS (si IA_ENABLED) — llena modality/salary/
         # seniority/flags al indexarse, no espera al batch nocturno
         if new_jobs and cfg.ia.enabled and cfg.ia.api_key:
-            phase(f"IA complementaria ({min(12, len(new_jobs))} nuevas)")
+            phase("IA complementaria", f"{min(12, len(new_jobs))} nuevas", 0)
             try:
                 from .enrich import run_ia_batch, profile_description
                 n_ia = run_ia_batch(conn, cfg, profile_description(cfg),
