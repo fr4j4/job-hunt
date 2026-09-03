@@ -156,6 +156,23 @@ def cmd_enrich(cfg) -> None:
     print(f"enriquecidas: {done}")
 
 
+def cmd_market(cfg=None) -> None:
+    """Análisis de mercado completo sin Telegram: imprime progreso por fase."""
+    cfg = cfg or load_config()
+    from .market import run_market_pipeline
+    t0 = __import__("time").time()
+
+    def on_phase(n: int, msg: str):
+        print(f"[fase {n}/4] {msg}")
+
+    pdf_path, narr, ia_ok = run_market_pipeline(cfg, on_phase=on_phase)
+    dur = int(__import__("time").time() - t0)
+    print(f"\nPDF: {pdf_path} ({pdf_path.stat().st_size // 1024} KB)")
+    print(f"IA narrativa: {'sí' if ia_ok else 'no (plantilla)'} · {dur}s")
+    for b in narr.get("tldr", []):
+        print(f"  • {b}")
+
+
 def cmd_ia(conn_unused=None) -> None:
     cfg = load_config()
     conn = database.connect(cfg)
@@ -196,6 +213,8 @@ def main():
         cmd_rescore(cfg)
     elif cmd == "enrich":
         cmd_enrich(cfg)
+    elif cmd == "market":
+        cmd_market(cfg)
     elif cmd == "ia":
         conn = database.connect(cfg)
         database.init_db(conn)

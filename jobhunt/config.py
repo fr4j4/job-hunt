@@ -137,6 +137,14 @@ class Daemon:
     sweep_hours_utc: list[int] = field(default_factory=lambda: [0, 4, 8, 12, 16, 20])
 
 
+@dataclass
+class ReportCfg:
+    enabled: bool = True
+    ia_narrative: bool = True      # false = PDF solo con datos, sin llamadas IA
+    max_salary_samples: int = 60
+    out_dir: Path = field(default_factory=lambda: PROJECT_ROOT / "data" / "reports")
+
+
 
 
 @dataclass
@@ -159,6 +167,7 @@ class Config:
     telegram: Telegram
     daemon: Daemon
     alerts: Alerts
+    report: ReportCfg
     project_root: Path = PROJECT_ROOT
     data_dir: Path = field(default_factory=lambda: PROJECT_ROOT / "data")
 
@@ -273,6 +282,12 @@ def load_config(env_file: Path | None = None) -> Config:
         page_size=_env_int("TELEGRAM_DIGEST_PAGE_SIZE", 5),
         sweep_hours_utc=[int(h) for h in _env_list("DAEMON_SWEEP_HOURS_UTC", "0,4,8,12,16,20")],
     )
+    report = ReportCfg(
+        enabled=_env_bool("REPORT_ENABLED", True),
+        ia_narrative=_env_bool("REPORT_IA_NARRATIVE", True),
+        max_salary_samples=_env_int("REPORT_MAX_SALARY_SAMPLES", 60),
+        out_dir=PROJECT_ROOT / _env("REPORT_OUT_DIR", "data/reports"),
+    )
     cfg = Config(
         profile=profile,
         scoring=scoring,
@@ -283,6 +298,7 @@ def load_config(env_file: Path | None = None) -> Config:
         telegram=tg,
         alerts=alerts,
         daemon=daemon,
+        report=report,
     )
     cfg.data_dir.mkdir(exist_ok=True)
     return cfg

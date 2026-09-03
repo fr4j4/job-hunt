@@ -19,6 +19,7 @@ import time
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
+from pathlib import Path
 
 from .config import Config
 from . import db as database
@@ -127,6 +128,46 @@ def _tg_api(cfg: Config, method: str, payload: dict, retries: int = 2) -> dict:
                 continue
             raise
     raise last_exc or RuntimeError("unreachable")
+
+
+def _tg_send_document(cfg: Config, chat_id: int, path: str, caption: str = "") -> bool:
+    """sendDocument multipart/form-data (archivos binarios: PDFs, imágenes)."""
+    import mimetypes
+    import uuid
+    from pathlib import Path as _P
+
+    if not _chat_allowed(cfg, chat_id):
+        raise PermissionError(f"chat {chat_id} no está en TELEGRAM_ALLOWED_CHATS")
+    file = _P(path)
+    if not file.exists():
+        return False
+    mime = mimetypes.guess_type(file.name)[0] or "application/octet-stream"
+    boundary = uuid.uuid4().hex
+    parts: list[bytes] = []
+
+    def field(name: str, value: str):
+        parts.append(f"--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n".encode())
+
+    field("chat_id", str(chat_id))
+    if caption:
+        field("caption", caption[:1024])
+        field("parse_mode", "HTML")
+    parts.append(f"--{boundary}\r\nContent-Disposition: form-data; name=\"document\"; "
+                 f"filename=\"{file.name}\"\r\nContent-Type: {mime}\r\n\r\n".encode())
+    parts.append(file.read_bytes())
+    parts.append(f"\r\n--{boundary}--\r\n".encode())
+
+    req = urllib.request.Request(
+        f"https://api.telegram.org/bot{cfg.telegram.bot_token}/sendDocument",
+        data=b"".join(parts),
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            return bool(json.loads(resp.read().decode()).get("ok"))
+    except Exception as e:
+        log.error("sendDocument falló: %s", e)
+        return False
 
 
 def send_anchor(cfg: Config, offers: list[dict]) -> int | None:
@@ -382,19 +423,25 @@ def _latest_offers(cfg: Config, n: int = 10) -> list[dict]:
 
 
 _SEARCH_STATE: dict = {"running": False, "t0": 0.0}
+_REPORT_STATE: dict = {"running": False, "phase": 0, "phase_msg": "", "t0": 0.0,
+                       "pdf": ""}
 
 
 def _op_busy() -> str | None:
-    """'search' | 'ia' si hay una operación pesada corriendo, None si libre."""
+    """'search' | 'ia' | 'report' si hay una operación pesada corriendo, None si libre."""
     if _SEARCH_STATE["running"]:
         return "search"
     if _IA_STATE["running"]:
         return "ia"
+    if _REPORT_STATE["running"]:
+        return "report"
     return None
 
 
 def _op_minutes(op: str) -> int:
-    t0 = _SEARCH_STATE["t0"] if op == "search" else _IA_STATE["t0"]
+    t0 = (_SEARCH_STATE["t0"] if op == "search"
+          else _REPORT_STATE["t0"] if op == "report"
+          else _IA_STATE["t0"])
     return int(time.time() - t0) // 60 if t0 else 0
 
 
@@ -437,6 +484,8 @@ def _help_text() -> str:
         "/search — gatilla una búsqueda ahora (reporta inicio, término y error)",
         "/enrich — corre el batch IA ahora (modalidad, sueldo, inglés, techs…)",
         "/enrich status — avance del batch IA (o tamaño de la cola)",
+        "/report — análisis completo del mercado con gráficos → PDF",
+        "/report status · /report list — avance del reporte · historial de PDFs",
         "/latest — últimas ofertas registradas (default 10, /latest 20 para más)",
         "/stats — cobertura del pool (procesadas IA, datos faltantes)",
         "/score N — ofertas con score ≥ N (ej: /score 60)",
@@ -512,6 +561,25 @@ def _handle_command(cfg: Config, message: dict, state: dict) -> None:
                                 f"espera que termine antes de lanzar el batch IA"})
                     return
                 threading.Thread(target=_ia_batch_async, args=(cfg, chat_id), daemon=True).start()
+        elif cmd == "/report":
+            if arg.lower() == "status":
+                _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
+                                             "text": _report_status_text()})
+            elif arg.lower() == "list":
+                _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
+                                             "text": _report_list_text(cfg)})
+            elif not cfg.report.enabled:
+                _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
+                                             "text": "📊 /report deshabilitado (REPORT_ENABLED=false)"})
+            else:
+                busy = _op_busy()
+                if busy:
+                    _tg_api(cfg, "sendMessage", {
+                        "chat_id": chat_id, "parse_mode": "HTML",
+                        "text": f"⏳ Hay una operación en curso ({busy}, {_op_minutes(busy)}m) — "
+                                f"espera que termine antes de lanzar el reporte"})
+                    return
+                threading.Thread(target=_report_async, args=(cfg, chat_id), daemon=True).start()
         elif cmd == "/stats":
             _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
                                          "text": _stats_text(cfg)})
@@ -679,6 +747,87 @@ def _enrich_status(cfg: Config, chat_id: int) -> None:
     _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML", "text": txt})
 
 
+# ---------------------------------------------------------------- report /market
+
+def _report_status_text() -> str:
+    if _REPORT_STATE["running"]:
+        mins = int(time.time() - _REPORT_STATE["t0"]) // 60
+        return (f"📊 Análisis de mercado en curso — fase {_REPORT_STATE['phase']}/4 "
+                f"({mins}m)\n   {esc(_REPORT_STATE['phase_msg'][:60])}")
+    pdf = _REPORT_STATE.get("pdf") or ""
+    if pdf:
+        p = Path(pdf)
+        kb = p.stat().st_size // 1024 if p.exists() else 0
+        return (f"📊 Último reporte: <code>{esc(p.name)}</code> ({kb} KB)\n"
+                f"en <code>{esc(str(p.parent))}</code>")
+    return "📊 Sin reportes generados todavía — lanza uno con <code>/report</code>"
+
+
+def _report_list_text(cfg: Config) -> str:
+    d = cfg.report.out_dir
+    if not d.exists():
+        return "📊 Sin reportes generados todavía — lanza uno con <code>/report</code>"
+    pdfs = sorted(d.glob("mercado_*.pdf"), key=lambda p: p.stat().st_mtime, reverse=True)[:8]
+    if not pdfs:
+        return "📊 Sin reportes generados todavía — lanza uno con <code>/report</code>"
+    lines = ["📊 <b>Reportes de mercado</b>", ""]
+    for p in pdfs:
+        kb = p.stat().st_size // 1024
+        lines.append(f"• <code>{esc(p.name)}</code> ({kb} KB)")
+    return "\n".join(lines)
+
+
+def _report_async(cfg: Config, chat_id: int):
+    """Pipeline de análisis de mercado en background con progreso por fase."""
+    from .market import highlights, run_market_pipeline
+    t0 = time.time()
+    _REPORT_STATE.update(running=True, phase=0, phase_msg="iniciando", t0=t0, pdf="")
+    last_msg = {"t": 0.0}
+
+    def on_phase(n: int, msg: str):
+        _REPORT_STATE.update(phase=n, phase_msg=msg)
+        # throttle: máx 1 mensaje de fase cada 30s (el primero siempre pasa)
+        now = time.time()
+        if now - last_msg["t"] >= 30:
+            last_msg["t"] = now
+            try:
+                _tg_api(cfg, "sendMessage", {
+                    "chat_id": chat_id, "parse_mode": "HTML",
+                    "text": f"📊 <b>Reporte</b> — fase {n}/4 · {esc(msg[:60])}"})
+            except Exception:
+                pass
+
+    try:
+        if chat_id:
+            _tg_api(cfg, "sendMessage", {
+                "chat_id": chat_id, "parse_mode": "HTML",
+                "text": "📊 <b>Análisis de mercado iniciado</b> — ~1-2 min\n"
+                        "fases: agregación → gráficos → narrativa IA → PDF"})
+        pdf_path, narr, ia_ok = run_market_pipeline(cfg, on_phase=on_phase)
+        _REPORT_STATE["pdf"] = str(pdf_path)
+        dur = int(time.time() - t0)
+        if chat_id:
+            sent = _tg_send_document(cfg, chat_id, str(pdf_path))
+            resumen = " · ".join(narr.get("tldr", [])[:2])
+            txt = (f"📄 <b>Reporte de mercado listo</b> · {dur // 60}m{dur % 60:02d}s\n"
+                   f"{'✅ entregado al chat' if sent else '⚠️ no se pudo enviar — archivo local abajo'}\n"
+                   f"<i>{esc(resumen[:180])}</i>\n"
+                   f"<code>{esc(str(pdf_path))}</code>")
+            _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML", "text": txt})
+        log.info("report OK: %s (ia_ok=%s, %ds)", pdf_path, ia_ok, dur)
+    except Exception as exc:
+        log.error("report falló: %s", exc)
+        if chat_id:
+            try:
+                _tg_api(cfg, "sendMessage", {
+                    "chat_id": chat_id, "parse_mode": "HTML",
+                    "text": f"⚠️ Reporte falló: <code>{esc(str(exc)[:200])}</code>"})
+            except Exception:
+                pass
+    finally:
+        _REPORT_STATE["running"] = False
+
+
 def _mk_progress_cb(cfg: Config, chat_id: int):
     """Callback de progreso: actualiza 1 mensaje de estado (throttle 1 msg/30s)."""
     st = {"msg_id": None, "t": 0.0}
@@ -726,6 +875,7 @@ def _register_commands(cfg: Config) -> None:
     commands = [
         {"command": "search", "description": "Gatilla una búsqueda ahora"},
         {"command": "enrich", "description": "Corre el batch IA ahora (rellena datos faltantes)"},
+        {"command": "report", "description": "Análisis de mercado completo con PDF"},
         {"command": "latest", "description": "Últimas ofertas registradas"},
         {"command": "stats",  "description": "Cobertura IA y datos del pool"},
         {"command": "score",  "description": "Ofertas con score ≥ N (ej: /score 60)"},

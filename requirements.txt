@@ -2,3 +2,5 @@ python-dotenv>=1.0
 requests>=2.31
 python-telegram-bot>=22.7
 tls-client>=0.2
+matplotlib>=3.8        # solo /report (gráficos del análisis de mercado)
+reportlab>=4.0         # solo /report (composición del PDF)
