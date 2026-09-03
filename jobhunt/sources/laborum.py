@@ -78,36 +78,40 @@ def _clean(s: str) -> str:
     return re.sub(r"\s+", " ", _u(re.sub(r"<[^>]+>", " ", s or ""))).strip()
 
 
-def jobs(queries: list[str], found_by_prefix: str = "") -> list[dict]:
-    """Listado de ofertas por query. Combina modalidades (remoto/híbrido/presencial)
-    para no perder ofertas en el corte de 20 por página."""
+def jobs(queries: list[str], found_by_prefix: str = "", max_pages: int = 3) -> list[dict]:
+    """Listado de ofertas por query. Combina modalidades (remoto/híbrido) Y pagina
+    hasta max_pages (la API ordena por RELEVANTES; página 0 sola deja fuera ofertas).
+    Corta antes si la página viene vacía o el total ya fue cubierto."""
     out: dict[str, dict] = {}
     now = datetime.now(timezone.utc)
     modalidades = [None, {"id": "modalidad_trabajo", "value": "remoto"},
                    {"id": "modalidad_trabajo", "value": "hibrido"}]
     for q in queries:
         for filtro in modalidades:
-            d = _search(q, filtros=[filtro] if filtro else None)
-            if not d.get("content"):
-                continue
-            fb = f"{found_by_prefix}{q}" + (":remoto" if filtro else "")
-            for a in d["content"]:
-                aid = a.get("id")
-                if not aid or aid in out:
-                    continue
-                # fecha: "02-09-2026" (DD-MM-YYYY)
-                fecha = ""
-                try:
-                    fecha = datetime.strptime(a.get("fechaPublicacion", ""), "%d-%m-%Y").date().isoformat()
-                except Exception:
-                    fecha = (now - timedelta(days=1)).date().isoformat()
-                # desc: el detalle del listado es resumido; descripción completa la trae el Anillo A
-                desc = _clean(a.get("detalle") or "")[:2000]
-                out[aid] = {
-                    "title": _clean(a.get("titulo") or "")[:150],
-                    "company": (a.get("empresa") or "").strip(),
-                    "location": (a.get("localizacion") or "").strip(),
-                    "date": fecha,
+            total = None
+            for pag in range(max_pages):
+                d = _search(q, filtros=[filtro] if filtro else None, page=pag)
+                if not d.get("content"):
+                    break
+                total = d.get("total") if d.get("total") is not None else total
+                fb = f"{found_by_prefix}{q}" + (":remoto" if filtro else "")
+                for a in d["content"]:
+                    aid = a.get("id")
+                    if not aid or aid in out:
+                        continue
+                    # fecha: "02-09-2026" (DD-MM-YYYY)
+                    fecha = ""
+                    try:
+                        fecha = datetime.strptime(a.get("fechaPublicacion", ""), "%d-%m-%Y").date().isoformat()
+                    except Exception:
+                        fecha = (now - timedelta(days=1)).date().isoformat()
+                    # desc: el detalle del listado es resumido; descripción completa la trae el Anillo A
+                    desc = _clean(a.get("detalle") or "")[:2000]
+                    out[aid] = {
+                        "title": _clean(a.get("titulo") or "")[:150],
+                        "company": (a.get("empresa") or "").strip(),
+                        "location": (a.get("localizacion") or "").strip(),
+                        "date": fecha,
                     "url": f"https://www.laborum.cl/empleos/{aid}",
                     "source": f"laborum:{q}",
                     "found_by": fb,
@@ -115,11 +119,15 @@ def jobs(queries: list[str], found_by_prefix: str = "") -> list[dict]:
                     "salary": "",          # el API no expone salario en el listado
                     "_desc": desc,
                     "description_source": "laborum-api",
-                }
-            if len(out) > 400:
+                    }
+                # cortar si ya cubrimos el total de esta combinación query+filtro
+                if total is not None and (pag + 1) * 20 >= int(total):
+                    break
+                time.sleep(2)
+            if len(out) > 600:
                 break
         time.sleep(3)
-    return list(out.values())[:400]
+    return list(out.values())[:600]
 
 
 def fetch_detail(aviso_id: str | int) -> dict:

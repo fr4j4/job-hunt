@@ -37,9 +37,10 @@ def _session():
     return s, toks[0]
 
 
-def jobs(queries: list[str], found_by_prefix: str = "") -> list[dict]:
-    """Busca ofertas en Glassdoor Chile (locationId=49, COUNTRY)."""
-    out: list[dict] = []
+def jobs(queries: list[str], found_by_prefix: str = "", max_pages: int = 2) -> list[dict]:
+    """Busca ofertas en Glassdoor Chile (locationId=49, COUNTRY). Pagina hasta max_pages
+    ( pageNumber es un arg real del GraphQL; páginas >1 traen ofertas distintas)."""
+    out: dict[str, dict] = {}
     try:
         s, token = _session()
     except Exception as e:
@@ -47,48 +48,53 @@ def jobs(queries: list[str], found_by_prefix: str = "") -> list[dict]:
         return out
 
     for q in queries:
-        payload = {
-            "operationName": "JobSearchResultsQuery",
-            "variables": {
-                "excludeJobListingIds": [],
-                "filterParams": [{"filterKey": "fromAge", "values": "30"}],
-                "keyword": q, "numJobsToShow": 20,
-                "locationType": "COUNTRY", "locationId": _LOCATION_ID_CHILE,
-                "pageNumber": 1, "originalPageUrl": "",
-                "parameterUrlInput": "", "seoUrl": False,
-            },
-            "query": _QUERY_TEMPLATE,
-        }
-        try:
-            r = s.post("https://www.glassdoor.com/graph",
-                       headers={"gd-csrf-token": token, "content-type": "application/json"},
-                       json=payload, timeout_seconds=30)
-            d = r.json()
-            if isinstance(d, list):
-                d = d[0]
-            jl = (d.get("data") or {}).get("jobListings") or {}
-            for it in jl.get("jobListings") or []:
-                jv = it.get("jobview") or {}
-                hdr = jv.get("header") or {}
-                job = jv.get("job") or {}
-                age = hdr.get("ageInDays")
-                date = (datetime.now(timezone.utc) - timedelta(days=int(age))).date().isoformat() if age is not None else ""
-                lid = job.get("listingId")
-                if not lid:
-                    continue
-                # desc ya viene en la respuesta GraphQL (job.description) — limpiar HTML
-                desc = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", job.get("description") or "")).strip()
-                out.append({
-                    "title": (hdr.get("jobTitleText") or "")[:150],
-                    "company": hdr.get("employerNameFromSearch") or "",
-                    "location": hdr.get("locationName") or "",
-                    "date": date,
-                    "url": f"https://www.glassdoor.com/job-listing/j?jl={lid}",
-                    "source": f"glassdoor:{q}",
-                    "found_by": f"{found_by_prefix}{q}",
-                    "_desc": desc[:4000],
-                })
-        except Exception as e:
-            log.warning("glassdoor query '%s' falló: %s", q, e)
-        time.sleep(4)
-    return out
+        for pag in range(1, max_pages + 1):
+            payload = {
+                "operationName": "JobSearchResultsQuery",
+                "variables": {
+                    "excludeJobListingIds": [],
+                    "filterParams": [{"filterKey": "fromAge", "values": "30"}],
+                    "keyword": q, "numJobsToShow": 20,
+                    "locationType": "COUNTRY", "locationId": _LOCATION_ID_CHILE,
+                    "pageNumber": pag, "originalPageUrl": "",
+                    "parameterUrlInput": "", "seoUrl": False,
+                },
+                "query": _QUERY_TEMPLATE,
+            }
+            try:
+                r = s.post("https://www.glassdoor.com/graph",
+                           headers={"gd-csrf-token": token, "content-type": "application/json"},
+                           json=payload, timeout_seconds=30)
+                d = r.json()
+                if isinstance(d, list):
+                    d = d[0]
+                jl = (d.get("data") or {}).get("jobListings") or {}
+                listings = jl.get("jobListings") or []
+                if not listings:
+                    break
+                for it in listings:
+                    jv = it.get("jobview") or {}
+                    hdr = jv.get("header") or {}
+                    job = jv.get("job") or {}
+                    age = hdr.get("ageInDays")
+                    date = (datetime.now(timezone.utc) - timedelta(days=int(age))).date().isoformat() if age is not None else ""
+                    lid = job.get("listingId")
+                    if not lid or lid in out:
+                        continue
+                    # desc ya viene en la respuesta GraphQL (job.description) — limpiar HTML
+                    desc = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", job.get("description") or "")).strip()
+                    out[lid] = {
+                        "title": (hdr.get("jobTitleText") or "")[:150],
+                        "company": hdr.get("employerNameFromSearch") or "",
+                        "location": hdr.get("locationName") or "",
+                        "date": date,
+                        "url": f"https://www.glassdoor.com/job-listing/j?jl={lid}",
+                        "source": f"glassdoor:{q}",
+                        "found_by": f"{found_by_prefix}{q}",
+                        "_desc": desc[:4000],
+                    }
+            except Exception as e:
+                log.warning("glassdoor query '%s' p%s falló: %s", q, pag, e)
+                break
+            time.sleep(4)
+    return list(out.values())
