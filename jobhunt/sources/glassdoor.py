@@ -76,6 +76,8 @@ def jobs(queries: list[str], found_by_prefix: str = "") -> list[dict]:
                 lid = job.get("listingId")
                 if not lid:
                     continue
+                # desc ya viene en la respuesta GraphQL (job.description) — limpiar HTML
+                desc = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", job.get("description") or "")).strip()
                 out.append({
                     "title": (hdr.get("jobTitleText") or "")[:150],
                     "company": hdr.get("employerNameFromSearch") or "",
@@ -84,6 +86,7 @@ def jobs(queries: list[str], found_by_prefix: str = "") -> list[dict]:
                     "url": f"https://www.glassdoor.com/job-listing/j?jl={lid}",
                     "source": f"glassdoor:{q}",
                     "found_by": f"{found_by_prefix}{q}",
+                    "_desc": desc[:4000],
                 })
         except Exception as e:
             log.warning("glassdoor query '%s' falló: %s", q, e)

@@ -54,13 +54,26 @@ def extract_structured(url: str) -> dict:
     info: dict = {"description": "", "date_posted": "", "valid_through": "",
                   "employment_type": "", "years_official": None, "remote_official": 0,
                   "industry": "", "education": "", "applicant_region": "",
-                  "company_linkedin_url": "", "modality_badge": "", "salary": "",
+                  "company": "", "company_linkedin_url": "", "modality_badge": "", "salary": "",
                   "contrato": "", "jornada": "", "techs_desc": []}
     try:
         html = fetch_page(url)
     except Exception as e:
         info["error"] = str(e)[:100]
         return info
+
+    # CB: oferta expirada redirige a un listado genérico — fetch_page no expone la URL final,
+    # así que re-petición con requests para leer la URL efectiva
+    if "computrabajo" in url.lower():
+        try:
+            resp = requests.get(url, timeout=25, allow_redirects=True, headers={
+                "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120 Safari/537.36"})
+            final_url = str(resp.url)
+            info["_cb_expired"] = (("/ofertas-de-trabajo/" not in final_url)
+                                   and "/trabajo-de-" in final_url) or \
+                bool(re.search(r"empleo no disponible|oferta expirad", html, re.I))
+        except Exception:
+            pass
 
     jp = None
     for b in _jsonld_blocks(html):
@@ -119,9 +132,24 @@ def extract_structured(url: str) -> dict:
             info["jornada"] = bl
         if "$" in bl:
             info["salary"] = bl[:40]
+    # CB: empresa del subtítulo de la ficha ("Empresa - Comuna, Región")
+    if "computrabajo" in url.lower():
+        h1 = html.find("<h1")
+        m_emp = re.search(r'</h1>\s*<p[^>]*>\s*(?:<[^>]+>\s*)*([^<]{2,80})\s*-\s*',
+                          html[h1:h1 + 2500] if h1 >= 0 else "")
+        if m_emp:
+            emp = re.sub(r"\s+", " ", _u(m_emp.group(1))).strip()
+            # descartar placeholders anónimos de CB
+            if not re.search(r"importante empresa|empresa del sector|empresa líder", emp, re.I):
+                info["company"] = emp[:80]
     # fallback section (LinkedIn guest sin JSON-LD)
     if not info["description"]:
         m = re.search(r'<section class="[^"]*description[^"]*"[^>]*>([\s\S]*?)</section>', html)
+        if m:
+            info["description"] = re.sub(r"\s+", " ", _u(re.sub(r"<[^>]+>", " ", m.group(1)))).strip()[:4000]
+    # fallback Computrabajo: ficha sin JSON-LD → div.mbB contiene desc completa
+    if not info["description"]:
+        m = re.search(r'<div class="mbB">([\s\S]*?)(?:</section>|</article>|</main>)', html)
         if m:
             info["description"] = re.sub(r"\s+", " ", _u(re.sub(r"<[^>]+>", " ", m.group(1)))).strip()[:4000]
     # techs de la desc
@@ -200,12 +228,20 @@ def enrich_pending(conn, cfg: Config, max_n: int | None = None) -> int:
         except Exception as e:
             log.warning("enrich falló para %s (%s): %s", r["group_id"], (r.get("title") or "")[:40], e)
             continue
+        # CB: ficha redirige a listado genérico = oferta expirada → desactivar
+        if info.get("_cb_expired"):
+            conn.execute("UPDATE ofertas SET active=0 WHERE group_id=?", (r["group_id"],))
+            log.info("CB expirada (redirect a listado): %s — active=0", (r.get("title") or "")[:40])
+            done += 1
+            time.sleep(1)
+            continue
         new_desc = (info.get("description") or "")[:1800]
         extra = (f" · {info['contrato']}" if info.get("contrato") else "") + \
                 (f" · {info['jornada']}" if info.get("jornada") else "")
         desc = ((new_desc + extra) if new_desc else r.get("description") or "")[:2000]
         conn.execute("""UPDATE ofertas SET
             description=?,
+            company=CASE WHEN company='' OR company IS NULL THEN ? ELSE company END,
             modality=COALESCE(NULLIF(modality,''), ?),
             salary=COALESCE(NULLIF(salary,''), ?),
             techs=COALESCE(NULLIF(techs,''), ?),
@@ -216,7 +252,7 @@ def enrich_pending(conn, cfg: Config, max_n: int | None = None) -> int:
             remote_official=COALESCE(remote_official, ?),
             description_source=?
             WHERE group_id=?""",
-            (desc, info.get("modality_badge") or "", info.get("salary") or "",
+            (desc, info.get("company") or "", info.get("modality_badge") or "", info.get("salary") or "",
              ";".join(info.get("techs_desc", [])), info.get("date_posted") or "",
              info.get("valid_through") or "", info.get("years_official"),
              info.get("remote_official"), info.get("employment_type") or "",
