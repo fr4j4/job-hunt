@@ -148,6 +148,18 @@ class ReportCfg:
     out_dir: Path = field(default_factory=lambda: PROJECT_ROOT / "data" / "reports")
 
 
+@dataclass
+class RelevanceCfg:
+    mode: str = "hybrid"           # keywords | ia | hybrid | off
+    areas_tech: str = r"data|digital|tecnolog|software|informatic|sistemas"
+    areas_nontech: str = (r"venta|b2c|seguridad$|guardia|logistica|produccion|manufactura|"
+                          r"finanzas|contabilidad|recursos_humanos|servicios_generales|"
+                          r"prevencion_de_riesgos|inmobiliaria|administracion_y_secretarias|marketing")
+    nontech_titles: str = (r"guardia|cajer[ao]|repositor|recepcionista|vendedor|operari[ao]|"
+                           r"bodeguero|conductor|mozo|auxiliar|captador")
+    ia_batch: int = 30
+
+
 
 
 @dataclass
@@ -171,7 +183,9 @@ class Config:
     daemon: Daemon
     alerts: Alerts
     report: ReportCfg
+    relevance: RelevanceCfg
     jooble_api_key: str = ""
+    aira_feeds: list[str] = field(default_factory=list)
     project_root: Path = PROJECT_ROOT
     data_dir: Path = field(default_factory=lambda: PROJECT_ROOT / "data")
 
@@ -299,6 +313,17 @@ def load_config(env_file: Path | None = None) -> Config:
         max_salary_samples=_env_int("REPORT_MAX_SALARY_SAMPLES", 60),
         out_dir=PROJECT_ROOT / _env("REPORT_OUT_DIR", "data/reports"),
     )
+    relevance = RelevanceCfg(
+        mode=_env("RELEVANCE_MODE", "hybrid"),
+        areas_tech=_env("RELEVANCE_AREAS_TECH", r"data|digital|tecnolog|software|informatic|sistemas"),
+        areas_nontech=_env("RELEVANCE_AREAS_NOUTECH",
+                           r"venta|b2c|logistica|produccion|manufactura|finanzas|contabilidad|"
+                           r"recursos_humanos|servicios_generales|prevencion_de_riesgos|marketing"),
+        nontech_titles=_env("RELEVANCE_NOUNTECH",
+                            r"guardia|cajer[ao]|repositor|recepcionista|vendedor|operari[ao]|"
+                            r"bodeguero|conductor|mozo|auxiliar|captador"),
+        ia_batch=_env_int("RELEVANCE_IA_BATCH", 30),
+    )
     cfg = Config(
         profile=profile,
         scoring=scoring,
@@ -310,7 +335,9 @@ def load_config(env_file: Path | None = None) -> Config:
         alerts=alerts,
         daemon=daemon,
         report=report,
+        relevance=relevance,
         jooble_api_key=jooble_key,
+        aira_feeds=_env_list("AIRA_FEEDS", "walmart,cencosud_scotiabank,tottus,entel,ripley,itau,bancoestado,wom,codelco,copec,cencosud"),
     )
     cfg.data_dir.mkdir(exist_ok=True)
     return cfg

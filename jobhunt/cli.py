@@ -46,9 +46,19 @@ def cmd_run(cfg, notify: bool = True, on_phase=None) -> None:
         database.register_criteria_version(conn, version_id, cfg)
 
         from .sources import (linkedin, computrabajo, indeed, glassdoor, laborum,
-                              jooble, accenture)
+                              jooble, accenture, aira)
+        from .relevance import filter_offers
         s = cfg.search
         jobs = []
+        if cfg.sources.get("aira"):
+            phase("aira (feeds JSON employers)")
+            try:
+                raw = aira.jobs(cfg.aira_feeds, "aira:")
+                relevantes, stats = filter_offers(raw, cfg)
+                jobs += relevantes
+                log.info("aira: %d/%d ofertas pasaron el gate %s", len(relevantes), len(raw), stats)
+            except Exception as e:
+                log.warning("aira falló (continúa el barrido): %s", e)
         if cfg.sources.get("jooble"):
             phase("jooble")
             # jooble usa browser headless bajo xvfb (la API REST exige login de usuario)
