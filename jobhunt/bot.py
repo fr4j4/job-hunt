@@ -484,15 +484,41 @@ def _op_minutes(op: str) -> int:
 
 
 def _run_search_async(cfg: Config, chat_id: int):
-    """Barrido en background con reporte de inicio/término/error al chat."""
+    """Barrido en background con mensaje vivo que muta por fase (edit_message_text)."""
+    msg_id = None
     try:
         _SEARCH_STATE.update(running=True, t0=time.time())
-        _tg_api(cfg, "sendMessage", {"chat_id": chat_id,
-                                     "text": "🔍 <b>Búsqueda iniciada</b> — barriendo fuentes…",
-                                     "parse_mode": "HTML"})
-        offers, stats = _do_sweep(cfg)
+        sent = _tg_api(cfg, "sendMessage", {"chat_id": chat_id,
+                                            "text": "🔍 <b>Búsqueda iniciada</b> — barriendo fuentes…",
+                                            "parse_mode": "HTML"})
+        msg_id = (sent or {}).get("result", {}).get("message_id")
+        t0 = time.time()
+
+        def on_phase(nombre: str):
+            """Edita el MISMO mensaje con la fase actual (throttle 20s)."""
+            nonlocal msg_id
+            if not msg_id or time.time() - t0 < 20:
+                return
+            mins = int(time.time() - t0) // 60
+            try:
+                _tg_api(cfg, "editMessageText", {
+                    "chat_id": chat_id, "message_id": msg_id,
+                    "text": (f"🔍 <b>Búsqueda en curso</b> ({mins}m)\n"
+                             f"   ▸ {esc(nombre)}"),
+                    "parse_mode": "HTML"})
+            except Exception:
+                pass  # flood o mensaje igual → no tumba el barrido
+
+        offers, stats = _do_sweep(cfg, on_phase=on_phase)
+        # resumen final: borrar el mensaje vivo y mandar el resultado limpio
+        if msg_id:
+            try:
+                _tg_api(cfg, "deleteMessage", {"chat_id": chat_id, "message_id": msg_id})
+            except Exception:
+                pass
         stamp = datetime.now(timezone.utc).strftime("%H:%M:%S")
-        msg = (f"✅ <b>Búsqueda terminada</b> ({stamp})\n"
+        dur = int(time.time() - t0)
+        msg = (f"✅ <b>Búsqueda terminada</b> ({stamp} · {dur // 60}m{dur % 60:02d}s)\n"
                f"   Vistas: <code>{stats.get('total_seen', 0)}</code> · "
                f"Nuevas: <code>{stats.get('new_count', 0)}</code>\n"
                f"   Activas ≥{cfg.alerts.min_score}: <code>{len(offers)}</code>")
@@ -930,10 +956,10 @@ def _register_commands(cfg: Config) -> None:
 
 # ---------------------------------------------------------------- daemon loop
 
-def _do_sweep(cfg: Config) -> tuple[list[dict], dict]:
+def _do_sweep(cfg: Config, on_phase=None) -> tuple[list[dict], dict]:
     """Barrido completo + pool refrescado. Retorna (ofertas ≥min_score, stats del scan_log)."""
     with _sweep_lock:
-        cmd_run(cfg, notify=False)          # barrido SIN mensaje push
+        cmd_run(cfg, notify=False, on_phase=on_phase)   # barrido SIN mensaje push
         conn = database.connect(cfg)
         try:
             offers = [dict(r) for r in conn.execute(

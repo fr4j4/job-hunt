@@ -26,7 +26,15 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-def cmd_run(cfg, notify: bool = True) -> None:
+def cmd_run(cfg, notify: bool = True, on_phase=None) -> None:
+    """on_phase(nombre, detalle) — callback opcional para reportar progreso por fuente."""
+    def phase(nombre: str):
+        if on_phase:
+            try:
+                on_phase(nombre)
+            except Exception:
+                pass
+
     conn = database.connect(cfg)
     try:
         database.init_db(conn)
@@ -38,31 +46,40 @@ def cmd_run(cfg, notify: bool = True) -> None:
         s = cfg.search
         jobs = []
         if cfg.sources.get("jooble"):
+            phase("jooble (browser headless — la lenta)")
             # jooble usa browser headless bajo xvfb (la API REST exige login de usuario)
             try:
                 jobs += jooble.jobs(s.queries_jooble, "perfil:")
             except Exception as e:
                 log.warning("jooble falló (continúa el barrido): %s", e)
         if cfg.sources.get("accenture", True):
+            phase("accenture")
             jobs += accenture.jobs(s.queries_accenture, "perfil:")
         if cfg.sources.get("laborum", True):
+            phase("laborum")
             jobs += laborum.jobs(s.queries_laborum, "perfil:")
         if cfg.sources.get("linkedin"):
+            phase("linkedin (perfil)")
             jobs += linkedin.fetch_jobs(s.queries_linkedin, "perfil:")
         if cfg.sources.get("computrabajo"):
+            phase("computrabajo (perfil)")
             jobs += computrabajo.jobs(s.queries_computrabajo, "perfil:")
         if cfg.search.mode in ("both", "sample"):
             # muestreo amplio: rotación para diversificar sin inflar requests
+            phase("linkedin/computrabajo (muestreo)")
             n = max(1, int(len(s.sample_linkedin) * s.sample_rotation))
             jobs += linkedin.fetch_jobs(s.sample_linkedin[:n], "sample:")
             jobs += computrabajo.jobs(s.sample_computrabajo[:n], "sample:")
             if cfg.sources.get("indeed"):
+                phase("indeed (muestra)")
                 jobs += indeed.jobs(s.sample_indeed[:n], "muestra:")
             if cfg.sources.get("glassdoor") and _is_premium_tick(cfg):
                 jobs += glassdoor.jobs(s.sample_glassdoor[:2], "muestra:")
         if cfg.sources.get("indeed") and _is_premium_tick(cfg):
+            phase("indeed (perfil)")
             jobs += indeed.jobs(s.queries_indeed, "perfil:")
         if cfg.sources.get("glassdoor") and _is_premium_tick(cfg):
+            phase("glassdoor (perfil)")
             jobs += glassdoor.jobs(s.queries_glassdoor, "perfil:")
 
         log.info("barrido iniciado: %d ofertas crudas (mode=%s)", len(jobs), s.mode)
@@ -96,6 +113,7 @@ def cmd_run(cfg, notify: bool = True) -> None:
         # IA complementaria para las NUEVAS (si IA_ENABLED) — llena modality/salary/
         # seniority/flags al indexarse, no espera al batch nocturno
         if new_jobs and cfg.ia.enabled and cfg.ia.api_key:
+            phase(f"IA complementaria ({min(12, len(new_jobs))} nuevas)")
             try:
                 from .enrich import run_ia_batch, profile_description
                 n_ia = run_ia_batch(conn, cfg, profile_description(cfg),
@@ -110,6 +128,7 @@ def cmd_run(cfg, notify: bool = True) -> None:
                 log.warning("IA complementaria falló (barrido continúa): %s", e)
 
         # auto-enrich de las nuevas (Anillo A, máx 8 para no frenar)
+        phase("enrich descripciones")
         from .enrich import enrich_pending
         try:
             enrich_pending(conn, cfg, max_n=8)
@@ -118,6 +137,7 @@ def cmd_run(cfg, notify: bool = True) -> None:
             log.warning("enrich falló (barrido continúa): %s", e)
 
         # re-score de las que cambiaron (descripción nueva)
+        phase("rescore pool")
         database.rescore_all(conn, compute_score, version_id, cfg)
 
         # digest: solo >= ALERT_MIN_SCORE
