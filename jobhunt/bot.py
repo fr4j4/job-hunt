@@ -283,7 +283,8 @@ def _salary_clp(cfg: Config, j: dict) -> float | None:
 
 def _parse_filters(tokens: list[str]) -> dict:
     """'remoto sueldo2.5 stgo' → {'modality': {...}, 'min_salary': 2.5e6, 'has_salary': False, 'loc': ['santiago']}"""
-    f: dict = {"modality": set(), "min_salary": None, "has_salary": False, "loc": []}
+    f: dict = {"modality": set(), "min_salary": None, "has_salary": False, "loc": [],
+               "no_excluyente": False, "lang": ""}
     _MOD = {"remote": "remoto", "remoto": "remoto", "remota": "remoto",
             "hybrid": "híbrido", "hibrido": "híbrido", "hibrida": "híbrido",
             "onsite": "presencial", "presencial": "presencial"}
@@ -291,10 +292,18 @@ def _parse_filters(tokens: list[str]) -> dict:
             "valpo": "valparaiso", "valparaiso": "valparaiso",
             "conce": "concepcion", "concepcion": "concepcion",
             "araucania": "araucania", "temuco": "temuco"}
+    _LANG = {"en": "inglés", "ingles": "inglés", "english": "inglés",
+             "aleman": "alemán", "frances": "francés", "portugues": "portugués"}
     for t in tokens:
         tl = _norm_txt(t).replace(":", "")
         if tl in _MOD:
             f["modality"].add(_MOD[tl])
+            continue
+        if tl in ("sinen", "noen", "sinexcluyente"):
+            f["no_excluyente"] = True
+            continue
+        if tl in _LANG:
+            f["lang"] = _LANG[tl]
             continue
         m_num = re.fullmatch(r"(?:salary|sueldo|min|pay|pago|>|>=)?([\d.,]+)\s*([mk]?)", tl)
         if m_num and any(ch.isdigit() for ch in tl) and tl not in ("min",):
@@ -334,6 +343,10 @@ def _describe_filters(f: dict) -> str:
         parts.append(f"≥${v / 1_000_000:.1f}M" if v >= 1_000_000 else f"≥${v:,.0f}")
     if f["loc"]:
         parts.append(" · ".join(f["loc"]))
+    if f["lang"]:
+        parts.append(f"pide {f['lang']}")
+    if f["no_excluyente"]:
+        parts.append("sin idioma excluyente")
     return " + ".join(parts) or "sin filtro"
 
 
@@ -362,6 +375,22 @@ def _filter_offers(cfg: Config, f: dict) -> list[dict]:
             hay = " ".join([_norm_txt(j.get("location") or ""), _norm_txt(j.get("title") or "")])
             if not any(t in hay for t in f["loc"]):
                 continue
+        # idiomas: parsear ai_idiomas una vez
+        idiomas = []
+        try:
+            idiomas = json.loads(j.get("ai_idiomas") or "[]")
+            if not isinstance(idiomas, list):
+                idiomas = []
+        except Exception:
+            idiomas = []
+        if f["lang"]:
+            if not any((i.get("idioma") or "").lower() == f["lang"] for i in idiomas if isinstance(i, dict)):
+                continue
+        if f["no_excluyente"]:
+            # excluir ofertas donde CUALQUIER idioma venga marcado excluyente
+            # (si la oferta no pasó por el re-pase de idiomas, no la bloqueamos)
+            if idiomas and any(i.get("excluyente") for i in idiomas if isinstance(i, dict)):
+                continue
         out.append(j)
     return out
 
@@ -388,12 +417,17 @@ def _enc_filters(f: dict) -> str:
         parts.append("l" + loc.replace(" ", "")[:12])
     if f["has_salary"]:
         parts.append("q")
+    if f["no_excluyente"]:
+        parts.append("nx")
+    if f["lang"]:
+        parts.append("g" + f["lang"][:8].replace(" ", ""))
     return "-".join(parts)
 
 
 def _dec_filters(enc: str) -> dict:
     """Inverso de _enc_filters (fallback si el daemon se reinició entre páginas)."""
-    f: dict = {"modality": set(), "min_salary": None, "has_salary": False, "loc": []}
+    f: dict = {"modality": set(), "min_salary": None, "has_salary": False, "loc": [],
+               "no_excluyente": False, "lang": ""}
     for p in (enc or "").split("-"):
         if not p:
             continue
@@ -401,6 +435,10 @@ def _dec_filters(enc: str) -> dict:
             f["modality"].add({"r": "remoto", "h": "híbrido", "p": "presencial"}[p])
         elif p == "q":
             f["has_salary"] = True
+        elif p == "nx":
+            f["no_excluyente"] = True
+        elif p.startswith("g"):
+            f["lang"] = p[1:]
         elif p.startswith("s"):
             try:
                 f["min_salary"] = float(p[1:]) * 1_000_000
@@ -492,8 +530,9 @@ def _help_text() -> str:
         "/jobs [filtros] — filtra el pool (combinables):",
         "    remote · hybrid · onsite · salary (con sueldo publicado) ·",
         "    salary2.5 (≥$2.5M) · 2.5 / 500k / 2.500.000 ·",
+        "    sinen (sin idioma excluyente) · en (pide inglés)",
         "    ubicación: stgo, temuco, valpo, conce, araucania o texto libre",
-        "    ej: <code>/jobs remote salary2.5</code> · <code>/jobs temuco</code> · <code>/jobs hybrid stgo</code>",
+        "    ej: <code>/jobs remote salary2.5</code> · <code>/jobs sinen</code> · <code>/jobs en remote</code>",
         "/help — esta ayuda",
     ])
 
