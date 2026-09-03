@@ -147,9 +147,10 @@ def extract_structured(url: str) -> dict:
         m = re.search(r'<section class="[^"]*description[^"]*"[^>]*>([\s\S]*?)</section>', html)
         if m:
             info["description"] = re.sub(r"\s+", " ", _u(re.sub(r"<[^>]+>", " ", m.group(1)))).strip()[:4000]
-    # fallback Computrabajo: ficha sin JSON-LD → div.mbB contiene desc completa
+    # fallback Computrabajo: ficha sin JSON-LD → desc en <p class="mbB"> (antes <div class="mbB">;
+    # el div ahora solo contiene badges de salario/contrato, el <p> tiene el texto completo)
     if not info["description"]:
-        m = re.search(r'<div class="mbB">([\s\S]*?)(?:</section>|</article>|</main>)', html)
+        m = re.search(r'<(?:p|div) class="mbB">([a-zA-ZÁÉÍÓÚáéíóúÑñ¡¿][\s\S]{100,6000}?)</(?:p|div)>', html)
         if m:
             info["description"] = re.sub(r"\s+", " ", _u(re.sub(r"<[^>]+>", " ", m.group(1)))).strip()[:4000]
     # techs de la desc
