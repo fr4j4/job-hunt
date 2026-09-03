@@ -214,6 +214,33 @@ def ia_extract(cfg: Config, job: dict, profile_desc: str) -> dict | None:
     return None
 
 
+def _extract_aira_spa(url: str) -> dict:
+    """Ficha AIRA (SPA client-side): requiere browser. Extrae el <p> más largo = descripción."""
+    info: dict = {"description": "", "description_source": "aira-spa"}
+    try:
+        from playwright.sync_api import sync_playwright
+        pw = sync_playwright().start()
+        try:
+            br = pw.chromium.launch(headless=False, args=["--no-sandbox"])
+            pg = br.new_page()
+            try:
+                pg.goto(url, wait_until="domcontentloaded", timeout=25000)
+                pg.wait_for_timeout(3500)
+                ps = pg.evaluate(
+                    "() => Array.from(document.querySelectorAll('p'))"
+                    ".filter(e => e.innerText && e.innerText.length > 200)"
+                    ".map(e => e.innerText.trim())"
+                    ".sort((a, b) => b.length - a.length).slice(0, 2).join(' ')")
+                info["description"] = re.sub(r"\s+", " ", ps or "").strip()[:2000]
+            finally:
+                br.close()
+        finally:
+            pw.stop()
+    except Exception as e:
+        log.warning("aira-spa falló (%s): %s", url[:50], e)
+    return info
+
+
 def enrich_pending(conn, cfg: Config, max_n: int | None = None) -> int:
     """Enriquece ofertas activas con descripción corta: Anillo A primero, C si sigue vacío."""
     rows = conn.execute(
@@ -227,7 +254,11 @@ def enrich_pending(conn, cfg: Config, max_n: int | None = None) -> int:
         if not r.get("url"):
             continue
         try:
-            info = extract_structured(r["url"])
+            # AIRA: ficha SPA client-side → browser (el feed no trae desc en ningún formato)
+            if "airavirtual.com" in (r.get("url") or ""):
+                info = _extract_aira_spa(r["url"])
+            else:
+                info = extract_structured(r["url"])
         except Exception as e:
             log.warning("enrich falló para %s (%s): %s", r["group_id"], (r.get("title") or "")[:40], e)
             continue
