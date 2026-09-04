@@ -686,11 +686,130 @@ def _handle_command(cfg: Config, message: dict, state: dict) -> None:
         elif cmd == "/channel":
             conn = database.connect(cfg)
             try:
-                from .channel import channel_status
-                _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
-                                             "text": channel_status(conn, cfg)})
+                from .channel import (publish_channel, publish_daily_digest,
+                                      publish_weekly_remote, publish_weekly_salary,
+                                      publish_trends, channel_status)
+                action = (arg or "").strip().lower()
+                confirm = action.endswith(" confirm")
+                if confirm:
+                    action = action.replace(" confirm", "").strip()
+                api = _tg_api_for_channel(cfg)
+                if action == "":
+                    _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
+                                                 "text": channel_status(conn, cfg)})
+                elif action in ("publish", "daily", "weekly-remote", "weekly-salary",
+                                "weekly", "trends", "all", "dry"):
+                    def _run():
+                        import time as _t
+                        if action in ("publish", "dry", "all"):
+                            stats = publish_channel(cfg, conn, api, dry_run=(action == "dry"))
+                            if action == "dry":
+                                for p in stats.get("dry_run_preview", []):
+                                    _tg_api(cfg, "sendMessage", {
+                                        "chat_id": chat_id, "text": "👁 preview:\n" + p,
+                                        "parse_mode": "HTML", "disable_web_page_preview": True})
+                                    _t.sleep(0.5)
+                            else:
+                                _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
+                                                             "text": f"📢 canal publish: {stats}"})
+                        if action in ("daily", "all"):
+                            ok = publish_daily_digest(cfg, conn, api)
+                            _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
+                                                         "text": "📊 daily digest enviado" if ok else
+                                                                 "📊 daily digest: sin candidatas o ya enviado hoy"})
+                            _t.sleep(1)
+                        if action in ("weekly-remote", "weekly", "all"):
+                            ok = publish_weekly_remote(cfg, conn, api)
+                            _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
+                                                         "text": "🌍 weekly-remote enviado" if ok else
+                                                                 "🌍 weekly-remote: sin candidatas o ya enviado"})
+                            _t.sleep(1)
+                        if action in ("weekly-salary", "weekly", "all"):
+                            ok = publish_weekly_salary(cfg, conn, api)
+                            _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
+                                                         "text": "💰 weekly-salary enviado" if ok else
+                                                                 "💰 weekly-salary: sin candidatas o ya enviado"})
+                            _t.sleep(1)
+                        if action in ("trends", "all"):
+                            ok = publish_trends(cfg, conn, api)
+                            _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
+                                                         "text": "📈 trends enviado" if ok else
+                                                                 "📈 trends: sin datos o ya enviado este mes"})
+                    threading.Thread(target=_run, daemon=True).start()
+                elif action == "reset":
+                    if confirm:
+                        n = conn.execute("""UPDATE ofertas SET notified_channel_at=''
+                            WHERE active=1 AND notified_channel_at != ''""").rowcount
+                        conn.commit()
+                        _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
+                                                     "text": f"🧹 {n} marcas limpiadas — "
+                                                             f"{n} ofertas vuelven a ser candidatas"})
+                        log.info("canal reset: %d marcas limpiadas", n)
+                    else:
+                        cand = conn.execute(_count_gate_sql(cfg)).fetchone()[0]
+                        _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
+                                                     "text": f"⚠️ Esto limpiará las marcas de publicación "
+                                                             f"de todas las activas ({cand} volverían a "
+                                                             f"ser candidatas).\nConfirma con: "
+                                                             f"<code>/channel reset confirm</code>"})
+                else:
+                    _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
+                                                 "text": "❓ /channel <action>\n"
+                                                         "<code>publish · daily · weekly-remote · "
+                                                         "weekly-salary · weekly · trends · all · dry · reset</code>"})
             finally:
                 conn.close()
+        elif cmd == "/db":
+            action = (arg or "").strip().lower()
+            confirm = action.endswith(" confirm")
+            if confirm:
+                action = action.replace(" confirm", "").strip()
+            if action == "" or action == "stats":
+                conn = database.connect(cfg)
+                try:
+                    act = conn.execute("SELECT COUNT(*) FROM ofertas WHERE active=1").fetchone()[0]
+                    inact = conn.execute("SELECT COUNT(*) FROM ofertas WHERE active=0").fetchone()[0]
+                    old = conn.execute("""SELECT COUNT(*) FROM ofertas WHERE active=0
+                        AND last_seen < datetime('now', '-30 days')""").fetchone()[0]
+                    nondev = conn.execute("""SELECT COUNT(*) FROM ofertas WHERE active=1
+                        AND rol_categoria IN ('Ingeniería no-software','No-tech','Profesor/Formación',
+                        'Analista/Empresa')""").fetchone()[0]
+                    _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
+                        "text": f"🗄 <b>DB</b>\n✅ activas: {act}\n🪦 inactivas: {inact} "
+                                f"(>30d purgable: {old})\n🚫 no-dev activas: {nondev}\n"
+                                f"purge disponible: <code>old</code> ({old}) · <code>nondev</code> ({nondev})"})
+                finally:
+                    conn.close()
+            elif action in ("old", "nondev"):
+                if confirm:
+                    conn = database.connect(cfg)
+                    try:
+                        import shutil, pathlib
+                        bak = pathlib.Path(cfg.data_dir) / "backups"
+                        bak.mkdir(exist_ok=True)
+                        shutil.copy2(cfg.db_path if hasattr(cfg, 'db_path') else cfg.data_dir / "ofertas.sqlite",
+                                     bak / f"ofertas-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M')}.sqlite")
+                        if action == "old":
+                            n = conn.execute("""DELETE FROM ofertas WHERE active=0
+                                AND last_seen < datetime('now', '-30 days')""").rowcount
+                        else:
+                            n = conn.execute("""DELETE FROM ofertas WHERE active=1
+                                AND rol_categoria IN ('Ingeniería no-software','No-tech','Profesor/Formación',
+                                'Analista/Empresa')""").rowcount
+                        conn.commit()
+                        _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
+                                                     "text": f"🗑 {n} ofertas eliminadas ({action}) — "
+                                                             f"backup previo en data/backups/"})
+                        log.info("db purge %s: %d filas", action, n)
+                    finally:
+                        conn.close()
+                else:
+                    _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
+                                                 "text": f"⚠️ /db purge {action}: DELETE físico. "
+                                                         f"Confirma con: <code>/db {action} confirm</code>"})
+            else:
+                _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
+                                             "text": "❓ /db <action>\n<code>stats · old · nondev</code>"})
         elif cmd == "/latest":
             try:
                 n = max(1, min(25, int(arg))) if arg else 10
@@ -975,8 +1094,13 @@ def _ia_sweep_maybe(cfg: Config, state: dict) -> None:
     threading.Thread(target=_ia_batch_async, args=(cfg, None), daemon=True).start()
 
 
+def _count_gate_sql(cfg: Config) -> str:
+    """Conteo de candidatas del gate (para preview de /channel reset)."""
+    return (f"SELECT COUNT(*) FROM ofertas WHERE active=1 AND market_score >= {int(cfg.channel.min_score)} "
+            f"AND date_canonical >= date('now', '-{int(cfg.channel.max_age_days)} days')")
+
+
 def _tg_api_for_channel(cfg: Config):
-    """Adapter para channel.py: tg_api(method, payload) → dict, sin lanzar excepciones."""
     def call(method: str, payload: dict) -> dict:
         try:
             return _tg_api(cfg, method, payload)
@@ -998,7 +1122,7 @@ def _digests_maybe(cfg: Config, state: dict) -> None:
         return
     try:
         from .channel import (publish_daily_digest, publish_weekly_digests,
-                              publish_tendencias)
+                              publish_trends)
         # diario
         if cfg.channel.digest_daily and now.hour >= cfg.channel.digest_daily_hour_utc:
             k = f"daily:{now.strftime('%Y-%m-%d')}"
@@ -1014,10 +1138,10 @@ def _digests_maybe(cfg: Config, state: dict) -> None:
                 publish_weekly_digests(cfg, conn, _tg_api_for_channel(cfg))
         # tendencias (día 1 de mes)
         if cfg.channel.digest_tendencias and now.day == 1 and now.hour >= 13:
-            k = f"tend:{now.strftime('%Y-%m')}"
+            k = f"trends:{now.strftime('%Y-%m')}"
             if keys.get(k) != 1:
                 keys[k] = 1
-                publish_tendencias(cfg, conn, _tg_api_for_channel(cfg))
+                publish_trends(cfg, conn, _tg_api_for_channel(cfg))
     except Exception as e:
         log.warning("digests falló (no tumba daemon): %s", e)
     finally:
@@ -1032,7 +1156,8 @@ def _register_commands(cfg: Config) -> None:
         {"command": "report", "description": "Análisis de mercado completo con PDF"},
         {"command": "latest", "description": "Últimas ofertas registradas"},
         {"command": "stats",  "description": "Cobertura IA y datos del pool"},
-        {"command": "channel", "description": "Estado del canal (umbral, cola, market score)"},
+        {"command": "channel", "description": "Canal: status, publish, daily, weekly-remote/salary, trends, all, dry, reset"},
+        {"command": "db", "description": "DB: stats y purge (old/nondev) con confirm"},
         {"command": "score",  "description": "Ofertas con score ≥ N (ej: /score 60)"},
         {"command": "jobs",   "description": "Filtra: remote, salary2.5, temuco… combinables"},
         {"command": "help",   "description": "Ayuda"},

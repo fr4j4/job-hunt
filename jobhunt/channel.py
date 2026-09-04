@@ -289,10 +289,10 @@ def publish_channel(cfg: Config, conn, tg_api, dry_run: bool = False) -> dict:
 def _bucket(kind: str, now: datetime) -> str:
     if kind == "daily":
         return now.date().isoformat()
-    if kind in ("weekly-remoto", "weekly-salario"):
+    if kind in ("weekly-remote", "weekly-salary"):
         iso = now.date().isocalendar()
         return f"{iso[0]}-W{iso[1]:02d}"
-    if kind == "tendencias":
+    if kind == "trends":
         return now.date().strftime("%Y-%m")
     return now.date().isoformat()
 
@@ -376,32 +376,34 @@ def publish_daily_digest(cfg: Config, conn, tg_api, dry_run: bool = False) -> bo
     return _send_digest(cfg, tg_api, "daily", text, conn, now)
 
 
-def publish_weekly_digests(cfg: Config, conn, tg_api, dry_run: bool = False) -> bool:
-    """Digests C (remoto por seniority) y D (ranking salarial) — mismo tick, 2 mensajes."""
-    from .notify import esc
-    now = datetime.now(timezone.utc)
-    sent = False
-    # ---- C: remoto por seniority ----
+def _weekly_remote_rows(conn, cfg: Config) -> dict[str, list[dict]]:
     rows = [dict(r) for r in conn.execute("""SELECT * FROM ofertas WHERE active=1
         AND market_score >= :min_score AND date_canonical >= date('now', '-' || :max_age || ' days')
         AND (modality LIKE '%remot%' OR remote_official LIKE '%TELECOMMUTE%')
         AND seniority_real != '' AND notified_channel_at = ''
         ORDER BY market_score DESC, first_seen DESC LIMIT 60""",
         {"min_score": cfg.channel.min_score - 5, "max_age": cfg.channel.max_age_days}).fetchall()]
-    by_sen: dict[str, list[dict]] = {}
     featured = set()
-    # variedad: excluir destacados en digests de las últimas 4 semanas
     try:
         featured = {r["group_id"] for r in conn.execute("""SELECT group_id FROM channel_posts
-            WHERE kind IN ('daily','weekly-remoto','weekly-salario') AND group_id != ''
+            WHERE kind IN ('daily','weekly-remote','weekly-salary') AND group_id != ''
             AND posted_at >= datetime('now', '-28 days')""").fetchall()}
     except Exception:
         pass
+    by_sen: dict[str, list[dict]] = {}
     for r in rows:
         sen = r["seniority_real"]
         if r["group_id"] in featured or len(by_sen.get(sen, [])) >= 3:
             continue
         by_sen.setdefault(sen, []).append(r)
+    return by_sen
+
+
+def publish_weekly_remote(cfg: Config, conn, tg_api, dry_run: bool = False) -> bool:
+    """Digest C: mejor remoto de la semana × seniority (junior/semi/senior/lead)."""
+    from .notify import esc
+    now = datetime.now(timezone.utc)
+    by_sen = _weekly_remote_rows(conn, cfg)
     sections = []
     for sen, label in (("junior", "🟢 Junior"), ("semi", "🟡 Semi"),
                        ("senior", "🟠 Senior"), ("lead", "🔴 Lead")):
@@ -410,34 +412,53 @@ def publish_weekly_digests(cfg: Config, conn, tg_api, dry_run: bool = False) -> 
             continue
         body = "\n\n".join(_top_row_line(r) for r in items)
         sections.append(f"{label}\n{body}")
-    if sections:
-        text = "🌍 <b>Mejor remoto de la semana</b> · por seniority\n\n" + "\n\n".join(sections)
-        if dry_run:
-            log.info("canal: dry-run digest semanal remoto:\n%s", text[:400])
-        else:
-            sent = _send_digest(cfg, tg_api, "weekly-remoto", text, conn, now) or sent
-    # ---- D: ranking salarial ----
+    if not sections:
+        log.info("canal: weekly-remote sin candidatas — silencio honesto")
+        return False
+    text = "🌍 <b>Mejor remoto de la semana</b> · por seniority\n\n" + "\n\n".join(sections)
+    if dry_run:
+        log.info("canal: dry-run weekly-remote:\n%s", text[:400])
+        return False
+    return _send_digest(cfg, tg_api, "weekly-remote", text, conn, now)
+
+
+def publish_weekly_salary(cfg: Config, conn, tg_api, dry_run: bool = False) -> bool:
+    """Digest D: ranking salarial semanal (top 5 declarados)."""
+    from .notify import esc
     from .scoring import _salary_to_clp_monthly
+    now = datetime.now(timezone.utc)
+    rows = [dict(r) for r in conn.execute("""SELECT * FROM ofertas WHERE active=1
+        AND market_score >= :min_score AND date_canonical >= date('now', '-' || :max_age || ' days')
+        AND salary != '' AND notified_channel_at = ''
+        ORDER BY market_score DESC, first_seen DESC LIMIT 60""",
+        {"min_score": cfg.channel.min_score - 5, "max_age": cfg.channel.max_age_days}).fetchall()]
     sal_rows = []
     for r in rows:
         sal = _salary_to_clp_monthly(r.get("salary") or "", r.get("description") or "")
         if sal:
             sal_rows.append((sal, r))
     sal_rows.sort(key=lambda x: -x[0])
-    if sal_rows:
-        lines = []
-        for i, (sal, r) in enumerate(sal_rows[:5], 1):
-            lines.append(f"{i}. ${sal:,}".replace(",", ".") +
-                         f" — {esc(r['title'][:60])} ({esc((r.get('company') or '?')[:25])})")
-        text = "💰 <b>Top salarios de la semana</b>\n" + "\n".join(lines)
-        if dry_run:
-            log.info("canal: dry-run ranking salarial:\n%s", text[:400])
-        else:
-            sent = _send_digest(cfg, tg_api, "weekly-salario", text, conn, now) or sent
-    return sent
+    if not sal_rows:
+        log.info("canal: weekly-salary sin candidatas — silencio honesto")
+        return False
+    lines = []
+    for i, (sal, r) in enumerate(sal_rows[:5], 1):
+        lines.append(f"{i}. ${sal:,}".replace(",", ".") +
+                     f" — {esc(r['title'][:60])} ({esc((r.get('company') or '?')[:25])})")
+    text = "💰 <b>Top salarios de la semana</b>\n" + "\n".join(lines)
+    if dry_run:
+        log.info("canal: dry-run weekly-salary:\n%s", text[:400])
+        return False
+    return _send_digest(cfg, tg_api, "weekly-salary", text, conn, now)
 
 
-def publish_tendencias(cfg: Config, conn, tg_api, dry_run: bool = False) -> bool:
+def publish_weekly_digests(cfg: Config, conn, tg_api, dry_run: bool = False) -> bool:
+    """Wrapper compat: dispara C y D (daemon semanal)."""
+    sent = publish_weekly_remote(cfg, conn, tg_api, dry_run=dry_run)
+    return publish_weekly_salary(cfg, conn, tg_api, dry_run=dry_run) or sent
+
+
+def publish_trends(cfg: Config, conn, tg_api, dry_run: bool = False) -> bool:
     """Digest E: tendencias mensuales (SQL puro; IA opcional con fallback)."""
     from .notify import esc
     now = datetime.now(timezone.utc)
@@ -481,11 +502,11 @@ def publish_tendencias(cfg: Config, conn, tg_api, dry_run: bool = False) -> bool
         if out and isinstance(out, dict) and out.get("bullets"):
             text += "\n\n" + "\n".join(f"• {esc(str(b)[:90])}" for b in out["bullets"][:2])
     except Exception as e:
-        log.info("canal: tendencias sin IA (%s) — fallback determinístico", str(e)[:60])
+        log.info("canal: trends sin IA (%s) — fallback determinístico", str(e)[:60])
     if dry_run:
-        log.info("canal: dry-run tendencias:\n%s", text[:500])
+        log.info("canal: dry-run trends:\n%s", text[:500])
         return False
-    return _send_digest(cfg, tg_api, "tendencias", text, conn, now)
+    return _send_digest(cfg, tg_api, "trends", text, conn, now)
 
 
 def channel_status(conn, cfg: Config) -> str:

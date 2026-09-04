@@ -307,7 +307,7 @@ def main():
         # python -m jobhunt channel [--dry-run] [--digest]
         from .db import connect, init_db
         from .channel import (publish_channel, publish_daily_digest,
-                              publish_weekly_digests, publish_tendencias)
+                              publish_weekly_digests, publish_trends)
         conn = connect(cfg)
         init_db(conn)
         dry = "--dry-run" in sys.argv
@@ -318,7 +318,7 @@ def main():
         if "--digest" in sys.argv or dry:
             publish_daily_digest(cfg, conn, _tg_api_for_channel(cfg), dry_run=dry)
             publish_weekly_digests(cfg, conn, _tg_api_for_channel(cfg), dry_run=dry)
-            publish_tendencias(cfg, conn, _tg_api_for_channel(cfg), dry_run=dry)
+            publish_trends(cfg, conn, _tg_api_for_channel(cfg), dry_run=dry)
         conn.close()
     elif cmd == "ia":
         conn = database.connect(cfg)
