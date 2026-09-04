@@ -771,7 +771,7 @@ def _handle_command(cfg: Config, message: dict, state: dict) -> None:
                     conn.close()
             else:
                 _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
-                                             "text": "❓ /channel-<action>\n"
+                                             "text": "❓ /channel-&lt;action&gt;\n"
                                                      "<code>/channel · /channel-publish · "
                                                      "/channel-daily · /channel-weekly-remote · "
                                                      "/channel-weekly-salary · /channel-weekly · "
@@ -827,7 +827,7 @@ def _handle_command(cfg: Config, message: dict, state: dict) -> None:
                                                          f"Confirma con: <code>/db-{action}-confirm</code>"})
             else:
                 _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
-                                             "text": "❓ /db <action>\n<code>stats · old · nondev</code>"})
+                                             "text": "❓ /db-&lt;action&gt; · <code>stats · old · nondev</code>"})
         elif cmd == "/latest":
             try:
                 n = max(1, min(25, int(arg))) if arg else 10
