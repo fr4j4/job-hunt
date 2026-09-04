@@ -292,22 +292,22 @@ def select_channel_offers(conn, cfg: Config, require_ia: bool = False) -> list[d
 
 
 def publish_channel(cfg: Config, conn, tg_api, dry_run: bool = False,
-                    budget: int | None = None, require_ia: bool = False) -> dict:
+                    budget: int | None = None, require_ia: bool = False,
+                    drain: bool = False) -> dict:
     """Publica al canal las candidatas (gates spec v3 §4, presupuesto v4.1 §3.3). Retorna stats.
 
     tg_api: callable (method, payload) → dict (el bot inyecta _tg_api).
     notified_channel_at se setea SOLO si Telegram aceptó (ok=true).
     budget: tope de posts de ESTA invocación (presupuesto restante del barrido —
-    v4.1 A3); si None, solo rige cfg.channel.max_posts. Commit POR POST (C3):
-    un crash entre send y commit no pierde las marcas ya enviadas.
+    v4.1 A3); si None, rige cfg.channel.max_posts.
+    drain=True: IGNORA max_posts/budget y drena TODA la cola pendiente
+    (comando manual /channel_publish*; el barrido automático sigue con budget).
+    Commit POR POST (C3): un crash entre send y commit no pierde las marcas ya enviadas.
     require_ia=True: solo ofertas revisadas por IA (ia_model != '').
     """
     stats: dict = {"candidates": 0, "posted": 0, "skipped_age": 0, "skipped_score": 0,
                    "skipped_notified": 0, "skipped_dev": 0}
     if not cfg.channel.enabled or not cfg.channel.chat_id:
-        return stats
-    tope = min(cfg.channel.max_posts, budget) if budget is not None else cfg.channel.max_posts
-    if tope <= 0:
         return stats
 
     # todas las que cumplen score+notified (sin tope) para stats reales de skips
@@ -317,6 +317,15 @@ def publish_channel(cfg: Config, conn, tg_api, dry_run: bool = False,
     rows = [dict(r) for r in conn.execute(gate_sql, {
         "min_score": cfg.channel.min_score, "max_age": cfg.channel.max_age_days}).fetchall()]
     stats["candidates"] = len(rows)
+
+    if drain:
+        tope = len(rows)                 # drena todo lo pendiente (manual)
+    elif budget is not None:
+        tope = min(cfg.channel.max_posts, budget)
+    else:
+        tope = cfg.channel.max_posts
+    if tope <= 0:
+        return stats
 
     posteadas = []
     for r in rows:

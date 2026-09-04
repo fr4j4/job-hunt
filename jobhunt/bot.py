@@ -774,7 +774,8 @@ def _handle_command(cfg: Config, message: dict, state: dict) -> None:
                     try:
                         if action in ("publish", "publish-ia", "dry", "all"):
                             stats = publish_channel(cfg, conn, api, dry_run=(action == "dry"),
-                                                    require_ia=(action == "publish-ia"))
+                                                    require_ia=(action == "publish-ia"),
+                                                    drain=True)   # manual: drena toda la cola
                             if action == "dry":
                                 for p in stats.get("dry_run_preview", []):
                                     _tg_api(cfg, "sendMessage", {

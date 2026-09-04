@@ -93,6 +93,25 @@ def test_publish_budget_none_comportamiento_viejo(conn_mem, cfg):
     assert s["posted"] == cfg.channel.max_posts  # 10, como siempre
 
 
+def test_publish_drain_ignora_max_posts(conn_mem, cfg):
+    """drain=True (comando manual /channel_publish) → publica TODAS las candidatas."""
+    cfg.channel.chat_id = "-1004495706494"
+    cfg.channel.sleep_s = 0
+    total = cfg.channel.max_posts + 7   # más que el tope
+    for i in range(total):
+        conn_mem.execute("""INSERT INTO ofertas (group_id, title, company, modality, salary,
+            description, techs, rol_categoria, market_score, notified_channel_at, active,
+            date_canonical, first_seen, last_seen, source, url)
+            VALUES (?, 'Dev', 'X', 'remoto', 'CLP 2500000', 'xxxx', 'Py', 'Backend', 80,
+            '', 1, date('now'), datetime('now'), datetime('now'), 't', 'u')""",
+                         (f"g{i}",))
+    conn_mem.commit()
+    s = publish_channel(cfg, conn_mem, lambda *a: {"ok": True, "result": {"message_id": 1}},
+                        drain=True)
+    assert s["posted"] == total          # drena TODO, ignora max_posts
+    assert s["candidates"] == total
+
+
 # ---------- commit por post (C3) ----------
 
 def test_publish_commit_por_post(conn_mem, cfg):
