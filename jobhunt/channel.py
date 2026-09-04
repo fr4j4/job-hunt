@@ -232,15 +232,22 @@ def select_channel_offers(conn, cfg: Config) -> list[dict]:
     return out[:cfg.channel.max_posts]
 
 
-def publish_channel(cfg: Config, conn, tg_api, dry_run: bool = False) -> dict:
-    """Publica al canal las candidatas (gates spec v3 §4). Retorna stats.
+def publish_channel(cfg: Config, conn, tg_api, dry_run: bool = False,
+                    budget: int | None = None) -> dict:
+    """Publica al canal las candidatas (gates spec v3 §4, presupuesto v4.1 §3.3). Retorna stats.
 
     tg_api: callable (method, payload) → dict (el bot inyecta _tg_api).
     notified_channel_at se setea SOLO si Telegram aceptó (ok=true).
+    budget: tope de posts de ESTA invocación (presupuesto restante del barrido —
+    v4.1 A3); si None, solo rige cfg.channel.max_posts. Commit POR POST (C3):
+    un crash entre send y commit no pierde las marcas ya enviadas.
     """
     stats: dict = {"candidates": 0, "posted": 0, "skipped_age": 0, "skipped_score": 0,
                    "skipped_notified": 0, "skipped_dev": 0}
     if not cfg.channel.enabled or not cfg.channel.chat_id:
+        return stats
+    tope = min(cfg.channel.max_posts, budget) if budget is not None else cfg.channel.max_posts
+    if tope <= 0:
         return stats
 
     # todas las que cumplen score+notified (sin tope) para stats reales de skips
@@ -253,7 +260,7 @@ def publish_channel(cfg: Config, conn, tg_api, dry_run: bool = False) -> dict:
         if cfg.channel.require_dev and not is_dev(r.get("rol_categoria"), r.get("title") or "", cfg):
             stats["skipped_dev"] += 1
             continue
-        if len(posteadas) >= cfg.channel.max_posts:
+        if len(posteadas) >= tope:
             break
         posteadas.append(r)
 
@@ -282,6 +289,8 @@ def publish_channel(cfg: Config, conn, tg_api, dry_run: bool = False) -> dict:
                 conn.execute("""INSERT INTO channel_posts (message_id, group_id, kind, bucket,
                     body_hash, posted_at) VALUES (?, ?, 'offer', ?, '', ?)""",
                              (resp["result"]["message_id"], r["group_id"], r["group_id"], now))
+                # commit POR POST (C3): crash entre send y commit no pierde marcas
+                conn.commit()
                 stats["posted"] += 1
                 import time
                 time.sleep(cfg.channel.sleep_s)
@@ -289,7 +298,6 @@ def publish_channel(cfg: Config, conn, tg_api, dry_run: bool = False) -> dict:
                 log.warning("canal: sendMessage sin ok → %s", str(resp)[:120])
         except Exception as e:
             log.warning("canal: post falló (%.40s): %s", r.get("title") or "", e)
-    conn.commit()
     log.info("canal: %d/%d publicadas (dev-skip %d, sobrantes por tope %d)",
              stats["posted"], stats["candidates"], stats["skipped_dev"],
              stats["candidates"] - stats["skipped_dev"] - stats["posted"])

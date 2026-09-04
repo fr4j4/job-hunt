@@ -124,6 +124,8 @@ class IaConfig:
     timeout: int
     retries: int
     run_hours_utc: list[int]
+    concurrency: int = 2             # threads IA paralelos por lote (1 = secuencial)
+    reasoning_effort: str = ""       # "" | low | medium | high (OpenAI-compat; "" = off)
 
 
 @dataclass
@@ -179,6 +181,7 @@ class ChannelCfg:
     digest_min_score: int = 60
     digest_max: int = 8
     silence_sweeps: int = 6            # alerta admin si N barridos sin publicar
+    max_posts_per_sweep: int = 15      # presupuesto de posts POR BARRIDO (v4.1 A3)
 
 
 
@@ -308,7 +311,9 @@ def load_config(env_file: Path | None = None) -> Config:
         batch_size=_env_int("IA_BATCH_SIZE", 40),
         timeout=_env_int("IA_TIMEOUT", 120),
         retries=_env_int("IA_RETRIES", 1),
-        run_hours_utc=_env_list("IA_RUN_HOURS_UTC", "03"),
+        run_hours_utc=[int(h) for h in _env_list("IA_RUN_HOURS_UTC", "03")],
+        concurrency=max(1, min(6, _env_int("IA_CONCURRENCY", 2))),
+        reasoning_effort=_env("IA_REASONING_EFFORT", "").strip().lower(),
     )
     tg = Telegram(
         enabled=_env_bool("TELEGRAM_ENABLED", True),
@@ -364,6 +369,7 @@ def load_config(env_file: Path | None = None) -> Config:
         digest_min_score=_env_int("CHANNEL_DIGEST_MIN_SCORE", 60),
         digest_max=_env_int("CHANNEL_DIGEST_MAX", 8),
         silence_sweeps=_env_int("CHANNEL_SILENCE_SWEEPS", 6),
+        max_posts_per_sweep=_env_int("CHANNEL_MAX_POSTS_PER_SWEEP", 15),
     )
     cfg = Config(
         profile=profile,

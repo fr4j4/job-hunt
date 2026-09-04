@@ -185,27 +185,35 @@ IA_SCHEMA = ('{"modalidad": "R"|"H"|"P"|"?", "salario_clp_mensual": numero|null,
              '"opinion": "max 160 chars — comentario editorial sobre la oferta: contexto de mercado, señal notable (empresa conocida, staffing, nicho escaso), comparación con la mediana salarial o red flag relevante. PROHIBIDO consejos al candidato (nada de destaca/pregunta/no apliques). No repitas el resumen"}')
 
 
-def ia_extract(cfg: Config, job: dict, profile_desc: str) -> dict | None:
-    """Llama al modelo IA con JSON forzado. Retorna dict o None."""
-    if not cfg.ia.enabled or not cfg.ia.api_key:
-        return None
-    # contexto de mercado para el comentario editorial (espec v3: opinion de canal)
+def compute_market_context(conn) -> str:
+    """Contexto de mercado para el comentario editorial — se calcula UNA vez por lote
+    en el MAIN y se pasa como argumento a ia_extract (los workers NO tocan la DB)."""
     try:
-        conn = sqlite3.connect(cfg.db_path)
         med = conn.execute("""SELECT AVG(CAST(REPLACE(REPLACE(salary,'CLP ',''),' ','') AS INTEGER))
             FROM ofertas WHERE salary LIKE 'CLP %'""").fetchone()[0]
         n_rem = conn.execute("SELECT COUNT(*) FROM ofertas WHERE active=1 AND modality='remoto'").fetchone()[0]
         n_tot = conn.execute("SELECT COUNT(*) FROM ofertas WHERE active=1").fetchone()[0]
-        conn.close()
-        mercado = (f"mediana salarial dev ${int(med or 2300000):,} · solo ~8% de las ofertas declara "
-                   f"salario · remoto total: {n_rem} de {n_tot} activas · P75: $2.7M · "
-                   f"inglés requerido suele pagar $3M+")
+        return (f"mediana salarial dev ${int(med or 2300000):,} · solo ~8% de las ofertas declara "
+                f"salario · remoto total: {n_rem} de {n_tot} activas · P75: $2.7M · "
+                f"inglés requerido suele pagar $3M+")
     except Exception:
-        mercado = "mediana salarial dev $2.300.000 · P75: $2.7M"
+        return "mediana salarial dev $2.300.000 · P75: $2.7M"
+
+
+def ia_extract_detail(cfg: Config, job: dict, profile_desc: str,
+                      mercado: str = "") -> tuple[dict | None, str]:
+    """Igual que ia_extract pero retorna (parsed, err_kind) para el breaker B5:
+    '' = ok · 'rate' = 429/5xx (cuenta para el breaker) · 'timeout' · 'other'.
+    HTTP PURO — sin SQLite (P0-3). Nunca lanza."""
+    if not cfg.ia.enabled or not cfg.ia.api_key:
+        return None, "other"
     prompt = (f'Perfil del candidato: {profile_desc}\n\n'
               f'Contexto de mercado (para el campo opinion): {mercado}\n\n'
               f'Oferta:\nTítulo: {job.get("title","")}\nEmpresa: {job.get("company","")}\n'
-              f'Ubicación: {job.get("location","")}\nDescripción: {(job.get("description") or "")[:1400]}\n\n'
+              f'Ubicación: {job.get("location","")}\n'
+              f'Sueldo declarado: {job.get("salary") or "(no declarado — infiere rango de mercado solo si el texto lo permite)"}\n'
+              f'Modalidad declarada: {job.get("modality") or "(no declarada)"}\n'
+              f'Descripción: {(job.get("description") or "")[:2400]}\n\n'
               f'Responde SOLO JSON: {IA_SCHEMA}')
     body = {"model": cfg.ia.model,
             "messages": [{"role": "system",
@@ -214,24 +222,49 @@ def ia_extract(cfg: Config, job: dict, profile_desc: str) -> dict | None:
                                      "El campo 'opinion' es un comentario editorial sobre la oferta "
                                      "(contexto de mercado, señal notable, comparación salarial) — "
                                      "NUNCA consejos al candidato (prohibido 'destaca', 'pregunta', "
-                                     "'no apliques', 'practica')."},
+                                     "'no apliques', 'practica'). "
+                                     "Si el sueldo está declarado, la opinion DEBE comentarlo "
+                                     "(comparar contra la mediana del mercado); no digas 'sin salario' "
+                                     "si el campo Sueldo declarado trae un valor."},
                          {"role": "user", "content": prompt}],
             "temperature": 0, "format": "json"}
+    if cfg.ia.reasoning_effort:          # knob opcional (default: off — flash ya responde rápido)
+        body["reasoning_effort"] = cfg.ia.reasoning_effort
     for attempt in range(cfg.ia.retries + 1):
         try:
             req = requests.post(f"{cfg.ia.base_url}/chat/completions",
                                 json=body, timeout=cfg.ia.timeout,
                                 headers={"Authorization": f"Bearer {cfg.ia.api_key}",
                                          "Content-Type": "application/json"})
+            if req.status_code >= 400:
+                kind = "rate" if (req.status_code == 429 or req.status_code >= 500) else "other"
+                if attempt == cfg.ia.retries:
+                    log.warning("IA HTTP %d para %s: %s", req.status_code,
+                                job.get("group_id", "?"), req.text[:120])
+                    return None, kind
+                time.sleep(2)
+                continue
             d = req.json()
             content = d["choices"][0]["message"]["content"]
-            return json.loads(content)
+            data = json.loads(content)
+            # DEV-3b: garantiza dict (json.loads acepta list/str)
+            return (data, "") if isinstance(data, dict) else (None, "other")
+        except requests.exceptions.Timeout:
+            if attempt == cfg.ia.retries:
+                log.warning("IA timeout para %s", job.get("group_id", "?"))
+                return None, "timeout"   # B5: timeout aislado NO alimenta el breaker
+            time.sleep(2)
         except Exception as e:
             if attempt == cfg.ia.retries:
                 log.warning("IA batch falló: %s", e)
-                return None
+                return None, "other"
             time.sleep(2)
-    return None
+    return None, "other"
+
+
+def ia_extract(cfg: Config, job: dict, profile_desc: str, mercado: str = "") -> dict | None:
+    """Llama al modelo IA con JSON forzado. Nunca lanza: retorna dict o None."""
+    return ia_extract_detail(cfg, job, profile_desc, mercado)[0]
 
 
 def _extract_aira_spa(url: str) -> dict:
@@ -261,11 +294,24 @@ def _extract_aira_spa(url: str) -> dict:
     return info
 
 
-def enrich_pending(conn, cfg: Config, max_n: int | None = None) -> int:
-    """Enriquece ofertas activas con descripción corta: Anillo A primero, C si sigue vacío."""
-    rows = conn.execute(
-        "SELECT group_id, title, company, location, url, description FROM ofertas "
-        "WHERE active=1 AND (description IS NULL OR length(description)<200)").fetchall()
+def enrich_pending(conn, cfg: Config, max_n: int | None = None,
+                   groups: set[str] | None = None) -> int:
+    """Enriquece ofertas activas con descripción corta: Anillo A primero, C si sigue vacío.
+
+    groups: si se pasa, SOLO esas group_id (acota el scope al lote — P1-5 de la
+    revisión de arquitectura). Commit POR FICHA: no retiene el write lock minutos
+    (P1-5 de la revisión de concurrencia) y un crash no pierde el trabajo previo.
+    """
+    if groups:
+        qs = ",".join("?" for _ in groups)
+        rows = conn.execute(
+            f"SELECT group_id, title, company, location, url, description FROM ofertas "
+            f"WHERE active=1 AND (description IS NULL OR length(description)<200) "
+            f"AND group_id IN ({qs})", tuple(groups)).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT group_id, title, company, location, url, description FROM ofertas "
+            "WHERE active=1 AND (description IS NULL OR length(description)<200)").fetchall()
     pending = [dict(r) for r in rows]
     if max_n:
         pending = pending[:max_n]
@@ -285,6 +331,7 @@ def enrich_pending(conn, cfg: Config, max_n: int | None = None) -> int:
         # CB: ficha redirige a listado genérico = oferta expirada → desactivar
         if info.get("_cb_expired"):
             conn.execute("UPDATE ofertas SET active=0 WHERE group_id=?", (r["group_id"],))
+            conn.commit()   # B4: commit por ficha también en la rama expired (DEV-5)
             log.info("CB expirada (redirect a listado): %s — active=0", (r.get("title") or "")[:40])
             done += 1
             time.sleep(1)
@@ -312,9 +359,9 @@ def enrich_pending(conn, cfg: Config, max_n: int | None = None) -> int:
              info.get("remote_official"), info.get("employment_type") or "",
              "jsonld" if info.get("description") else "section",
              r["group_id"]))
+        conn.commit()   # commit POR FICHA — no retiene el write lock (P1-5 conc)
         done += 1
         time.sleep(2)
-    conn.commit()
     return done
 
 
@@ -329,8 +376,63 @@ def profile_description(cfg: Config) -> str:
 def ia_queue_count(conn) -> int:
     """Ofertas en cola para el batch IA (con descripción, faltan datos, sin IA)."""
     return conn.execute(
-        "SELECT COUNT(*) FROM ofertas WHERE active=1 AND length(description)>400 AND "
-        "(modality='' OR salary='' OR description IS NULL) AND ia_model=''").fetchone()[0]
+        "SELECT COUNT(*) FROM ofertas WHERE active=1 AND ia_model='' AND "
+        "(length(description)>200 OR description_source!='') AND "
+        "(modality='' OR salary='' OR description IS NULL)").fetchone()[0]
+
+
+def apply_ia_result(conn, cfg: Config, r: dict, parsed: dict | None) -> bool:
+    """Escribe los campos IA de UNA oferta en la DB. Solo el MAIN la llama
+    (patrón conexión única). Retorna True si escribió algo. parsed=None → no-op."""
+    if not parsed:
+        return False
+    mod = {"R": "remoto", "H": "híbrido", "P": "presencial"}.get(parsed.get("modalidad"), "")
+    ia_fields = []
+    sets, params = [], []
+    if not r.get("modality") and mod:
+        sets.append("modality=?"); params.append(mod); ia_fields.append("modality")
+    if not r.get("salary") and parsed.get("salario_clp_mensual"):
+        sets.append("salary=?"); params.append(f"CLP {parsed['salario_clp_mensual']}")
+        ia_fields.append("salary")
+    if parsed.get("seniority_real") or parsed.get("seniority"):
+        sets.append("seniority_real=?"); params.append(parsed.get("seniority_real") or parsed.get("seniority"))
+        ia_fields.append("seniority")
+    for field in ("resumen", "fit_reason", "ingles"):
+        if parsed.get(field):
+            sets.append(f"ai_{field}=?")
+            params.append(str(parsed[field])[:300])
+            ia_fields.append(field)
+    if parsed.get("opinion"):
+        sets.append("ai_opinion=?")
+        params.append(str(parsed["opinion"])[:200])
+        ia_fields.append("opinion")
+    if parsed.get("rol_categoria"):
+        sets.append("rol_categoria=?")
+        params.append(str(parsed["rol_categoria"])[:40])
+        ia_fields.append("rol_categoria")
+    if parsed.get("idiomas") and isinstance(parsed["idiomas"], list) and parsed["idiomas"]:
+        idiomas_limpio = [
+            {"idioma": str(i.get("idioma", ""))[:20].lower(),
+             "nivel": str(i.get("nivel", ""))[:20].lower(),
+             "excluyente": bool(i.get("excluyente"))}
+            for i in parsed["idiomas"] if isinstance(i, dict) and i.get("idioma")
+        ]
+        if idiomas_limpio:
+            sets.append("ai_idiomas=?")
+            params.append(json.dumps(idiomas_limpio, ensure_ascii=False)[:400])
+            ia_fields.append("idiomas")
+    for field in ("red_flags", "green_flags", "benefits"):
+        if parsed.get(field):
+            sets.append(f"ai_{field}=?")
+            params.append(json.dumps(parsed[field], ensure_ascii=False))
+            ia_fields.append(field)
+    if not sets:
+        return False
+    sets.append("ia_model=?"); params.append(cfg.ia.model)
+    sets.append("ia_fields=?"); params.append(",".join(ia_fields))
+    params.append(r["group_id"])
+    conn.execute(f"UPDATE ofertas SET {', '.join(sets)} WHERE group_id=?", params)
+    return True
 
 
 def run_ia_batch(conn, cfg: Config, profile_desc: str, max_n: int | None = None,
@@ -343,6 +445,7 @@ def run_ia_batch(conn, cfg: Config, profile_desc: str, max_n: int | None = None,
     """
     if not cfg.ia.enabled:
         return 0
+    mercado = compute_market_context(conn)
     if groups:
         qs = ",".join("?" for _ in groups)
         rows = conn.execute(
@@ -350,9 +453,11 @@ def run_ia_batch(conn, cfg: Config, profile_desc: str, max_n: int | None = None,
             f"FROM ofertas WHERE active=1 AND group_id IN ({qs})",
             tuple(groups)).fetchall()
     else:
+        # C9 (v4.1): cola relajada — la IA puede trabajar con lo que haya
+        # (desc corta OK si la fuente ya dejó algo); solo excluye desc vacía total
         rows = conn.execute(
             "SELECT group_id, title, company, location, description, modality, salary FROM ofertas "
-            "WHERE active=1 AND ia_model='' AND length(description)>400 AND "
+            "WHERE active=1 AND ia_model='' AND (length(description)>200 OR description_source!='') AND "
             "(modality='' OR salary='' OR description IS NULL) "
             "ORDER BY score DESC").fetchall()   # primero las de mejor score (las visibles)
     # max_n=None con groups = TODAS las ofertas del grupo (sin tope de batch);
@@ -361,65 +466,27 @@ def run_ia_batch(conn, cfg: Config, profile_desc: str, max_n: int | None = None,
     pending = [dict(r) for r in rows][:limit] if limit else [dict(r) for r in rows]
     total = len(pending)
     done = 0
+    rate_racha = 0   # OPS-4: circuito nocturno ante tormenta 429/5xx (backoff + corte)
     for i, r in enumerate(pending, 1):
         t0 = time.time()
-        parsed = ia_extract(cfg, r, profile_desc)
+        parsed, err_kind = ia_extract_detail(cfg, r, profile_desc, mercado)
         log.info("IA %d/%d %s — %s (%.1fs)", i, total, r["group_id"][:20],
                  (r.get("title") or "")[:40], time.time() - t0)
+        if err_kind == "rate":
+            rate_racha += 1
+            if rate_racha >= 10:
+                log.warning("batch IA nocturno: %d fallos 429/5xx seguidos — circuito cortado, "
+                            "resto queda en cola para el próximo batch", rate_racha)
+                break
+            time.sleep(min(60, 5 * rate_racha))   # backoff progresivo: 5s→60s
+            continue
+        rate_racha = 0
         if progress:
             try:
                 progress(i, total, r.get("title") or "")
             except Exception:
                 pass
-        if not parsed:
-            continue
-        mod = {"R": "remoto", "H": "híbrido", "P": "presencial"}.get(parsed.get("modalidad"), "")
-        ia_fields = []
-        sets, params = [], []
-        if not r["modality"] and mod:
-            sets.append("modality=?"); params.append(mod); ia_fields.append("modality")
-        if not r["salary"] and parsed.get("salario_clp_mensual"):
-            sets.append("salary=?"); params.append(f"CLP {parsed['salario_clp_mensual']}")
-            ia_fields.append("salary")
-        if parsed.get("seniority_real") or parsed.get("seniority"):
-            sets.append("seniority_real=?"); params.append(parsed.get("seniority_real") or parsed.get("seniority"))
-            ia_fields.append("seniority")
-        for field in ("resumen", "fit_reason", "ingles"):
-            if parsed.get(field):
-                sets.append(f"ai_{field}=?")
-                params.append(str(parsed[field])[:300])
-                ia_fields.append(field)
-        if parsed.get("opinion"):
-            sets.append("ai_opinion=?")
-            params.append(str(parsed["opinion"])[:200])
-            ia_fields.append("opinion")
-        # categoría de rol según IA (complementa el regex de market.py)
-        if parsed.get("rol_categoria"):
-            sets.append("rol_categoria=?")
-            params.append(str(parsed["rol_categoria"])[:40])
-            ia_fields.append("rol_categoria")
-        # idiomas solicitados en la oferta (inglés y otros) — JSON [{idioma, nivel, excluyente}]
-        if parsed.get("idiomas") and isinstance(parsed["idiomas"], list) and parsed["idiomas"]:
-            idiomas_limpio = [
-                {"idioma": str(i.get("idioma", ""))[:20].lower(),
-                 "nivel": str(i.get("nivel", ""))[:20].lower(),
-                 "excluyente": bool(i.get("excluyente"))}
-                for i in parsed["idiomas"] if isinstance(i, dict) and i.get("idioma")
-            ]
-            if idiomas_limpio:
-                sets.append("ai_idiomas=?")
-                params.append(json.dumps(idiomas_limpio, ensure_ascii=False)[:400])
-                ia_fields.append("idiomas")
-        for field in ("red_flags", "green_flags", "benefits"):
-            if parsed.get(field):
-                sets.append(f"ai_{field}=?")
-                params.append(json.dumps(parsed[field], ensure_ascii=False))
-                ia_fields.append(field)
-        if sets:
-            sets.append("ia_model=?"); params.append(cfg.ia.model)
-            sets.append("ia_fields=?"); params.append(",".join(ia_fields))
-            params.append(r["group_id"])
-            conn.execute(f"UPDATE ofertas SET {', '.join(sets)} WHERE group_id=?", params)
+        if apply_ia_result(conn, cfg, r, parsed):
             conn.commit()   # libera el lock entre ofertas — el batch tarda minutos
             done += 1
         time.sleep(3)

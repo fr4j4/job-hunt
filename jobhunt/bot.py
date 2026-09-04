@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import sqlite3
 import threading
 import time
 import urllib.error
@@ -522,11 +523,11 @@ def _run_search_async(cfg: Config, chat_id: int):
                                             "parse_mode": "HTML"})
         msg_id = (sent or {}).get("result", {}).get("message_id")
         t0 = time.time()
-        fase = {"fuente": "preparando", "query": "", "page": 0}
+        fase = {"fuente": "preparando", "query": "", "page": 0, "detail": ""}
 
-        def on_phase(fuente: str, query: str = "", page: int = 0):
+        def on_phase(fuente: str, query: str = "", page: int = 0, detail: str = ""):
             """Actualiza estado y edita el MISMO mensaje (throttle 15s)."""
-            fase.update(fuente=fuente, query=query, page=page)
+            fase.update(fuente=fuente, query=query, page=page, detail=detail)
             nonlocal msg_id
             if not msg_id or time.time() - t0 < 15:
                 return
@@ -536,6 +537,8 @@ def _run_search_async(cfg: Config, chat_id: int):
                 linea += f' — "{esc(query[:40])}"'
             if page:
                 linea += f" · pág {page}"
+            if fase.get("detail"):
+                linea += f"\n   {esc(fase['detail'][:60])}"
             try:
                 msg_id = _tg_edit_or_send(cfg, chat_id, msg_id, {
                     "text": (f"🔍 <b>Búsqueda en curso</b> ({mins}m)\n{linea}"),
@@ -617,6 +620,7 @@ def _help_text() -> str:
         "/db_old_confirm — elimina físicamente inactivas >30 días",
         "/db_nondev_confirm — elimina físicamente las no-dev activas",
         "/db_all_confirm — borra TODO el pool (backup previo automático)",
+        "/db_iaclear_confirm — limpia marca IA: todo vuelve a la cola (regenera comentarios)",
         "",
         "/help — esta ayuda",
     ])
@@ -860,13 +864,16 @@ def _handle_command(cfg: Config, message: dict, state: dict) -> None:
                     nondev = conn.execute("""SELECT COUNT(*) FROM ofertas WHERE active=1
                         AND rol_categoria IN ('Ingeniería no-software','No-tech','Profesor/Formación',
                         'Analista/Empresa')""").fetchone()[0]
+                    conia = conn.execute("SELECT COUNT(*) FROM ofertas WHERE active=1 AND ia_model!=''").fetchone()[0]
                     _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
                         "text": f"🗄 <b>DB</b>\n✅ activas: {act}\n🪦 inactivas: {inact} "
                                 f"(>30d purgable: {old})\n🚫 no-dev activas: {nondev}\n"
-                                f"purge disponible: <code>old</code> ({old}) · <code>nondev</code> ({nondev}) · <code>all</code> (TODO)"})
+                                f"🧠 con IA: {conia}\n"
+                                f"purge disponible: <code>old</code> ({old}) · <code>nondev</code> ({nondev}) · "
+                                f"<code>iaclear</code> (re-encola {conia}) · <code>all</code> (TODO)"})
                 finally:
                     conn.close()
-            elif action in ("old", "nondev", "all"):
+            elif action in ("old", "nondev", "all", "iaclear"):
                 if confirm:
                     def _purge():
                         conn = database.connect(cfg)
@@ -883,6 +890,12 @@ def _handle_command(cfg: Config, message: dict, state: dict) -> None:
                                 n = conn.execute("""DELETE FROM ofertas WHERE active=1
                                     AND rol_categoria IN ('Ingeniería no-software','No-tech','Profesor/Formación',
                                     'Analista/Empresa')""").rowcount
+                            elif action == "iaclear":
+                                # FIX B: limpia SOLO la marca de IA → las ofertas vuelven a la cola
+                                # y /enrich regenera los comentarios con contexto completo.
+                                # NO toca modality/salary (valores buenos ya extraídos).
+                                n = conn.execute("""UPDATE ofertas SET ia_model='', ia_fields=''
+                                    WHERE active=1""").rowcount
                             else:  # all
                                 n = conn.execute("DELETE FROM ofertas").rowcount
                                 conn.execute("DELETE FROM channel_posts")
@@ -907,15 +920,25 @@ def _handle_command(cfg: Config, message: dict, state: dict) -> None:
                                                              "background — borrando TODAS las ofertas, "
                                                              "te reporto al terminar"})
                         threading.Thread(target=_purge, daemon=True).start()
+                    elif action == "iaclear":
+                        # iaclear es UPDATE masivo sobre las activas — thread con ACK (no bloquea el loop)
+                        _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
+                                                     "text": "🧠 <code>db-iaclear</code> ejecutando en "
+                                                             "background — re-encolando todas las activas "
+                                                             "para IA (los comentarios se regeneran con "
+                                                             "contexto completo al correr /enrich)"})
+                        threading.Thread(target=_purge, daemon=True).start()
                     else:
                         _purge()
                 else:
+                    warning = ("DELETE físico" if action != "iaclear"
+                               else "re-encola TODAS las activas para IA (los comentarios actuales se regeneran)")
                     _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
-                                                 "text": f"⚠️ /db-{action}: DELETE físico. "
+                                                 "text": f"⚠️ /db-{action}: {warning}. "
                                                          f"Confirma con: <code>/db-{action}-confirm</code>"})
             else:
                 _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
-                                             "text": "❓ /db-&lt;action&gt; · <code>stats · old · nondev</code>"})
+                                             "text": "❓ /db-&lt;action&gt; · <code>stats · old · nondev · iaclear</code>"})
         elif cmd == "/latest":
             try:
                 n = max(1, min(25, int(arg))) if arg else 10
@@ -991,15 +1014,29 @@ def _handle_command(cfg: Config, message: dict, state: dict) -> None:
 _IA_STATE: dict = {"running": False, "done": 0, "total": 0, "current": "", "t0": 0.0}
 
 
-def _ia_batch_async(cfg: Config, chat_id: int | None):
+def _ia_batch_async(cfg: Config, chat_id: int | None, scheduled: bool = False, state: dict | None = None):
     """Batch IA con ACK inicial, progreso por oferta y resumen final.
-    Nunca tumba el daemon."""
+    Nunca tumba el daemon. scheduled=True → consume el marcador diario SOLO si parte de verdad."""
     if _IA_STATE["running"]:
         if chat_id:
             _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
                                          "text": "🧠 Ya hay un batch IA corriendo — "
                                                  "<code>/enrich status</code> para ver el avance"})
         return
+    # FIX carrera: entre el handler y este thread puede haber partido un barrido
+    # (mismo tick del loop). Chocar con el lock del fetch = muerte a los 60s.
+    if _SEARCH_STATE["running"]:
+        if chat_id:
+            _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
+                                         "text": "🧠 Batch IA pospuesto: un barrido acaba de partir — "
+                                                 "reintenta con <code>/enrich</code> cuando termine"})
+        return
+    # FIX runs agendados: si un enrich manual está en curso, el agendado NO parte
+    # (y el marcador diario no se consume — se reintenta el próximo tick libre)
+    if scheduled:
+        state = state or {}
+        state.setdefault("ia_log", {})["day"] = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    _IA_STATE.update(running=True, done=0, total=0, t0=time.time())   # lock temprano: cierra la ventana de carrera
     try:
         conn = database.connect(cfg)
         try:
@@ -1190,14 +1227,21 @@ def _ia_hours_due(cfg: Config, last_ia: dict) -> bool:
 
 
 def _ia_sweep_maybe(cfg: Config, state: dict) -> None:
-    """Dispara el batch IA si toca la hora agendada (3:00 UTC por defecto)."""
+    """Dispara el batch IA si toca la hora agendada (3:00 UTC por defecto).
+    Los runs agendados NO ejecutan ni consumen su marcador si hay enrich/search en curso."""
     if not cfg.ia.enabled or not cfg.ia.api_key:
+        return
+    if _SEARCH_STATE["running"]:   # C1: no competir con la IA paralela del scan
+        log.info("batch IA nocturno pospuesto: hay un barrido en curso")
+        return
+    if _IA_STATE["running"]:       # FIX: enrich manual en curso → no consumir marcador diario
+        log.info("batch IA nocturno pospuesto: hay un enrich en curso")
         return
     if not _ia_hours_due(cfg, state.setdefault("ia_log", {})):
         return
-    state["ia_log"]["day"] = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    # el marcador diario lo consume el thread SOLO si pasa todas las guardas y parte de verdad
     log.info("batch IA agendado (%s) — disparando", cfg.ia.run_hours_utc)
-    threading.Thread(target=_ia_batch_async, args=(cfg, None), daemon=True).start()
+    threading.Thread(target=_ia_batch_async, args=(cfg, None, True, state), daemon=True).start()
 
 
 def _count_gate_sql(cfg: Config) -> str:
@@ -1219,6 +1263,8 @@ def _digests_maybe(cfg: Config, state: dict) -> None:
     """Digests del canal (B diario / C+D semanal / E mensual) — patrón _ia_sweep_maybe."""
     if not cfg.channel.enabled or not cfg.channel.chat_id:
         return
+    if _SEARCH_STATE["running"]:   # C2: no leer pool a medio procesar
+        return
     now = datetime.now(timezone.utc)
     keys = state.setdefault("digest_log", {})
     try:
@@ -1233,21 +1279,21 @@ def _digests_maybe(cfg: Config, state: dict) -> None:
         if cfg.channel.digest_daily and now.hour >= cfg.channel.digest_daily_hour_utc:
             k = f"daily:{now.strftime('%Y-%m-%d')}"
             if keys.get(k) != 1:
-                keys[k] = 1
                 publish_daily_digest(cfg, conn, _tg_api_for_channel(cfg))
+                keys[k] = 1   # OPS-9: marca SOLO si el digest no lanzó excepción
         # semanal
         if cfg.channel.digest_weekly and now.weekday() == cfg.channel.digest_weekly_day_utc \
                 and now.hour >= cfg.channel.digest_weekly_hour_utc:
             k = f"weekly:{now.strftime('%G-W%V')}"
             if keys.get(k) != 1:
-                keys[k] = 1
                 publish_weekly_digests(cfg, conn, _tg_api_for_channel(cfg))
+                keys[k] = 1   # OPS-9: marca solo si no lanzó excepción
         # tendencias (día 1 de mes)
         if cfg.channel.digest_tendencias and now.day == 1 and now.hour >= 13:
             k = f"trends:{now.strftime('%Y-%m')}"
             if keys.get(k) != 1:
-                keys[k] = 1
                 publish_trends(cfg, conn, _tg_api_for_channel(cfg))
+                keys[k] = 1   # OPS-9: marca solo si no lanzó excepción
     except Exception as e:
         log.warning("digests falló (no tumba daemon): %s", e)
     finally:
@@ -1277,6 +1323,7 @@ def _register_commands(cfg: Config) -> None:
         {"command": "db_old_confirm", "description": "Purge inactivas >30d (confirm)"},
         {"command": "db_nondev_confirm", "description": "Purge no-dev (confirm)"},
         {"command": "db_all_confirm", "description": "Borrar TODO el pool (backup previo)"},
+        {"command": "db_iaclear_confirm", "description": "Limpiar marca IA (re-encola todo)"},
         {"command": "score",  "description": "Ofertas con score ≥ N (ej: /score 60)"},
         {"command": "jobs",   "description": "Filtra: remote, salary2.5, temuco… combinables"},
         {"command": "help",   "description": "Ayuda"},
@@ -1314,12 +1361,15 @@ def sweep(cfg: Config, state: dict):
     if busy:
         log.info("barrido agendado saltado: %s en curso", busy)
         return
+    _SEARCH_STATE.update(running=True, t0=time.time())   # OPS-2: agendado también levanta la guarda C1/C2
     try:
         offers, _stats = _do_sweep(cfg)
         state["offers"] = offers
         _refresh_anchor(cfg, state)
     except Exception as exc:
         log.error("sweep del cron falló: %s", exc)
+    finally:
+        _SEARCH_STATE.update(running=False, t0=0.0)
 
 
 def _refresh_anchor(cfg: Config, state: dict):
@@ -1366,8 +1416,26 @@ def _load_pool(cfg: Config) -> list[dict]:
         conn.close()
 
 
+def _load_state_flag(conn) -> str:
+    """Lee el marcador de último barrido agendado (sobrevive restarts)."""
+    try:
+        row = conn.execute("SELECT value FROM state_flags WHERE key='last_sweep_key'").fetchone()
+        return row[0] if row else ""
+    except sqlite3.OperationalError:
+        return ""
+
+
+def _save_state_flag(conn, key: str, value: str) -> None:
+    conn.execute("""CREATE TABLE IF NOT EXISTS state_flags (
+        key TEXT PRIMARY KEY, value TEXT NOT NULL)""")
+    conn.execute("""INSERT INTO state_flags (key, value) VALUES (?,?)
+                    ON CONFLICT(key) DO UPDATE SET value=excluded.value""", (key, value))
+    conn.commit()
+
+
 def _sweep_hours_due(cfg: Config, state: dict) -> bool:
-    """True si la hora UTC actual está agendada y no se barrió en esa hora exacta."""
+    """True si la hora UTC actual está agendada y no se barrió en esa hora exacta.
+    El marcador es PERSISTENTE (FIX: un restart jamás re-dispara un barrido ya hecho)."""
     now = datetime.now(timezone.utc)
     key = now.strftime("%Y-%m-%d-%H")
     return now.hour in cfg.daemon.sweep_hours_utc and state.get("last_sweep_key") != key
@@ -1380,7 +1448,26 @@ def run_daemon(cfg: Config) -> None:
              cfg.daemon.sweep_hours_utc)
 
     state: dict = {"offers": _load_pool(cfg), "anchor_id": None, "last_sweep_key": ""}
+    # FIX sweep-fantasma: el marcador persiste en DB — un restart no re-barre la hora ya hecha
+    try:
+        _c0 = database.connect(cfg)
+        try:
+            state["last_sweep_key"] = _load_state_flag(_c0)
+        finally:
+            _c0.close()
+    except Exception as exc:
+        log.warning("no pude leer last_sweep_key persistente (arranca fresco): %s", exc)
     _register_commands(cfg)
+
+    # H4: migraciones al arranque del daemon (no esperar al primer barrido)
+    try:
+        _c = database.connect(cfg)
+        try:
+            database.init_db(_c)
+        finally:
+            _c.close()
+    except Exception as exc:
+        log.warning("init_db al arranque falló (se reintenta en el barrido): %s", exc)
 
     # ancla inicial con el pool existente — SIN barrido de fuentes al arrancar
     _refresh_anchor(cfg, state)
@@ -1409,8 +1496,18 @@ def run_daemon(cfg: Config) -> None:
             time.sleep(5)
 
         # 2. barrido por horas agendadas (una vez por hora agendada)
-        if _sweep_hours_due(cfg, state):
+        # FIX: si hay enrich/search manual en curso, el agendado NO consume su marcador
+        # → cuando la operación termine DENTRO de la misma hora, el próximo tick lo corre
+        if _sweep_hours_due(cfg, state) and not _op_busy():
             state["last_sweep_key"] = datetime.now(timezone.utc).strftime("%Y-%m-%d-%H")
+            try:
+                _cs = database.connect(cfg)
+                try:
+                    _save_state_flag(_cs, "last_sweep_key", state["last_sweep_key"])
+                finally:
+                    _cs.close()
+            except Exception as exc:
+                log.warning("no pude persistir last_sweep_key: %s", exc)
             log.info("barrido agendado (%s UTC)", datetime.now(timezone.utc).hour)
             threading.Thread(target=lambda: sweep(cfg, state), daemon=True).start()
 

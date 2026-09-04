@@ -1,0 +1,99 @@
+Los experimentos de mutación han confirmado los hallazgos clave. Todas las verificaciones están completadas: mapeo de especificaciones, evaluación de calidad de los tests, experimentos de mutación en /tmp (repositorio intacto) y 3 ejecuciones de estabilidad (69.50s / 69.47s / 69.51s, 12/12 pasan cada vez). Aquí está el resultado de la auditoría:
+
+```json
+{
+  "rol": "TEST ENGINEER — auditoría de calidad de tests v4.1 (tests/test_v41.py, 12 tests)",
+  "resumen": "De los 11 tests exigidos por spec §5, 4 cubren la esencia (lote_orden_score, terminacion_por_conteo, rescore_ids_aislamiento, presupuesto_por_sweep), 4 son sombras parciales y 2 son test-teatro probado por mutación real: test_publish_commit_por_post pasa incluso borrando conn.commit() de channel.py:293 (persistencia verificada en la misma conexión viva, sin crash real), y test_enrich_pending_groups_scope no simula crash ni mide lock<5s (spec §5.9) y su assert de scope es insensible porque las filas de prueba no tienen url (enrich.py:310 las salta igual con o sin groups). test_worker_http_puro diluye el gate P0-3: 1 llamada a ia_extract, sin threads, sin lote completo, y el HTTP falla por DNS antes de cualquier código post-respuesta. Estabilidad 3/3 runs verdes (69.5s), sin flakiness observado, pero 60s son sleeps reales no parcheados (sleep_s=2.0 del .env) y los tests de canal tienen bomba de tiempo: fecha hardcodeada 2026-09-03 vs date('now','-14 days') en _GATE_SQL. Falta todo test de integración con ≥2 workers reales y el glue del pipeline (cli.py:311-370) está sin ejercitar.",
+  "veredicto": "rechazado",
+  "hallazgos": [
+    {
+      "id": "TE-P0-1",
+      "severidad": "P0",
+      "titulo": "test_worker_http_puro no gatea P0-3: 1 llamada, sin threads, sin lote completo — la spec exige contar sqlite3.connect durante UN LOTE COMPLETO con workers reales",
+      "evidencia": "tests/test_v41.py:291-316 llama ia_extract(cfg, job, 'perfil', 'mercado test') EXACTAMENTE 1 vez (L311), single-thread, con base_url='https://ia-fake.invalid/v1' (L307) que falla por DNS en requests.post ANTES de que cualquier código post-respuesta corra. No instancia worker_ia, no arma work_q/out_q, no llama consume_lote. Spec §5.2 (spec-v4.1-final.md L121-122): 'monkeypatch sqlite3.connect para contar: 0 llamadas desde workers durante un lote completo (gate real del P0-3)'. Mutation mental verificada: si alguien re-agregara sqlite3.connect dentro de worker_ia (cli.py:58-82, p.ej. loguear a DB por job) o en ia_extract DESPUÉS de una respuesta HTTP exitosa (enrich.py:227-241), este test NO fallaría — solo cubre el camino prompt-build→request-fallido. El spy manual (L302 sq.connect=spy_connect) ni siquiera usa el fixture monkeypatch que recibe.",
+      "linea": "tests/test_v41.py:291-316 (spy L302, llamada única L311, assert L316); cli.py:58-82 (worker_ia NO ejercitado); spec L121-122",
+      "recomendacion": "Reescribir: lote de N jobs, 2 threads worker_ia reales con extract_fn=ia_extract real (endpoint mockeado que responda 200+JSON válido), consume_lote corriendo en main, y spy de sqlite3.connect activo durante TODO el ciclo; assert llamadas==0 al final. Así el gate cubre el ciclo completo producción-consumo, no solo 1 request fallido."
+    },
+    {
+      "id": "TE-P0-2",
+      "severidad": "P0",
+      "titulo": "test_publish_commit_por_post es teatro: borrar conn.commit() (channel.py:293) NO rompe el test — persistencia verificada en la misma conexión viva, sin crash real",
+      "evidencia": "Mutación EJECUTADA (script /tmp/c3_gate_check.py, repo intacto): proxy que intercepta conn.commit() como no-op → los 3 asserts del test (posted==2, marcadas==2, re-run posted==1) PASAN IGUAL con commit() deshabilitado (3 llamadas interceptadas y no-opeadas). El test verifica 'marcadas' leyendo la MISMA conexión :memory: no commiteada (L118-120), donde los UPDATE sin commit son visibles. El 'crash' es solo un raise de la API falsa que publish_channel atrapa por-post (channel.py:299) — no simula crash de proceso ni pérdida de transacción. Spec §5.8 (L133-134): 'crash simulado entre send 3 y 4 → 3 marcas persistidas (sin duplicar)' — el test usa crash tras el post 2 (L111) y además la semántica de durabilidad (que un lector EXTERNO vea las marcas) no se prueba. Además el re-run (L123-124) pasa por el mismo camino no-commiteado.",
+      "linea": "tests/test_v41.py:96-124 (api_crash L109-113, assert misma-conn L118-120); channel.py:293 (conn.commit() borrable impunemente), channel.py:283-296; spec L133-134",
+      "recomendacion": "Gate real de durabilidad: abrir una SEGUNDA conexión sqlite (archivo temporal, no :memory:) que lea notified_channel_at después del crash — solo ve datos COMMITTEADOS. Alternativa: monkeypatch conn.commit para lanzar en el post 3 (crash de verdad) y verificar con la segunda conexión que quedaron las marcas del post previo."
+    },
+    {
+      "id": "TE-P0-3",
+      "severidad": "P0",
+      "titulo": "test_enrich_pending_groups_scope no cubre spec §5.9: sin crash, sin medición de lock<5s, scope insensible (filas sin url) y try/except que traga todo",
+      "evidencia": "Spec §5.9 (L135-136): 'crash a mitad → fichas previas persistidas; lock no retenido >5s'. El test (L321-337): (1) NO simula ningún crash — envuelve enrich_pending en try/except pass (L331-334) que absorbería cualquier excepción, incluso enrich_pending completamente rota; (2) NO mide duración de lock; (3) el assert de scope (L336-337, lote2 description=='') es INSENSIBLE: mutación EJECUTADA (/tmp/enrich_gate_check.py) — llamando enrich_pending SIN groups sobre los mismos datos, lote2 queda intacto igual, porque ambas filas se insertan sin url (L326-328) y enrich_pending salta filas sin url (enrich.py:310 'if not r.get(url): continue'). El commit POR FICHA (enrich.py:351) nunca se ejercita: no hay URL que procesar, 0 fichas enriquecidas, 0 commits.",
+      "linea": "tests/test_v41.py:321-337 (try/except L331-334, assert L336-337); enrich.py:310 (skip sin url), enrich.py:351 (commit por ficha NO ejercitado); spec L135-136",
+      "recomendacion": "Test real: N fichas CON url mockeada (monkeypatch extract_structured), crash inyectado a mitad (extract_structured lanzando en la ficha k), verificar con segunda conexión que las fichas previas están persistidas y contar commits (1 por ficha); para el lock, medir ventana entre commits o usar threading con un lector concurrente."
+    },
+    {
+      "id": "TE-P1-1",
+      "severidad": "P1",
+      "titulo": "test_lot_deadline_drain cubre solo la mitad: drain recoge in-flight, pero la esencia spec (pendientes SIN-IA → batch nocturno C9) no se prueba, y hay carrera de timing 1.2s vs 2.0s",
+      "evidencia": "Spec §5.6 (L129-130): 'ia_extract cuelga >deadline → drain 120s → pendientes sin-IA → batch nocturno los recoge (con desc corta, C9)'. El test (L259-286): worker con sleep 0.3s × 4 jobs = 1.2s de trabajo dentro de un drain de 2s → asserts recibidos==4 y aplicados==4 (L284-285) prueban que el drain RECIBE todo, pero nunca ejercita la rama 'lo que no llegó queda sin IA' (cli.py:151-178 con drain agotado) ni la cola nocturna relajada C9 (enrich.py:444-450 'length(description)>200 OR description_source!=') ni run_ia_batch recogiendo los pendientes. Carrera: si el scheduling estira los 1.2s de trabajo más allá de los 2.0s de drain (CI cargado), el 4º resultado llega tarde → recibidos==3 → assert falla. Slack actual: 0.8s. Pasó 3/3 en esta máquina, pero es tiempo-dependiente por diseño.",
+      "linea": "tests/test_v41.py:259-286 (sleep 0.3 L271, drain_s=2 L283, asserts L284-285); cli.py:151-178 (drain); enrich.py:444-450 (C9 sin test); spec L129-130",
+      "recomendacion": "Dos escenarios: (a) worker lento que NO alcanza (drain_s=0 o sleep>drain) → assert recibidos<len(lote) y las filas quedan sin campos IA; (b) correr run_ia_batch(groups=pendientes) con desc corta y verificar que las recoge (C9). Para el drain actual, subir slack (sleep 0.1s) o inyectar reloj."
+    },
+    {
+      "id": "TE-P1-2",
+      "severidad": "P1",
+      "titulo": "test_resultado_tardio_cross_lote sin worker real ni cruce de lotes real: la cola se pre-carga a mano en vez de un worker lento del lote 1 aún vivo durante el lote 2",
+      "evidencia": "Spec §5.3 (L123-124): 'worker lento del lote 1 → resultado con lote_id viejo → descartado'. El test (L173-186) hace out_q.put() manual de 2 tuplas y llama consume_lote 1 vez — la lógica de descarte (cli.py:123-125) queda cubierta como unit, pero el escenario de integración (worker_ia del lote 0 todavía en flight cuando consume_lote(lote_id=1) corre, resultado llegando DURANTE el consumo del lote 2) no existe. En cmd_run el stop_event se setea DESPUÉS de consume_lote (cli.py:345) — ese gap exacto es el que la spec quiere blindado y ningún test lo ejercita con threads.",
+      "linea": "tests/test_v41.py:173-186 (puts manuales L179-180); cli.py:123-125 (descarte, cubierto), cli.py:345 (stop_event post-consume, SIN test); spec L123-124",
+      "recomendacion": "Test con 2 lotes reales: worker lento (sleep) del lote 0 + consume_lote(1) corriendo después; verificar que el resultado tardío llega con lote_id=0, se cuenta en descartados y on_result/apply NO se ejecutan para él."
+    },
+    {
+      "id": "TE-P1-3",
+      "severidad": "P1",
+      "titulo": "Tests de canal con bomba de tiempo y dependencia del .env real: fechas hardcodeadas 2026-09-03 vs date('now','-14 days') — fallarán a partir de ~2026-09-17 sin que el código cambie",
+      "evidencia": "test_presupuesto_por_sweep (L59), test_publish_budget_none (L87) y test_publish_commit_por_post (L104) insertan date_canonical='2026-09-03'. El gate _GATE_SQL (channel.py:202-206) filtra date_canonical >= date('now','-14 days') con max_age_days=14 (config.py:171). Hoy (2026-09-04) pasan; desde ~2026-09-17 posted==0 y los asserts 10/5/2 colapsan aunque el código esté perfecto. Además dependen del .env real vía load_config(): market_score 80-90 ≥ CHANNEL_MIN_SCORE=70 y require_dev=true con rol_categoria='Backend'; si el .env cambia min_score a >90 los tests se rompen. test_digests_pospuesto_en_scan (L342-350) depende de CHANNEL_ENABLED=true/chat_id del .env: si el canal está OFF, el test pasa por la guarda equivocada (bot.py:1225-1226 retorna antes de llegar al check de _SEARCH_STATE) — verde por la razón equivocada.",
+      "linea": "tests/test_v41.py:59,87,104 (fecha hardcodeada); channel.py:202-206 (date('now')); config.py:171,168; bot.py:1225-1226; spec L137-138",
+      "recomendacion": "Inyectar date_canonical relativo a ahora (date.today().isoformat()) o monkeypatchear datetime en channel; forzar cfg.channel.enabled=True, min_score=0, require_dev y sleep_s=0 explícitamente en cada test de canal para hermeticidad total."
+    },
+    {
+      "id": "TE-P1-3",
+      "severidad": "P1",
+      "titulo": "Suite dependiente de timing real: 60 de 69.5s son sleeps no parcheados (30s + 20s por sleep_s=2.0 del .env, 5s de join, 2s de retry IA) — determinística hoy, frágil y lenta",
+      "evidencia": "3 runs idénticos: 69.50s / 69.47s / 69.51s, 12/12 passed. --durations: test_presupuesto_por_sweep 30.01s y test_publish_budget_none 20.00s — publish_channel hace time.sleep(cfg.channel.sleep_s) tras CADA post (channel.py:295-296) con CHANNEL_SLEEP_S=2.0 leído del .env, y el test NO lo parchea a 0; test_publish_commit_por_post 6.00s (3 posts × 2s); test_terminacion_por_conteo 5.01s (t.join(timeout=5) L210 que siempre consume los 5s porque el worker queda en work_q.get(timeout=5), cli.py:72); test_worker_http_puro 2.01s (reintento con time.sleep(2), enrich.py:237). No es flaky (sleeps deterministas) pero: 1 minuto de CPU quemada, y cualquier futuro test que dependa de ventanas de tiempo hereda esta fragilidad.",
+      "linea": "channel.py:295-296 (sleep por post); tests/test_v41.py:210 (join 5s), L116/L123 (llamadas que duermen); cli.py:72 (get timeout 5s); enrich.py:237",
+      "recomendacion": "En tests de canal: cfg.channel.sleep_s = 0.0 (una línea por test). En test_terminacion: subir el get-timeout del worker vía parámetro o asertar t.is_set() con join más corto; usar extract_fn ya inyectable para evitar el sleep de retry (cfg.ia.retries=0)."
+    },
+    {
+      "id": "TE-P1-4",
+      "severidad": "P1",
+      "titulo": "Faltan tests de integración de la spec: ningún test corre ≥2 workers reales con out_q real, y el glue del pipeline por lote (cli.py:311-370) está 100% sin ejercitar",
+      "evidencia": "Todos los tests con threads usan 1 solo worker (test_terminacion L203, test_lot_deadline L275). Nadie prueba IA_CONCURRENCY=2 con competencia por work_q — el corazón de §2/§3.1. El glue de cmd_run (compute_market_context → workers paralelos → consume_lote → enrich_pending(groups) → rescore_ids → publish_channel(budget) → descontar presupuesto → stop_event.set() → acumular lots_done/ia_failures/breaker_trips/channel_posts en scan_log, cli.py:311-370 y L286-290) no tiene NINGÚN test: si el deadline (cli.py:337) se rompe, si presupuesto_canal no se descuenta, o si las columnas C5 de scan_log nunca se llenan, la suite sigue verde. El lado-worker del breaker B5 (workers que consultan stop_event antes de cada get y salen, cli.py:70) tampoco tiene test: test_breaker_ventana (L223-256) alimenta la cola a mano y verifica el Event, pero nunca demuestra que un worker vivo REALMENTE sale al setearse.",
+      "linea": "cli.py:311-370 (loop de lotes SIN test), cli.py:70 (salida worker por stop_event SIN test), cli.py:337 (deadline SIN test), db.py:104-118 + cli.py:286-290 (scan_log C5 SIN test); spec §2 L46-64, §3.1 L69-84",
+      "recomendacion": "Test de integración: 2 workers reales + extract_fn mockeado con latencias variables + consume_lote + apply a :memory: con archivo temporal; verificar recibidos==len(lote), que ambos workers participaron, y un test del breaker que arranque un worker y verifique que termina (t.join) tras stop_event.set()."
+    },
+    {
+      "id": "TE-P2-1",
+      "severidad": "P2",
+      "titulo": "test_rescore_ids_aislamiento_ambos: solo 1 fila — 'el lote continúa' no se verifica multi-fila",
+      "evidencia": "El test (L129-168) es bueno en esencia (dual-write ok, ambos rotos conservan, market roto conserva anterior), pero usa UNA sola oferta (g1). La garantía B6 es que una fila fallida NO aborta el lote: con 3 filas (1 rota + 2 ok) se verificaría que n==2 y las ok se actualizaron. Hoy un rescore_ids que hiciera 'return' en el primer fallo en vez de 'continue' (db.py:220) seguiría pasando con una fila.",
+      "linea": "tests/test_v41.py:129-168 (una sola fila L132-135); db.py:213-237 (loop por fila)",
+      "recomendacion": "Agregar 2 filas más sanas al mismo lote y asertar que se actualizan pese a la fila rota (n==2, scores nuevos en las sanas, anteriores en la rota)."
+    },
+    {
+      "id": "TE-P2-2",
+      "severidad": "P2",
+      "titulo": "test_breaker_ventana y test_terminacion: asserts débiles menores — join sin asertar terminación, y compat 3-tuple ejercitada en un test donde la producción usa 4-tuple",
+      "evidencia": "test_terminacion_por_conteo hace t.join(timeout=5) (L210) sin asertar si el thread terminó — un worker colgado pasaría igual. test_resultado_tardio usa 4-tuples correctos, pero la rama de compatibilidad 3-tuple (cli.py:120-122) queda sin test específico (riesgo inverso menor). test_breaker_ventana valida bien los 3 casos de consume_lote (trips, reset por éxito, timeout no cuenta — L236/249/256, asserts contra constantes correctas de la spec B5), pero al ser solo-consumidor no cubre el acoplamiento real Event↔workers.",
+      "linea": "tests/test_v41.py:210 (join sin assert), L223-256; cli.py:118-122 (compat 3-tuple)",
+      "recomendacion": "Asertar not t.is_alive() tras join; documentar que la 3-tuple es solo compat y priorizar 4-tuple en todos los tests nuevos."
+    },
+    {
+      "id": "TE-P2-3",
+      "severidad": "P2",
+      "titulo": "test_publish_budget_none_comportamiento_viejo: extra fuera de spec, correcto pero comparte la bomba de fecha y el sleep de 20s",
+      "evidencia": "Test adicional (L79-91) que verifica budget=None → rige max_posts (compatibilidad). Assert correcto contra cfg.channel.max_posts (L91, comparación contra config y no constante mágica — buena práctica). Hereda los problemas de TE-P1-3: 20s de sleeps reales y fecha hardcodeada (L87).",
+      "linea": "tests/test_v41.py:79-91",
+      "recomendacion": "Mismo fix: sleep_s=0 y fecha relativa a now."
+    }
+  ]
+}
+```
