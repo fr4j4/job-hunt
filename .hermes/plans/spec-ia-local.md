@@ -157,11 +157,28 @@ IA_LOCAL_ENABLED=true → por CADA oferta de la cola C9:
   - Si la oferta tiene nota de anomalía: citar el valor tal cual + señalar la
     anomalía con la hipótesis + comparar contra la mediana. NUNCA corregir ni omitir.
 
-### §2.6 Prompt de TAREA 1 (EXTRACT) — plantilla
+### §2.6 Prompt de TAREA 1 (EXTRACT) — plantilla (v2.1: prompt AGGRESIVO validado en vivo)
+
+> **Validado en vivo (2026-09-04)**: con el prompt suave, `madkoding/ornith-1.5-9b-iq2m`
+> devolvió `modalidad:"remoto"` (en vez de "R"), `ingles:true` (en vez del enum) y
+> `seniority_real:null`. Con el prompt agresivo (reglas numeradas + enum explícito +
+> ejemplo de respuesta válida) devolvió `modalidad:"R"`, `ingles:"deseable"`,
+> `seniority_real:""` — 100% conforme al schema. La normalización post-respuesta
+> (§3.2) se mantiene como defensa de segundo nivel, no como mecanismo principal.
 
 ```
-Eres un extractor de datos de ofertas de empleo chilenas. Respondes SOLO JSON válido.
-Dato ausente → null. No inventes.
+Eres un extractor de datos de ofertas de empleo chilenas. REGLAS OBLIGATORIAS
+(violarlas invalida la respuesta):
+1. Respondes EXCLUSIVAMENTE un objeto JSON válido. Nada más, sin texto, sin markdown.
+2. modalidad SOLO puede ser uno de estos 4 valores exactos: "R" (remoto),
+   "H" (híbrido), "P" (presencial), "?" (no se puede determinar).
+   PROHIBIDO escribir la palabra completa.
+3. ingles SOLO puede ser: "no", "deseable", "requerido", "desconocido".
+   PROHIBIDO true/false/null.
+4. seniority_real SOLO puede ser: "junior", "semi", "senior", "lead", o ""
+   (vacío si no se puede inferir).
+5. salario_clp_mensual es un NÚMERO entero. 0 si no se declara. PROHIBIDO strings.
+6. Dato ausente → null o "" según el campo. Nunca inventes.
 
 Oferta:
 Título: {title}
@@ -171,13 +188,23 @@ Sueldo declarado: {salary or "(no declarado)"}
 Modalidad declarada: {modality or "(no declarada)"}
 Descripción: {description[:2000]}
 
-Responde SOLO JSON con: techs, modalidad, seniority_real, rol_categoria, ingles,
-idiomas, red_flags, green_flags, benefits, salario_clp_mensual.
-techs: máx 8, abreviaturas canónicas (Py, Java, TS, JS, React, Angular, Vue, Node,
-K8s, Docker, AWS, GCP, Azure, TF, Scala, Go, .NET, C#, SQL, Postgres, Mongo, Redis,
-Kafka, FastAPI, Django, Spring, NiFi, Jenkins, CI/CD).
-ingles: "no" | "deseable" | "requerido" | "desconocido".
-salario_clp_mensual: 0 si no se declara (nunca inventes un monto).
+Responde SOLO JSON con EXACTAMENTE estas claves: techs (array de máx 8
+abreviaturas: Py, Java, TS, JS, React, Angular, Vue, Node, K8s, Docker, AWS,
+GCP, Azure, TF, Scala, Go, .NET, C#, SQL, Postgres, Mongo, Redis, Kafka,
+FastAPI, Django, Spring, NiFi, Jenkins, CI/CD), modalidad ("R"|"H"|"P"|"?"),
+seniority_real ("junior"|"semi"|"senior"|"lead"|""), rol_categoria ("Full Stack"|
+"Backend"|"Frontend"|"Data"|"Mobile"|"AI/ML"|"Tech Lead"|"DevOps/Cloud"|"QA"|
+"Software"|"Seguridad"|"Ingeniería no-software"|"Analista/Empresa"|
+"Profesor/Formación"|"Soporte/TI"|"No-tech"|"Otro"), ingles ("no"|"deseable"|
+"requerido"|"desconocido"), idiomas (array de {idioma, nivel, excluyente}),
+red_flags (array), green_flags (array), benefits (array), salario_clp_mensual
+(entero, 0 si no se declara).
+
+Ejemplo de respuesta VÁLIDA:
+{"techs": ["Java", "Spring"], "modalidad": "R", "seniority_real": "senior",
+"rol_categoria": "Backend", "ingles": "deseable", "idiomas": [],
+"red_flags": [], "green_flags": [], "benefits": [],
+"salario_clp_mensual": 2500000}
 ```
 
 ### §2.7 Prompt de TAREA 2 (OPINION) — plantilla
