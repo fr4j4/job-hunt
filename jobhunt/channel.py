@@ -509,6 +509,42 @@ def publish_trends(cfg: Config, conn, tg_api, dry_run: bool = False) -> bool:
     return _send_digest(cfg, tg_api, "trends", text, conn, now)
 
 
+def channel_wipe(cfg: Config, conn, tg_api, dry_run: bool = False) -> dict:
+    """Borra TODOS los mensajes publicados en el canal (usa channel_posts.message_id).
+
+    Telegram no tiene bulk-delete: 1 deleteMessage por post, sleep 0.3s (rate limit).
+    Los posts cuyo delete falla (borrados a mano, >48h en algunos casos) se ignoran.
+    Limpia channel_posts y resetea notified_channel_at de las activas → el canal
+    queda en cero y el próximo publish arranca limpio.
+    """
+    stats = {"total": 0, "deleted": 0, "skipped": 0}
+    if not cfg.channel.enabled or not cfg.channel.chat_id:
+        return stats
+    rows = [dict(r) for r in conn.execute(
+        "SELECT id, message_id FROM channel_posts WHERE message_id IS NOT NULL ORDER BY id")]
+    stats["total"] = len(rows)
+    if dry_run:
+        stats["preview"] = [r["message_id"] for r in rows]
+        return stats
+    import time as _t
+    for r in rows:
+        try:
+            resp = tg_api("deleteMessage", {
+                "chat_id": int(cfg.channel.chat_id), "message_id": r["message_id"]})
+            if resp.get("ok"):
+                stats["deleted"] += 1
+            else:
+                stats["skipped"] += 1
+        except Exception:
+            stats["skipped"] += 1
+        _t.sleep(0.3)
+    conn.execute("DELETE FROM channel_posts")
+    conn.execute("UPDATE ofertas SET notified_channel_at='' WHERE active=1")
+    conn.commit()
+    log.info("canal wipe: %d/%d borrados, %d skipped", stats["deleted"], stats["total"], stats["skipped"])
+    return stats
+
+
 def channel_status(conn, cfg: Config) -> str:
     """Observabilidad (H10): estado del canal para el comando admin /channel (al GRUPO)."""
     from .notify import esc

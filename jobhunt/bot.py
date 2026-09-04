@@ -755,6 +755,26 @@ def _handle_command(cfg: Config, message: dict, state: dict) -> None:
                                              "text": f"📢 <code>channel-{action}</code> "
                                                      f"ejecutando en background — te reporto al terminar"})
                 threading.Thread(target=_run, daemon=True).start()
+            elif action == "wipe":
+                conn2 = database.connect(cfg)
+                try:
+                    from .channel import channel_wipe
+                    stats = channel_wipe(cfg, conn2, api, dry_run=not confirm)
+                    if confirm:
+                        _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
+                                                     "text": f"🧨 canal limpiado: {stats['deleted']}/"
+                                                             f"{stats['total']} mensajes borrados, "
+                                                             f"{stats['skipped']} ya no existían. "
+                                                             f"Marcas reseteadas — /channel-publish "
+                                                             f"para repoblar"})
+                        log.info("canal wipe: %s", stats)
+                    else:
+                        _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
+                                                     "text": f"🧨 Wipe borraría {stats['total']} mensajes "
+                                                             f"del canal y resetearía las marcas. "
+                                                             f"Confirma con: <code>/channel-wipe-confirm</code>"})
+                finally:
+                    conn2.close()
             elif action == "reset":
                 conn = database.connect(cfg)
                 try:
@@ -782,7 +802,7 @@ def _handle_command(cfg: Config, message: dict, state: dict) -> None:
                                                      "/channel-daily · /channel-weekly-remote · "
                                                      "/channel-weekly-salary · /channel-weekly · "
                                                      "/channel-trends · /channel-all · "
-                                                     "/channel-dry · /channel-reset (-confirm)</code>"})
+                                                     "/channel-dry · /channel-reset (-confirm) · /channel-wipe (-confirm)</code>"})
         elif cmd.startswith("/db"):
             action = (cmd[len("/db"):].replace("_", "-").strip("-")) or "stats"
             confirm = action.endswith("-confirm")
@@ -1190,6 +1210,7 @@ def _register_commands(cfg: Config) -> None:
         {"command": "channel_all", "description": "Publish + todos los digests"},
         {"command": "channel_dry", "description": "Preview sin publicar"},
         {"command": "channel_reset_confirm", "description": "Limpiar marcas de publicados"},
+        {"command": "channel_wipe_confirm", "description": "Borrar TODOS los mensajes del canal"},
         {"command": "db", "description": "DB stats"},
         {"command": "db_old_confirm", "description": "Purge inactivas >30d (confirm)"},
         {"command": "db_nondev_confirm", "description": "Purge no-dev (confirm)"},
