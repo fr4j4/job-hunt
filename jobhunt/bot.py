@@ -609,8 +609,9 @@ def _help_text() -> str:
         "/channel_publish — publica las candidatas en cola ahora",
         "/channel_publish_ia — igual, pero SOLO ofertas ya revisadas por IA",
         "/channel_daily — digest diario 'Top del día' ahora",
-        "/channel_weekly — digests semanales ahora (remote + salary)",
+        "/channel_weekly — digests semanales ahora (remote + rol + salary)",
         "/channel_weekly_remote — solo digest remoto por seniority",
+        "/channel_weekly_rol — solo mejor de la semana por rol",
         "/channel_weekly_salary — solo ranking salarial",
         "/channel_trends — post mensual de tendencias",
         "/channel_all — publish + todos los digests",
@@ -755,8 +756,8 @@ def _handle_command(cfg: Config, message: dict, state: dict) -> None:
                 sub = sub[:-len("-confirm")]
             action = sub or "status"
             from .channel import (publish_channel, publish_daily_digest,
-                                  publish_weekly_remote, publish_weekly_salary,
-                                  publish_trends, channel_status)
+                                  publish_weekly_remote, publish_weekly_rol,
+                                  publish_weekly_salary, publish_trends, channel_status)
             api = _tg_api_for_channel(cfg)
             if action == "status":
                 conn = database.connect(cfg)
@@ -765,8 +766,8 @@ def _handle_command(cfg: Config, message: dict, state: dict) -> None:
                                                  "text": channel_status(conn, cfg)})
                 finally:
                     conn.close()
-            elif action in ("publish", "publish-ia", "daily", "weekly-remote", "weekly-salary",
-                            "weekly", "trends", "all", "dry"):
+            elif action in ("publish", "publish-ia", "daily", "weekly-remote", "weekly-rol",
+                            "weekly-salary", "weekly", "trends", "all", "dry"):
                 def _run():
                     # conn se abre EN el thread (SQLite no permite compartir entre threads)
                     import time as _t
@@ -796,6 +797,12 @@ def _handle_command(cfg: Config, message: dict, state: dict) -> None:
                             _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
                                                          "text": "🌍 weekly-remote enviado" if ok else
                                                                  "🌍 weekly-remote: sin candidatas o ya enviado"})
+                            _t.sleep(1)
+                        if action in ("weekly-rol", "weekly", "all"):
+                            ok = publish_weekly_rol(cfg, conn, api)
+                            _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
+                                                         "text": "🏆 weekly-rol enviado" if ok else
+                                                                 "🏆 weekly-rol: sin candidatas o ya enviado"})
                             _t.sleep(1)
                         if action in ("weekly-salary", "weekly", "all"):
                             ok = publish_weekly_salary(cfg, conn, api)
@@ -1304,10 +1311,57 @@ def _count_gate_sql(cfg: Config) -> str:
 def _tg_api_for_channel(cfg: Config):
     def call(method: str, payload: dict) -> dict:
         try:
+            if method == "sendPhoto" and payload.get("path"):
+                # foto nativa: multipart con archivo local (gráficos del canal)
+                return _tg_send_photo(cfg, payload)
             return _tg_api(cfg, method, payload)
         except Exception as e:
             return {"ok": False, "error": str(e)[:200]}
     return call
+
+
+def _tg_send_photo(cfg: Config, payload: dict) -> dict:
+    """sendPhoto multipart/form-data (PNG nativos para el canal).
+
+    payload: {chat_id, path, caption?, parse_mode?} — retorna el JSON de Telegram.
+    """
+    import mimetypes
+    import uuid
+    from pathlib import Path as _P
+
+    chat_id = payload.get("chat_id")
+    if chat_id is not None and not _chat_allowed(cfg, chat_id):
+        raise PermissionError(f"chat {chat_id} no está en TELEGRAM_ALLOWED_CHATS")
+    file = _P(payload["path"])
+    if not file.exists():
+        return {"ok": False, "error": "file not found"}
+    mime = mimetypes.guess_type(file.name)[0] or "image/png"
+    boundary = uuid.uuid4().hex
+    parts: list[bytes] = []
+
+    def field(name: str, value: str):
+        parts.append(f"--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n".encode())
+
+    field("chat_id", str(chat_id))
+    if payload.get("caption"):
+        field("caption", str(payload["caption"])[:1024])
+        field("parse_mode", "HTML")
+    parts.append(f"--{boundary}\r\nContent-Disposition: form-data; name=\"photo\"; "
+                 f"filename=\"{file.name}\"\r\nContent-Type: {mime}\r\n\r\n".encode())
+    parts.append(file.read_bytes())
+    parts.append(f"\r\n--{boundary}--\r\n".encode())
+
+    req = urllib.request.Request(
+        f"https://api.telegram.org/bot{cfg.telegram.bot_token}/sendPhoto",
+        data=b"".join(parts),
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            return json.loads(resp.read().decode())
+    except Exception as e:
+        log.error("sendPhoto falló: %s", e)
+        return {"ok": False, "error": str(e)[:200]}
 
 
 def _digests_maybe(cfg: Config, state: dict) -> None:
@@ -1364,8 +1418,9 @@ def _register_commands(cfg: Config) -> None:
         {"command": "channel_publish", "description": "Publicar candidatas al canal ahora"},
         {"command": "channel_publish_ia", "description": "Publicar solo ofertas revisadas por IA"},
         {"command": "channel_daily", "description": "Daily digest ahora"},
-        {"command": "channel_weekly", "description": "Digests semanales ahora (remote+salary)"},
+        {"command": "channel_weekly", "description": "Digests semanales ahora (remote+rol+salary)"},
         {"command": "channel_weekly_remote", "description": "Solo digest weekly-remote"},
+        {"command": "channel_weekly_rol", "description": "Solo mejor de la semana por rol"},
         {"command": "channel_weekly_salary", "description": "Solo ranking salarial"},
         {"command": "channel_trends", "description": "Post mensual de tendencias"},
         {"command": "channel_all", "description": "Publish + todos los digests"},

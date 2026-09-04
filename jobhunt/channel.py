@@ -12,6 +12,7 @@ import re
 import time
 from collections import Counter
 from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 
 from .config import Config
 from .logging_setup import get_logger
@@ -443,32 +444,74 @@ def _top_row_line(r: dict) -> str:
     return s
 
 
+def _enviar_fotos(cfg: Config, tg_api, fotos: list[tuple[Path, str]]) -> None:
+    """Envía PNGs al canal con caption (complemento visual de un digest).
+
+    fotos: [(path, caption_html), ...] — falla silenciosa por foto (no tumba el digest).
+    """
+    from pathlib import Path
+    for p, caption in fotos:
+        try:
+            tg_api("sendPhoto", {"chat_id": int(cfg.channel.chat_id), "path": str(p),
+                                 "caption": caption, "parse_mode": "HTML"})
+        except Exception as e:
+            log.warning("canal: foto %s falló: %s", Path(p).name, e)
+
+
+def _dir_charts(cfg: Config) -> Path:
+    from pathlib import Path
+    d = Path(cfg.report.out_dir) / "digest_charts"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
 def publish_daily_digest(cfg: Config, conn, tg_api, dry_run: bool = False) -> bool:
-    """Digest B: top del día (umbral relajado digest_min_score, excluye posteadas 24h)."""
+    """Digest B: top del día — 1 oferta por categoría (rol_categoria), la mejor de cada una.
+
+    A1: diversifica por rol (Backend, Data, DevOps, ...) en vez de top-N por score
+    (que terminaba siendo N ofertas del mismo rol). Umbral digest_min_score.
+    """
     now = datetime.now(timezone.utc)
     rows = [dict(r) for r in conn.execute(_GATE_SQL.replace(":min_score", ":min_score").replace(
         ":max_age", ":max_age"), {"min_score": cfg.channel.digest_min_score,
                                   "max_age": cfg.channel.max_age_days}).fetchall()]
-    # excluir las publicadas como individuales en las últimas 24h (doble ángulo)
-    out, seen = [], set()
+    # 1 por rol_categoria (mejor score de cada uno), excluye no-dev y posteadas 24h
+    por_rol: dict[str, dict] = {}
     for r in rows:
-        if r["group_id"] in seen:
-            continue
-        seen.add(r["group_id"])
         if cfg.channel.require_dev and not is_dev(r.get("rol_categoria"), r.get("title") or "", cfg):
             continue
-        out.append(r)
-        if len(out) >= cfg.channel.digest_max:
-            break
+        rol = (r.get("rol_categoria") or "Otro").strip() or "Otro"
+        cur = por_rol.get(rol)
+        if cur is None or (r.get("market_score") or 0) > (cur.get("market_score") or 0):
+            por_rol[rol] = r
+    out = sorted(por_rol.values(), key=lambda r: -(r.get("market_score") or 0))
     if not out:
         log.info("canal: digest diario sin candidatas — silencio honesto")
         return False
-    header = f"📊 <b>Top del día</b> · {len(out)} ofertas · {now.strftime('%d %b')}"
+    header = f"📊 <b>Top del día</b> · mejor de cada categoría · {now.strftime('%d %b')}"
     text = header + "\n\n" + "\n\n".join(_top_row_line(r) for r in out)
     if dry_run:
         log.info("canal: dry-run digest diario:\n%s", text[:500])
         return False
-    return _send_digest(cfg, tg_api, "daily", text, conn, now)
+    ok = _send_digest(cfg, tg_api, "daily", text, conn, now)
+    if ok:
+        # B1+B2a+B2b+B4: gráficos de contexto (falla silenciosa por foto)
+        try:
+            from . import charts
+            d = _dir_charts(cfg)
+            fotos = []
+            for p, cap in (
+                (charts.chart_salarios_por_rol(conn, d), "💰 Mediana salarial por rol"),
+                (charts.chart_ofertas_por_rol(conn, d), "🧑‍💻 Ofertas activas por rol"),
+                (charts.chart_seniority_mix(conn, d), "📈 Seniority del pool"),
+                (charts.chart_modalidad(conn, d), "🏢 Modalidad del pool"),
+            ):
+                if p:
+                    fotos.append((p, cap))
+            _enviar_fotos(cfg, tg_api, fotos)
+        except Exception as e:
+            log.warning("canal: gráficos daily fallaron: %s", e)
+    return ok
 
 
 def _weekly_remote_rows(conn, cfg: Config) -> dict[str, list[dict]]:
@@ -517,10 +560,57 @@ def publish_weekly_remote(cfg: Config, conn, tg_api, dry_run: bool = False) -> b
     return _send_digest(cfg, tg_api, "weekly-remote", text, conn, now)
 
 
+def publish_weekly_rol(cfg: Config, conn, tg_api, dry_run: bool = False) -> bool:
+    """Digest C2: mejor oferta de la semana POR ROL (Backend, Data, DevOps, ...).
+
+    A3: complementa weekly-remote (por seniority) con diversidad por categoría —
+    1 oferta por rol_categoria, la de mejor market_score de cada una.
+    """
+    from .notify import esc
+    now = datetime.now(timezone.utc)
+    rows = [dict(r) for r in conn.execute("""SELECT * FROM ofertas WHERE active=1
+        AND market_score >= :min_score AND date_canonical >= date('now', '-' || :max_age || ' days')
+        AND notified_channel_at = ''
+        ORDER BY market_score DESC, first_seen DESC LIMIT 80""",
+        {"min_score": cfg.channel.min_score - 5, "max_age": cfg.channel.max_age_days}).fetchall()]
+    por_rol: dict[str, dict] = {}
+    for r in rows:
+        if cfg.channel.require_dev and not is_dev(r.get("rol_categoria"), r.get("title") or "", cfg):
+            continue
+        rol = (r.get("rol_categoria") or "Otro").strip() or "Otro"
+        cur = por_rol.get(rol)
+        if cur is None or (r.get("market_score") or 0) > (cur.get("market_score") or 0):
+            por_rol[rol] = r
+    out = sorted(por_rol.values(), key=lambda r: -(r.get("market_score") or 0))
+    if not out:
+        log.info("canal: weekly-rol sin candidatas — silencio honesto")
+        return False
+    text = "🏆 <b>Mejor de la semana por rol</b>\n\n" + "\n\n".join(_top_row_line(r) for r in out)
+    if dry_run:
+        log.info("canal: dry-run weekly-rol:\n%s", text[:400])
+        return False
+    ok = _send_digest(cfg, tg_api, "weekly-rol", text, conn, now)
+    if ok:
+        try:
+            from . import charts
+            d = _dir_charts(cfg)
+            p = charts.chart_actividad(conn, d)
+            if p:
+                _enviar_fotos(cfg, tg_api, [(p, "📅 Ofertas nuevas por día")])
+        except Exception as e:
+            log.warning("canal: gráfico weekly-rol falló: %s", e)
+    return ok
+
+
 def publish_weekly_salary(cfg: Config, conn, tg_api, dry_run: bool = False) -> bool:
-    """Digest D: ranking salarial semanal (top 5 declarados)."""
+    """Digest D: ranking salarial semanal (top 5 declarados) CON contexto de mediana por rol.
+
+    A2: cada línea compara contra la mediana del mismo rol (stats robustas de
+    stats.py) — '$2.8M (mediana DevOps $2.1M, +33%)' en vez de un número plano.
+    """
     from .notify import esc
     from .scoring import _salary_to_clp_monthly
+    from .stats import _median as mediana_robusta
     now = datetime.now(timezone.utc)
     rows = [dict(r) for r in conn.execute("""SELECT * FROM ofertas WHERE active=1
         AND market_score >= :min_score AND date_canonical >= date('now', '-' || :max_age || ' days')
@@ -536,20 +626,47 @@ def publish_weekly_salary(cfg: Config, conn, tg_api, dry_run: bool = False) -> b
     if not sal_rows:
         log.info("canal: weekly-salary sin candidatas — silencio honesto")
         return False
+    # mediana por rol (pool activo completo, robusta)
+    # mediana por rol (pool activo completo, robusta)
+    _acum: dict = {}
+    for rc, sal, desc in conn.execute(
+            "SELECT rol_categoria, salary, description FROM ofertas WHERE active=1 AND salary != ''"):
+        v = _salary_to_clp_monthly(sal or "", desc or "")
+        if v:
+            _acum.setdefault(rc or "Otro", []).append(v)
+    med_por_rol = {k: mediana_robusta(v) for k, v in _acum.items()}
     lines = []
     for i, (sal, r) in enumerate(sal_rows[:5], 1):
+        rol = (r.get("rol_categoria") or "Otro").strip() or "Otro"
+        med = med_por_rol.get(rol)
+        ctx = ""
+        if med:
+            diff = (sal - med) * 100 // med
+            signo = "+" if diff >= 0 else ""
+            ctx = f" · mediana {rol}: ${med:,} ({signo}{diff}%)".replace(",", ".")
         lines.append(f"{i}. ${sal:,}".replace(",", ".") +
-                     f" — {esc(r['title'][:60])} ({esc((r.get('company') or '?')[:25])})")
-    text = "💰 <b>Top salarios de la semana</b>\n" + "\n".join(lines)
+                     f" — {esc(r['title'][:60])} ({esc((r.get('company') or '?')[:25])}){ctx}")
+    text = "💰 <b>Top salarios de la semana</b> (vs mediana del rol)\n" + "\n".join(lines)
     if dry_run:
         log.info("canal: dry-run weekly-salary:\n%s", text[:400])
         return False
-    return _send_digest(cfg, tg_api, "weekly-salary", text, conn, now)
+    ok = _send_digest(cfg, tg_api, "weekly-salary", text, conn, now)
+    if ok:
+        try:
+            from . import charts
+            d = _dir_charts(cfg)
+            p = charts.chart_salarios_por_rol(conn, d)
+            if p:
+                _enviar_fotos(cfg, tg_api, [(p, "💰 Mediana salarial por rol")])
+        except Exception as e:
+            log.warning("canal: gráfico weekly-salary falló: %s", e)
+    return ok
 
 
 def publish_weekly_digests(cfg: Config, conn, tg_api, dry_run: bool = False) -> bool:
-    """Wrapper compat: dispara C y D (daemon semanal)."""
+    """Wrapper compat: dispara C, C2 y D (daemon semanal)."""
     sent = publish_weekly_remote(cfg, conn, tg_api, dry_run=dry_run)
+    sent = publish_weekly_rol(cfg, conn, tg_api, dry_run=dry_run) or sent
     return publish_weekly_salary(cfg, conn, tg_api, dry_run=dry_run) or sent
 
 
