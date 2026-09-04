@@ -327,7 +327,8 @@ def cmd_run(cfg, notify: bool = True, on_phase=None, stop_event: threading.Event
                 # 2. FIX B: enrich de fichas ANTES de la IA — la IA lee el contexto
                 #    completo (desc completa, sueldo, modalidad) en vez del crudo
                 try:
-                    enrich_pending(conn, cfg, max_n=8, groups=lote_ids)
+                    enrich_pending(conn, cfg, max_n=8, groups=lote_ids, solo_fetch=True,
+                                   stop_event=stop_event)
                 except Exception as e:
                     conn.rollback()
                     log.warning("enrich pre-IA lote falló (continúa): %s", e)

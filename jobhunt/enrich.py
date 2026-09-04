@@ -347,6 +347,143 @@ def ia_extract(cfg: Config, job: dict, profile_desc: str, mercado: str = "") -> 
     return ia_extract_detail(cfg, job, profile_desc, mercado)[0]
 
 
+# --- Modo lote (spec-enrich-lotes §2) ---
+_LOTE_SCHEMA = {
+    "type": "object",
+    "properties": {"ofertas": {"type": "array", "items": {
+        "type": "object",
+        "properties": {
+            "idx": {"type": "integer"},
+            "opinion": {"type": "string"},
+            "resumen": {"type": "string"},
+            "fit_reason": {"type": "string"},
+            "seniority_real": {"type": "string"},
+            "rol_categoria": {"type": "string"},
+            "ingles": {"type": "string"},
+            "idiomas": {"type": "array", "items": {"type": "object",
+                "properties": {"idioma": {"type": "string"}, "nivel": {"type": "string"},
+                                "excluyente": {"type": "boolean"}},
+                "required": ["idioma", "nivel", "excluyente"], "additionalProperties": False}},
+            "modalidad": {"type": "string"},
+            "salario_clp_mensual": {"type": "integer"},
+            "red_flags": {"type": "array", "items": {"type": "string"}},
+            "green_flags": {"type": "array", "items": {"type": "string"}},
+            "benefits": {"type": "array", "items": {"type": "string"}}},
+        "required": ["idx", "opinion", "resumen", "fit_reason", "seniority_real",
+                      "rol_categoria", "ingles", "idiomas", "modalidad",
+                      "salario_clp_mensual", "red_flags", "green_flags", "benefits"],
+        "additionalProperties": False}},
+        "required": ["ofertas"], "additionalProperties": False}}
+
+
+def _lote_prompt(rows: list[dict], profile_desc: str, mercado: str) -> str:
+    """Prompt de lote: N bloques --- OFERTA {i} --- con idx 1..N (spec §2.1)."""
+    from . import stats as _st
+    bloques = []
+    for i, r in enumerate(rows, 1):
+        nota = ""
+        sal_esta = _st.parse_salary_clp(r.get("salary") or "")
+        if r.get("salary_status") in ("suspect", "implausible") and sal_esta > 0:
+            if _st.annual_likely(sal_esta, _st.parse_salary_clp("CLP 2150000") or 2150000):
+                hip = f"probable cifra anual (≈ ${sal_esta // 12:,}/mes)"
+            else:
+                hip = "error de la fuente"
+            raw_mostrar = (r.get('salary_raw') or r.get('salary') or "").strip()
+            monto_mostrar = raw_mostrar if raw_mostrar else f"{sal_esta:,}"
+            nota = (f"\nNota: el sueldo declarado de esta oferta (${monto_mostrar}) "
+                    f"fue clasificado anómalo (motivo: {r.get('salary_note') or 'estadística'}; "
+                    f"hipótesis: {hip}) — coméntalo en opinion según las reglas.")
+        bloques.append(
+            f"--- OFERTA {i} ---\n"
+            f"Título: {r.get('title', '')}\nEmpresa: {r.get('company', '')}\n"
+            f"Ubicación: {r.get('location', '')}\n"
+            f"Sueldo declarado: {r.get('salary') or '(no declarado — infiere rango de mercado solo si el texto lo permite)'}\n"
+            f"Modalidad declarada: {r.get('modality') or '(no declarada)'}\n"
+            f"Descripción: {(r.get('description') or '')[:2400]}{nota}")
+    return (f"Perfil del candidato: {profile_desc}\n\n"
+            f"Contexto de mercado (para el campo opinion): {mercado}\n\n"
+            + "\n\n".join(bloques) +
+            "\n\nResponde un JSON array con UN objeto por oferta (idx 1..N), cada uno con: "
+            "idx, opinion, resumen, fit_reason, seniority_real, rol_categoria, ingles, idiomas, "
+            "modalidad, salario_clp_mensual, red_flags, green_flags, benefits. "
+            "Si una oferta no declara salario, salario_clp_mensual = 0 (cero, nunca inventes un monto).")
+
+
+def ia_extract_lote(cfg: Config, rows: list[dict], profile_desc: str,
+                    mercado: str = "") -> tuple[list[dict] | None, str]:
+    """Llamada IA por LOTE (spec-enrich-lotes §2). HTTP PURO — sin SQLite.
+    Retorna (lista de dicts con idx, o None) + err_kind ('' | 'rate' | 'timeout' | 'other').
+    El schema estricto garantiza estructura; el mapeo idx→fila lo hace el llamador."""
+    if not cfg.ia.enabled or not cfg.ia.api_key or not rows:
+        return None, "other"
+    body = {"model": cfg.ia.model,
+            "messages": [{"role": "system",
+                          "content": "Eres un extractor de datos de ofertas de empleo chilenas. "
+                                     "Respondes SOLO JSON válido. Dato ausente → null. No inventes. "
+                                     "El campo 'opinion' es un comentario editorial sobre la oferta "
+                                     "(contexto de mercado, señal notable, comparación salarial) — "
+                                     "NUNCA consejos al candidato (prohibido 'destaca', 'pregunta', "
+                                     "'no apliques', 'practica'). "
+                                     "Si el sueldo está declarado, la opinion DEBE comentarlo "
+                                     "(comparar contra la mediana del CONTEXTO provisto); no digas 'sin salario' "
+                                     "si el campo Sueldo declarado trae un valor. "
+                                     "ANTI-ALUCINACIÓN: los únicos números de mercado que puedes citar en "
+                                     "opinion son los del CONTEXTO DE MERCADO provisto arriba — prohibido "
+                                     "citar medianas, percentiles o estadísticas de tu conocimiento propio "
+                                     "o de otras fuentes. Si el contexto dice que la muestra es insuficiente, "
+                                     "no compares salarios: describe solo la oferta. "
+                                     "Si el sueldo de UNA oferta viene marcado como anómalo en su Nota, la "
+                                     "opinion DEBE: (1) citar el valor declarado tal cual, (2) señalar la "
+                                     "anomalía con la hipótesis provista (probable anual/error de fuente), "
+                                     "(3) comparar contra la mediana provista. NUNCA corrijas el valor ni lo "
+                                     "omitas. Prohibido comentar anomalías de OTRAS ofertas."},
+                        {"role": "user", "content": _lote_prompt(rows, profile_desc, mercado)}],
+            "temperature": 0,
+            "response_format": {"type": "json_schema",
+                                "json_schema": {"name": "lote_ofertas", "strict": True,
+                                                "schema": _LOTE_SCHEMA}}}
+    if cfg.ia.reasoning_effort:
+        body["reasoning_effort"] = cfg.ia.reasoning_effort
+    for attempt in range(cfg.ia.retries + 1):
+        try:
+            req = requests.post(f"{cfg.ia.base_url}/chat/completions",
+                                json=body, timeout=cfg.ia.timeout,
+                                headers={"Authorization": f"Bearer {cfg.ia.api_key}",
+                                         "Content-Type": "application/json"})
+            if req.status_code >= 400:
+                kind = "rate" if (req.status_code == 429 or req.status_code >= 500) else "other"
+                if attempt == cfg.ia.retries:
+                    log.warning("IA lote HTTP %d: %s", req.status_code, req.text[:120])
+                    return None, kind
+                time.sleep(2)
+                continue
+            d = req.json()
+            content = d["choices"][0]["message"]["content"]
+            data = json.loads(content)
+            arr = data.get("ofertas") if isinstance(data, dict) else data
+            if not isinstance(arr, list):
+                return None, "other"
+            # normalizar idiomas: el modelo puede devolver strings o dicts (spike verificado)
+            for item in arr:
+                if isinstance(item, dict) and isinstance(item.get("idiomas"), list):
+                    item["idiomas"] = [
+                        {"idioma": str(i).lower()[:20], "nivel": "", "excluyente": False}
+                        if isinstance(i, str) else i
+                        for i in item["idiomas"] if i]
+            return arr, ""
+        except requests.exceptions.Timeout:
+            if attempt == cfg.ia.retries:
+                log.warning("IA lote timeout (%d ofertas)", len(rows))
+                return None, "timeout"
+            time.sleep(2)
+        except Exception as e:
+            if attempt == cfg.ia.retries:
+                log.warning("IA lote falló: %s", e)
+                return None, "other"
+            time.sleep(2)
+    return None, "other"
+
+
 def _extract_aira_spa(url: str) -> dict:
     """Ficha AIRA (SPA client-side): requiere browser. Extrae el <p> más largo = descripción."""
     info: dict = {"description": "", "description_source": "aira-spa"}
@@ -374,132 +511,209 @@ def _extract_aira_spa(url: str) -> dict:
     return info
 
 
-def enrich_pending(conn, cfg: Config, max_n: int | None = None,
-                   groups: set[str] | None = None) -> int:
+def get_salary_pool(conn) -> list[int]:
+    """Pool de salarios activos, calculado UNA vez por invocación (spec-enrich-lotes §4).
+    Leave-one-out se aplica en el llamador (excluir el valor evaluado)."""
+    from . import stats as _st
+    return [v for (s,) in conn.execute(
+        "SELECT salary FROM ofertas WHERE active=1 AND salary!='' AND salary IS NOT NULL")
+        if (v := _st.parse_salary_clp(s)) > 0]
+
+
+def _fetch_ficha(r: dict) -> dict:
+    """Solo HTTP — NUNCA toca la DB (spec-enrich-lotes §3.1.2, patrón P0-3).
+    Retorna info (con _access) o {"_access": "error"}."""
+    try:
+        if "airavirtual.com" in (r.get("url") or ""):
+            return _extract_aira_spa(r["url"])
+        return extract_structured(r["url"])
+    except Exception as e:
+        log.warning("enrich falló para %s (%s): %s", r["group_id"], (r.get("title") or "")[:40], e)
+        return {"_access": "error"}
+
+
+def _aplicar_ficha(conn, r: dict, info: dict, pool: list[int]) -> str:
+    """Aplica la ficha en el MAIN (árbitro + UPDATE + commit). Retorna 'ok' | 'expired' | 'blocked'."""
+    from . import stats as _st
+    access = info.get("_access", "ok")
+    if info.get("_cb_expired") or access == "not_found":
+        conn.execute("UPDATE ofertas SET active=0 WHERE group_id=?", (r["group_id"],))
+        conn.commit()
+        log.info("oferta expirada (%s): %s — active=0", access, (r.get("title") or "")[:40])
+        return "expired"
+    if access in ("blocked", "error"):
+        conn.execute("UPDATE ofertas SET fetch_fails=COALESCE(fetch_fails,0)+1 WHERE group_id=?",
+                     (r["group_id"],))
+        conn.commit()
+        log.info("enrich bloqueado (%s) para %s — fetch_fails+1, reintenta después",
+                 access, (r.get("title") or "")[:40])
+        return "blocked"
+    conn.execute("UPDATE ofertas SET fetch_fails=0, last_fetch_ok=datetime('now') WHERE group_id=?",
+                 (r["group_id"],))
+    new_desc = (info.get("description") or "")[:1800]
+    extra = (f" · {info['contrato']}" if info.get("contrato") else "") + \
+            (f" · {info['jornada']}" if info.get("jornada") else "")
+    desc = ((new_desc + extra) if new_desc else r.get("description") or "")[:2000]
+    # ---- árbitro de salario (§1.3, ACCESO_OK únicamente) ----
+    sal_fila = conn.execute(
+        "SELECT salary, salary_raw, salary_source, salary_status FROM ofertas WHERE group_id=?",
+        (r["group_id"],)).fetchone()
+    sal_actual = sal_fila["salary"] if sal_fila else ""
+    sal_source = sal_fila["salary_source"] if sal_fila else ""
+    sal_status = sal_fila["salary_status"] if sal_fila else ""
+    sal_texto_crudo = (info.get("salary") or "").strip()
+    sal_texto_val = _st.parse_salary_clp(sal_texto_crudo) if sal_texto_crudo else 0
+    arb_salary, arb_source, arb_status, arb_note = None, None, None, None
+    if sal_texto_val > 0:
+        if re.search(r"/año|/year|anual", sal_texto_crudo, re.I) and sal_texto_val > _st.CEILING:
+            sal_texto_val = sal_texto_val // 12
+            arb_note = "annual_likely"
+        sal_feed_val = _st.parse_salary_clp(sal_actual)
+        feed_implausible = sal_status == "implausible" or \
+            (sal_feed_val > 0 and (sal_feed_val < _st.FLOOR or sal_feed_val > _st.CEILING))
+        coincide = sal_feed_val > 0 and abs(sal_feed_val - sal_texto_val) <= max(1, int(0.01 * sal_texto_val))
+        if feed_implausible or sal_source in ("", "feed") and sal_feed_val == 0:
+            arb_salary, arb_source, arb_status = sal_texto_crudo[:40], "text", "trusted"
+            arb_note = arb_note or ("text_wins" if feed_implausible else "text_confirms")
+        elif coincide:
+            arb_source, arb_status, arb_note = "text", "trusted", arb_note or "text_confirms"
+        else:
+            arb_salary, arb_source, arb_status, arb_note = sal_texto_crudo[:40], "text", "trusted", "text_wins"
+    elif sal_status == "implausible":
+        arb_salary, arb_source, arb_status, arb_note = "", "feed", "implausible", "source_unverifiable"
+    # clasificación estadística con pool cacheado + leave-one-out (spec-enrich-lotes §4)
+    if arb_salary is not None and arb_salary:
+        v = _st.parse_salary_clp(arb_salary)
+        pool_loo = [x for x in pool if x != v]
+        stat_status, stat_note = _st.classify_salary(v, pool_loo)
+        arb_status, arb_note = stat_status, stat_note or arb_note
+    conn.execute("""UPDATE ofertas SET
+        description=?,
+        company=CASE WHEN company='' OR company IS NULL THEN ? ELSE company END,
+        modality=COALESCE(NULLIF(modality,''), ?),
+        salary=COALESCE(?, salary),
+        salary_source=COALESCE(?, salary_source),
+        salary_status=COALESCE(?, salary_status),
+        salary_note=COALESCE(?, salary_note),
+        salary_raw=CASE WHEN salary_raw='' OR salary_raw IS NULL THEN COALESCE(salary, '') ELSE salary_raw END,
+        techs=COALESCE(NULLIF(techs,''), ?),
+        date_posted=COALESCE(NULLIF(date_posted,''), ?),
+        valid_through=COALESCE(NULLIF(valid_through,''), ?),
+        employment_type=COALESCE(NULLIF(employment_type,''), ?),
+        years_official=COALESCE(years_official, ?),
+        remote_official=COALESCE(remote_official, ?),
+        description_source=?
+        WHERE group_id=?""",
+        (desc, info.get("company") or "", info.get("modality_badge") or "", arb_salary,
+         arb_source, arb_status, arb_note,
+         ";".join(info.get("techs_desc", [])), info.get("date_posted") or "",
+         info.get("valid_through") or "", info.get("years_official"),
+         info.get("remote_official"), info.get("employment_type") or "",
+         "jsonld" if info.get("description") else "section",
+         r["group_id"]))
+    conn.commit()
+    return "ok"
+
+
+def enrich_pending(conn, cfg: Config | None, max_n: int | None = None,
+                   groups: set[str] | None = None, stop_event=None,
+                   solo_fetch: bool = False) -> int:
     """Enriquece ofertas activas con descripción corta: Anillo A primero, C si sigue vacío.
 
-    groups: si se pasa, SOLO esas group_id (acota el scope al lote — P1-5 de la
-    revisión de arquitectura). Commit POR FICHA: no retiene el write lock minutos
-    (P1-5 de la revisión de concurrencia) y un crash no pierde el trabajo previo.
-    """
+    spec-enrich-lotes v2 (§3-5): fetch paralelo (threads SOLO HTTP, el main escribe),
+    recarga N' tras fetch, pool de salarios cacheado con LOO, modo lote IA si
+    cfg.ia.batch_prompt > 1, sleeps reducidos, stop_event entre grupos, ctx_version.
+    groups: si se pasa, SOLO esas group_id. Commit POR FICHA.
+    solo_fetch: True = solo Anillo A + árbitro (FIX B del scan, sin IA — P1-3)."""
+    import hashlib
+    from concurrent.futures import ThreadPoolExecutor
+    from . import stats as _st
+    cols = ("group_id, title, company, location, url, description, salary, modality, "
+            "salary_raw, salary_status, salary_note")
     if groups:
         qs = ",".join("?" for _ in groups)
         rows = conn.execute(
-            f"SELECT group_id, title, company, location, url, description FROM ofertas "
+            f"SELECT {cols} FROM ofertas "
             f"WHERE active=1 AND (description IS NULL OR length(description)<200) "
-            f"AND group_id IN ({qs})", tuple(groups)).fetchall()
+            f"AND group_id IN ({qs}) ORDER BY score DESC", tuple(groups)).fetchall()
     else:
         rows = conn.execute(
-            "SELECT group_id, title, company, location, url, description FROM ofertas "
-            "WHERE active=1 AND (description IS NULL OR length(description)<200)").fetchall()
+            f"SELECT {cols} FROM ofertas "
+            "WHERE active=1 AND (description IS NULL OR length(description)<200) "
+            "ORDER BY score DESC").fetchall()
     pending = [dict(r) for r in rows]
     if max_n:
         pending = pending[:max_n]
+    if not pending:
+        return 0
+    # pool cacheado UNA vez por invocación (§4) + contexto + ctx_version
+    pool = get_salary_pool(conn)
+    mercado = compute_market_context(conn) if cfg else ""
+    ctx_version = "ctx-" + hashlib.sha256(mercado.encode()).hexdigest()[:8] if cfg else ""
+    perfil = profile_description(cfg) if cfg else ""
+    N = cfg.ia.batch_prompt if (cfg and cfg.ia.batch_prompt > 1 and not solo_fetch) else 1
     done = 0
-    for r in pending:
-        if not r.get("url"):
-            continue
-        try:
-            # AIRA: ficha SPA client-side → browser (el feed no trae desc en ningún formato)
-            if "airavirtual.com" in (r.get("url") or ""):
-                info = _extract_aira_spa(r["url"])
-            else:
-                info = extract_structured(r["url"])
-        except Exception as e:
-            log.warning("enrich falló para %s (%s): %s", r["group_id"], (r.get("title") or "")[:40], e)
-            continue
-        access = info.get("_access", "ok")
-        # §1.4: not_found → desactivar (generaliza patrón CB a todas las fuentes)
-        if info.get("_cb_expired") or access == "not_found":
-            conn.execute("UPDATE ofertas SET active=0 WHERE group_id=?", (r["group_id"],))
-            conn.commit()   # B4: commit por ficha también en la rama expired (DEV-5)
-            log.info("oferta expirada (%s): %s — active=0", access, (r.get("title") or "")[:40])
+    for i in range(0, len(pending), N):
+        if stop_event is not None and stop_event.is_set():
+            log.info("enrich_pending: stop_event seteado — corte entre grupos")
+            break
+        grupo = pending[i:i + N]
+        # fetch paralelo: threads SOLO HTTP (P0-3); AIRA serializado (5 chromium = no)
+        if len(grupo) > 1 and not any("airavirtual.com" in (r.get("url") or "") for r in grupo):
+            with ThreadPoolExecutor(max_workers=min(len(grupo), 5)) as ex:
+                infos = list(ex.map(_fetch_ficha, grupo))
+        else:
+            infos = [_fetch_ficha(r) for r in grupo]
+        # el MAIN aplica árbitro + UPDATE por ficha (los threads no tocan la DB)
+        vivas = []
+        for r, info in zip(grupo, infos):
+            estado = _aplicar_ficha(conn, r, info, pool)
             done += 1
-            time.sleep(1)
+            if estado == "ok":
+                vivas.append(r["group_id"])
+            time.sleep(0.5)
+        if solo_fetch or not vivas or not cfg:
             continue
-        # §1.4/A5-A6: blocked/error → NO se decide nada; contador + retry después
-        if access in ("blocked", "error"):
-            conn.execute("UPDATE ofertas SET fetch_fails=COALESCE(fetch_fails,0)+1 WHERE group_id=?",
-                         (r["group_id"],))
-            conn.commit()
-            log.info("enrich bloqueado (%s) para %s — fetch_fails+1, reintenta después",
-                     access, (r.get("title") or "")[:40])
+        # recarga N' (active=1) — el árbitro actualizó salary_status/note (§3.1.4)
+        qs = ",".join("?" for _ in vivas)
+        recargadas = [dict(x) for x in conn.execute(
+            f"SELECT group_id, title, company, location, description, salary, modality, "
+            f"salary_raw, salary_status, salary_note FROM ofertas "
+            f"WHERE active=1 AND group_id IN ({qs})", tuple(vivas))]
+        if not recargadas:
             continue
-        # ACCESO_OK: resetea strikes y habilita el árbitro
-        conn.execute("UPDATE ofertas SET fetch_fails=0, last_fetch_ok=datetime('now') WHERE group_id=?",
-                     (r["group_id"],))
-        new_desc = (info.get("description") or "")[:1800]
-        extra = (f" · {info['contrato']}" if info.get("contrato") else "") + \
-                (f" · {info['jornada']}" if info.get("jornada") else "")
-        desc = ((new_desc + extra) if new_desc else r.get("description") or "")[:2000]
-        # ---- árbitro de salario (§1.3, ACCESO_OK únicamente) ----
-        from . import stats as _st
-        sal_fila = conn.execute(
-            "SELECT salary, salary_raw, salary_source, salary_status FROM ofertas WHERE group_id=?",
-            (r["group_id"],)).fetchone()
-        sal_actual = sal_fila["salary"] if sal_fila else ""
-        sal_source = sal_fila["salary_source"] if sal_fila else ""
-        sal_status = sal_fila["salary_status"] if sal_fila else ""
-        sal_texto_crudo = (info.get("salary") or "").strip()
-        sal_texto_val = _st.parse_salary_clp(sal_texto_crudo) if sal_texto_crudo else 0
-        arb_salary, arb_source, arb_status, arb_note = None, None, None, None
-        if sal_texto_val > 0:
-            # el texto declara salario: normalizado (annual→/12 según unidad explícita)
-            if re.search(r"/año|/year|anual", sal_texto_crudo, re.I) and sal_texto_val > _st.CEILING:
-                sal_texto_val = sal_texto_val // 12
-                arb_note = "annual_likely"
-            sal_feed_val = _st.parse_salary_clp(sal_actual)
-            feed_implausible = sal_status == "implausible" or \
-                (sal_feed_val > 0 and (sal_feed_val < _st.FLOOR or sal_feed_val > _st.CEILING))
-            coincide = sal_feed_val > 0 and abs(sal_feed_val - sal_texto_val) <= max(1, int(0.01 * sal_texto_val))
-            if feed_implausible or sal_source in ("", "feed") and sal_feed_val == 0:
-                # texto gana (única fuente verificable por humano)
-                arb_salary, arb_source, arb_status = sal_texto_crudo[:40], "text", "trusted"
-                arb_note = arb_note or ("text_wins" if feed_implausible else "text_confirms")
-            elif coincide:
-                arb_source, arb_status, arb_note = "text", "trusted", arb_note or "text_confirms"
+        if N > 1:
+            arr, err = ia_extract_lote(cfg, recargadas, perfil, mercado)
+            if arr is None:
+                if err == "rate":
+                    log.warning("IA lote rate-limit — grupo queda en cola para el batch nocturno")
+                    continue
+                # fallback individual (timeout/other) — §2.5
+                for r in recargadas:
+                    parsed, _ = ia_extract_detail(cfg, r, perfil, mercado)
+                    if parsed:
+                        apply_ia_result(conn, cfg, r, parsed, ctx_version=ctx_version)
             else:
-                # ambos en rango pero distintos → texto gana (más fresco)
-                arb_salary, arb_source, arb_status, arb_note = sal_texto_crudo[:40], "text", "trusted", "text_wins"
-        elif sal_status == "implausible":
-            # texto NO declara salario y el feed era implausible → ocultar (honesto)
-            arb_salary, arb_source, arb_status, arb_note = "", "feed", "implausible", "source_unverifiable"
-        # clasificación estadística si hay salario vigente
-        if arb_salary is not None and arb_salary:
-            v = _st.parse_salary_clp(arb_salary)
-            pool = [_st.parse_salary_clp(s) for (s,) in conn.execute(
-                "SELECT salary FROM ofertas WHERE active=1 AND salary!='' AND salary IS NOT NULL AND group_id!=?",
-                (r["group_id"],))]
-            pool = [x for x in pool if x > 0]
-            stat_status, stat_note = _st.classify_salary(v, pool)
-            arb_status, arb_note = stat_status, stat_note or arb_note
-        conn.execute("""UPDATE ofertas SET
-            description=?,
-            company=CASE WHEN company='' OR company IS NULL THEN ? ELSE company END,
-            modality=COALESCE(NULLIF(modality,''), ?),
-            salary=COALESCE(?, salary),
-            salary_source=COALESCE(?, salary_source),
-            salary_status=COALESCE(?, salary_status),
-            salary_note=COALESCE(?, salary_note),
-            salary_raw=CASE WHEN salary_raw='' OR salary_raw IS NULL THEN COALESCE(salary, '') ELSE salary_raw END,
-            techs=COALESCE(NULLIF(techs,''), ?),
-            date_posted=COALESCE(NULLIF(date_posted,''), ?),
-            valid_through=COALESCE(NULLIF(valid_through,''), ?),
-            employment_type=COALESCE(NULLIF(employment_type,''), ?),
-            years_official=COALESCE(years_official, ?),
-            remote_official=COALESCE(remote_official, ?),
-            description_source=?
-            WHERE group_id=?""",
-            (desc, info.get("company") or "", info.get("modality_badge") or "", arb_salary,
-             arb_source, arb_status, arb_note,
-             ";".join(info.get("techs_desc", [])), info.get("date_posted") or "",
-             info.get("valid_through") or "", info.get("years_official"),
-             info.get("remote_official"), info.get("employment_type") or "",
-             "jsonld" if info.get("description") else "section",
-             r["group_id"]))
-        conn.commit()   # commit POR FICHA — no retiene el write lock (P1-5 conc)
-        done += 1
-        time.sleep(2)
+                idxs: dict[int, dict] = {}
+                for item in arr:
+                    try:
+                        k = int(item.get("idx") or 0)
+                    except (TypeError, ValueError):
+                        continue
+                    if k not in idxs:      # política de duplicados: gana el primero (§2.3)
+                        idxs[k] = item
+                for i, r in enumerate(recargadas, 1):
+                    if i in idxs:
+                        apply_ia_result(conn, cfg, r, idxs[i], ctx_version=ctx_version)
+                    else:
+                        parsed, _ = ia_extract_detail(cfg, r, perfil, mercado)
+                        if parsed:
+                            apply_ia_result(conn, cfg, r, parsed, ctx_version=ctx_version)
+        else:
+            for r in recargadas:
+                parsed, _ = ia_extract_detail(cfg, r, perfil, mercado)
+                if parsed:
+                    apply_ia_result(conn, cfg, r, parsed, ctx_version=ctx_version)
     return done
 
 
@@ -606,8 +820,8 @@ def run_ia_batch(conn, cfg: Config, profile_desc: str, max_n: int | None = None,
     if groups:
         qs = ",".join("?" for _ in groups)
         rows = conn.execute(
-            f"SELECT group_id, title, company, location, description, modality, salary "
-            f"FROM ofertas WHERE active=1 AND group_id IN ({qs})",
+            f"SELECT group_id, title, company, location, description, modality, salary, "
+            f"salary_raw, salary_status, salary_note FROM ofertas WHERE active=1 AND group_id IN ({qs})",
             tuple(groups)).fetchall()
     else:
         # C9 (v4.1): cola relajada — la IA puede trabajar con lo que haya
@@ -625,32 +839,79 @@ def run_ia_batch(conn, cfg: Config, profile_desc: str, max_n: int | None = None,
     total = len(pending)
     done = 0
     rate_racha = 0   # OPS-4: circuito nocturno ante tormenta 429/5xx (backoff + corte)
-    for i, r in enumerate(pending, 1):
-        # /stop: corte limpio ENTRE ofertas — lo procesado ya está commiteado
+    N = cfg.ia.batch_prompt if cfg.ia.batch_prompt > 1 else 1
+    for i in range(0, total, N):
+        # /stop: corte limpio ENTRE grupos — lo procesado ya está commiteado
         if stop_event is not None and stop_event.is_set():
             log.warning("batch IA detenido por /stop tras %d/%d", done, total)
             break
-        t0 = time.time()
-        parsed, err_kind = ia_extract_detail(cfg, r, profile_desc, mercado)
-        log.info("IA %d/%d %s — %s (%.1fs)", i, total, r["group_id"][:20],
-                 (r.get("title") or "")[:40], time.time() - t0)
-        if err_kind == "rate":
-            rate_racha += 1
-            if rate_racha >= 10:
-                log.warning("batch IA nocturno: %d fallos 429/5xx seguidos — circuito cortado, "
-                            "resto queda en cola para el próximo batch", rate_racha)
-                break
-            time.sleep(min(60, 5 * rate_racha))   # backoff progresivo: 5s→60s
-            continue
-        rate_racha = 0
-        if progress:
-            try:
-                progress(i, total, r.get("title") or "")
-            except Exception:
-                pass
-        if apply_ia_result(conn, cfg, r, parsed, ctx_version=ctx_version):
-            conn.commit()   # libera el lock entre ofertas — el batch tarda minutos
-            done += 1
-        time.sleep(3)
+        grupo = pending[i:i + N]
+        if N > 1:
+            arr, err = ia_extract_lote(cfg, grupo, profile_desc, mercado)
+            if arr is None:
+                if err == "rate":
+                    rate_racha += 1
+                    if rate_racha >= 10:
+                        log.warning("batch IA nocturno: %d fallos 429/5xx seguidos — circuito cortado, "
+                                    "resto queda en cola para el próximo batch", rate_racha)
+                        break
+                    time.sleep(min(60, 5 * rate_racha))
+                    continue
+                rate_racha = 0
+                for r in grupo:   # fallback individual (timeout/other) — §2.5
+                    parsed, _ = ia_extract_detail(cfg, r, profile_desc, mercado)
+                    if apply_ia_result(conn, cfg, r, parsed, ctx_version=ctx_version):
+                        conn.commit()
+                        done += 1
+                    time.sleep(0.5)
+                continue
+            rate_racha = 0
+            idxs: dict[int, dict] = {}
+            for item in arr:
+                try:
+                    k = int(item.get("idx") or 0)
+                except (TypeError, ValueError):
+                    continue
+                if k not in idxs:
+                    idxs[k] = item
+            for j, r in enumerate(grupo, 1):
+                if j in idxs:
+                    ok = apply_ia_result(conn, cfg, r, idxs[j], ctx_version=ctx_version)
+                else:
+                    parsed, _ = ia_extract_detail(cfg, r, profile_desc, mercado)
+                    ok = apply_ia_result(conn, cfg, r, parsed, ctx_version=ctx_version)
+                if ok:
+                    conn.commit()
+                    done += 1
+                time.sleep(0.5)
+            if progress:
+                try:
+                    progress(min(i + N, total), total, f"lote {i // N + 1}")
+                except Exception:
+                    pass
+        else:
+            for r in grupo:
+                t0 = time.time()
+                parsed, err_kind = ia_extract_detail(cfg, r, profile_desc, mercado)
+                log.info("IA %d/%d %s — %s (%.1fs)", i + 1, total, r["group_id"][:20],
+                         (r.get("title") or "")[:40], time.time() - t0)
+                if err_kind == "rate":
+                    rate_racha += 1
+                    if rate_racha >= 10:
+                        log.warning("batch IA nocturno: %d fallos 429/5xx seguidos — circuito cortado, "
+                                    "resto queda en cola para el próximo batch", rate_racha)
+                        return done
+                    time.sleep(min(60, 5 * rate_racha))
+                    continue
+                rate_racha = 0
+                if progress:
+                    try:
+                        progress(i + 1, total, r.get("title") or "")
+                    except Exception:
+                        pass
+                if apply_ia_result(conn, cfg, r, parsed, ctx_version=ctx_version):
+                    conn.commit()
+                    done += 1
+                time.sleep(0.5)
     conn.commit()
     return done

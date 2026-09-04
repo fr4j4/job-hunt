@@ -1228,7 +1228,7 @@ def _report_async(cfg: Config, chat_id: int):
 
 
 def _mk_progress_cb(cfg: Config, chat_id: int):
-    """Callback de progreso: actualiza 1 mensaje de estado (throttle 1 msg/30s)."""
+    """Callback de progreso: actualiza 1 mensaje de estado (throttle 1 msg/15s — spec-enrich-lotes §6)."""
     st = {"msg_id": None, "t": 0.0}
 
     def cb(done: int, total: int, title: str) -> None:
@@ -1237,7 +1237,7 @@ def _mk_progress_cb(cfg: Config, chat_id: int):
         txt = (f"🧠 Batch IA — <code>{done}/{total}</code>\n"
                f"   {esc(title[:50])}")
         try:
-            if st["msg_id"] or now - st["t"] >= 30:
+            if st["msg_id"] or now - st["t"] >= 15:
                 st["msg_id"] = _tg_edit_or_send(cfg, chat_id, st["msg_id"],
                                                 {"text": txt, "parse_mode": "HTML"})
             st["t"] = now

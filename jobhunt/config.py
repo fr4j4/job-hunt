@@ -126,6 +126,7 @@ class IaConfig:
     run_hours_utc: list[int]
     concurrency: int = 2             # threads IA paralelos por lote (1 = secuencial)
     reasoning_effort: str = ""       # "" | low | medium | high (OpenAI-compat; "" = off)
+    batch_prompt: int = 5            # ofertas por llamada IA (1 = individual; spec-enrich-lotes)
 
 
 @dataclass
@@ -313,6 +314,7 @@ def load_config(env_file: Path | None = None) -> Config:
         retries=_env_int("IA_RETRIES", 1),
         run_hours_utc=[int(h) for h in _env_list("IA_RUN_HOURS_UTC", "03")],
         concurrency=max(1, min(6, _env_int("IA_CONCURRENCY", 2))),
+        batch_prompt=max(1, min(10, _env_int("IA_BATCH_PROMPT", 5))),
         reasoning_effort=_env("IA_REASONING_EFFORT", "").strip().lower(),
     )
     tg = Telegram(
