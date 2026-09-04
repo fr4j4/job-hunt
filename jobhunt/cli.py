@@ -337,7 +337,8 @@ def cmd_run(cfg, notify: bool = True, on_phase=None, stop_event: threading.Event
                 try:
                     qs = ",".join("?" for _ in lote_ids)
                     rows = conn.execute(
-                        f"SELECT group_id, title, company, location, description, salary, modality "
+                        f"SELECT group_id, title, company, location, description, salary, modality, "
+                        f"salary_raw, salary_status, salary_note "
                         f"FROM ofertas WHERE group_id IN ({qs})", tuple(lote_ids)).fetchall()
                     if rows:
                         lote = [dict(r) for r in rows]

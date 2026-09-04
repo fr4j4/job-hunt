@@ -23,10 +23,34 @@ log = get_logger(__name__)
 
 # ============ Anillo A: JSON-LD ============
 
-def fetch_page(url: str) -> str:
-    req = requests.get(url, timeout=25, headers={
-        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120 Safari/537.36"})
-    return req.text
+def fetch_page(url: str) -> tuple[str, str]:
+    """fetch_page v2 (spec salarios-robustos §1.4/A5): retorna (html, access).
+    access ∈ {ok, not_found, blocked, error}. Nunca lanza por HTTP — el llamador
+    decide según access. 'error' es transitorio (timeout/red)."""
+    try:
+        req = requests.get(url, timeout=25, headers={
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120 Safari/537.36"})
+    except requests.exceptions.Timeout:
+        return "", "error"
+    except Exception:
+        return "", "error"
+    html = req.text or ""
+    # not_found: 404/410 o patrones de oferta expirada
+    if req.status_code in (404, 410):
+        return html, "not_found"
+    low = html.lower()
+    if re.search(r"empleo no disponible|oferta expirad|job no longer|no longer available", low):
+        return html, "not_found"
+    # blocked: 403/429 o marcadores de desafío CF/captcha
+    if req.status_code in (403, 429):
+        return html, "blocked"
+    if re.search(r"cf-browser-verification|just a moment|challenge-platform|captcha|"
+                 r"verifying you are human|attention required", low):
+        return html, "blocked"
+    # HTML mínimo sin JSON-LD = probable página de bloqueo genérica
+    if len(html) < 500 and "application/ld+json" not in low:
+        return html, "blocked"
+    return html, "ok"
 
 
 def _jsonld_blocks(html: str) -> list[dict]:
@@ -51,16 +75,23 @@ def _jobposting(data: dict) -> dict | None:
 
 
 def extract_structured(url: str) -> dict:
-    """Anillo A: campos oficiales del JSON-LD + badges CB. Fiabilidad 100%."""
+    """Anillo A: campos oficiales del JSON-LD + badges CB. Fiabilidad 100%.
+    Usa fetch_page v2: access ∈ {ok, not_found, blocked, error} — el llamador
+    (enrich_pending) decide qué hacer según access (§1.4)."""
     info: dict = {"description": "", "date_posted": "", "valid_through": "",
                   "employment_type": "", "years_official": None, "remote_official": 0,
                   "industry": "", "education": "", "applicant_region": "",
                   "company": "", "company_linkedin_url": "", "modality_badge": "", "salary": "",
                   "contrato": "", "jornada": "", "techs_desc": []}
     try:
-        html = fetch_page(url)
+        html, access = fetch_page(url)
+        info["_access"] = access
+        if access != "ok":
+            info["error"] = f"access={access}"
+            return info
     except Exception as e:
         info["error"] = str(e)[:100]
+        info["_access"] = "error"
         return info
 
     # CB: oferta expirada redirige a un listado genérico — fetch_page no expone la URL final,
@@ -186,40 +217,41 @@ IA_SCHEMA = ('{"modalidad": "R"|"H"|"P"|"?", "salario_clp_mensual": numero|null,
 
 
 def compute_market_context(conn) -> str:
-    """Contexto de mercado para el comentario editorial — se calcula UNA vez por lote
-    en el MAIN y se pasa como argumento a ia_extract (los workers NO tocan la DB).
+    """Contexto de mercado para el comentario editorial — v2 spec salarios-robustos §3.
+    Se calcula UNA vez por lote en el MAIN y se pasa como argumento (workers NO tocan DB).
 
-    Stats honestas: mediana real (percentil sobre salarios parseados), outliers
-    en cuarentena (no se descartan del pool, solo de la estadística), P75 y
-    % declarantes calculados — nada hardcodeado.
+    - Parser único _salary_to_clp_monthly (A1: maneja formato CB sin crashear)
+    - Cuarentena física (stats.FLOOR/CEILING) — outliers fuera de stats, no del pool
+    - Stats: mediana percentil, P75, n, % declarantes, CV (A8: SIN lista de crudos
+      anómalos — la anomalía individual viaja por §4.2, no por el contexto de lote)
+    - <10 muestras → modo insuficiente (ordena NO citar stats)
     """
+    from . import stats as _st
     try:
         rows = conn.execute(
-            "SELECT salary FROM ofertas WHERE active=1 AND salary LIKE 'CLP %' AND salary != ''"
+            "SELECT salary FROM ofertas WHERE active=1 AND salary != '' AND salary IS NOT NULL"
         ).fetchall()
         vals = []
         for (raw,) in rows:
-            m = re.search(r"(\d[\d.]*)", raw or "")
-            if not m:
-                continue
-            v = int(m.group(1))
-            # cuarentena estadística: <400k o >15M/mes no es salario mensual dev creíble
-            if 400_000 <= v <= 15_000_000:
+            v = _st.parse_salary_clp(raw or "")
+            if v > 0:
                 vals.append(v)
         n_tot = conn.execute("SELECT COUNT(*) FROM ofertas WHERE active=1").fetchone()[0]
         n_rem = conn.execute(
             "SELECT COUNT(*) FROM ofertas WHERE active=1 AND modality='remoto'").fetchone()[0]
         n_decl = len(vals)
         pct_decl = int(100 * n_decl / n_tot) if n_tot else 0
-        if n_decl < 10:
+        if n_decl < _st.CV_MIN_N:
             return (f"muestra salarial insuficiente ({n_decl} ofertas declaran de {n_tot} activas) — "
                     f"NO cites estadísticas de salario en opinion; describe solo la oferta. "
                     f"remoto: {n_rem} de {n_tot} activas")
-        vals.sort()
-        med = vals[n_decl // 2]
-        p75 = vals[min(n_decl - 1, int(n_decl * 0.75))]
-        return (f"mediana salarial dev ${med:,} (P75: ${p75:,}) calculada de {n_decl} ofertas "
-                f"con sueldo declarado · {pct_decl}% declara · remoto: {n_rem} de {n_tot} activas")
+        clean = sorted(v for v in vals if _st.FLOOR <= v <= _st.CEILING)
+        med = int(_st._median(clean))
+        p75 = int(clean[min(len(clean) - 1, int(len(clean) * 0.75))])
+        cv, cv_label = _st.cv_health(vals)
+        return (f"mediana salarial dev ${med:,} (P75: ${p75:,}) calculada de {len(clean)} ofertas "
+                f"con sueldo declarado · CV {cv} ({cv_label}) · {pct_decl}% declara · "
+                f"remoto: {n_rem} de {n_tot} activas")
     except Exception:
         return "estadística de mercado no disponible — no cites números de mercado en opinion"
 
@@ -231,13 +263,27 @@ def ia_extract_detail(cfg: Config, job: dict, profile_desc: str,
     HTTP PURO — sin SQLite (P0-3). Nunca lanza."""
     if not cfg.ia.enabled or not cfg.ia.api_key:
         return None, "other"
+    # §4.2/A8: línea individual de anomalía — SOLO si ESTA oferta es la anómala
+    from . import stats as _st
+    nota_anomalia = ""
+    sal_raw_esta = (job.get("salary_raw") or "").strip()
+    sal_esta = _st.parse_salary_clp(job.get("salary") or "")
+    if job.get("salary_status") in ("suspect", "implausible") and sal_esta > 0:
+        if _st.annual_likely(sal_esta, _st.parse_salary_clp("CLP 2150000") or 2150000):
+            hipotesis = f"probable cifra anual (≈ ${sal_esta // 12:,}/mes)"
+        else:
+            hipotesis = "error de la fuente"
+        nota_anomalia = (f"\nNota: el sueldo declarado de esta oferta (${sal_raw_esta or sal_esta:,}) "
+                         f"fue clasificado anómalo (motivo: {job.get('salary_note') or 'estadística'}; "
+                         f"hipótesis: {hipotesis}) — coméntalo en opinion según las reglas.")
     prompt = (f'Perfil del candidato: {profile_desc}\n\n'
               f'Contexto de mercado (para el campo opinion): {mercado}\n\n'
               f'Oferta:\nTítulo: {job.get("title","")}\nEmpresa: {job.get("company","")}\n'
               f'Ubicación: {job.get("location","")}\n'
               f'Sueldo declarado: {job.get("salary") or "(no declarado — infiere rango de mercado solo si el texto lo permite)"}\n'
               f'Modalidad declarada: {job.get("modality") or "(no declarada)"}\n'
-              f'Descripción: {(job.get("description") or "")[:2400]}\n\n'
+              f'Descripción: {(job.get("description") or "")[:2400]}'
+              f'{nota_anomalia}\n\n'
               f'Responde SOLO JSON: {IA_SCHEMA}')
     body = {"model": cfg.ia.model,
             "messages": [{"role": "system",
@@ -254,7 +300,12 @@ def ia_extract_detail(cfg: Config, job: dict, profile_desc: str,
                                      "opinion son los del CONTEXTO DE MERCADO provisto arriba — prohibido "
                                      "citar medianas, percentiles o estadísticas de tu conocimiento propio "
                                      "o de otras fuentes. Si el contexto dice que la muestra es insuficiente, "
-                                     "no compares salarios: describe solo la oferta."},
+                                     "no compares salarios: describe solo la oferta. "
+                                     "Si el sueldo de ESTA oferta viene marcado como anómalo en la Nota, la "
+                                     "opinion DEBE: (1) citar el valor declarado tal cual, (2) señalar la "
+                                     "anomalía con la hipótesis provista (probable anual/error de fuente), "
+                                     "(3) comparar contra la mediana provista. NUNCA corrijas el valor ni lo "
+                                     "omitas. Prohibido comentar anomalías de OTRAS ofertas."},
                          {"role": "user", "content": prompt}],
             "temperature": 0, "format": "json"}
     if cfg.ia.reasoning_effort:          # knob opcional (default: off — flash ya responde rápido)
@@ -357,23 +408,80 @@ def enrich_pending(conn, cfg: Config, max_n: int | None = None,
         except Exception as e:
             log.warning("enrich falló para %s (%s): %s", r["group_id"], (r.get("title") or "")[:40], e)
             continue
-        # CB: ficha redirige a listado genérico = oferta expirada → desactivar
-        if info.get("_cb_expired"):
+        access = info.get("_access", "ok")
+        # §1.4: not_found → desactivar (generaliza patrón CB a todas las fuentes)
+        if info.get("_cb_expired") or access == "not_found":
             conn.execute("UPDATE ofertas SET active=0 WHERE group_id=?", (r["group_id"],))
             conn.commit()   # B4: commit por ficha también en la rama expired (DEV-5)
-            log.info("CB expirada (redirect a listado): %s — active=0", (r.get("title") or "")[:40])
+            log.info("oferta expirada (%s): %s — active=0", access, (r.get("title") or "")[:40])
             done += 1
             time.sleep(1)
             continue
+        # §1.4/A5-A6: blocked/error → NO se decide nada; contador + retry después
+        if access in ("blocked", "error"):
+            conn.execute("UPDATE ofertas SET fetch_fails=COALESCE(fetch_fails,0)+1 WHERE group_id=?",
+                         (r["group_id"],))
+            conn.commit()
+            log.info("enrich bloqueado (%s) para %s — fetch_fails+1, reintenta después",
+                     access, (r.get("title") or "")[:40])
+            continue
+        # ACCESO_OK: resetea strikes y habilita el árbitro
+        conn.execute("UPDATE ofertas SET fetch_fails=0, last_fetch_ok=datetime('now') WHERE group_id=?",
+                     (r["group_id"],))
         new_desc = (info.get("description") or "")[:1800]
         extra = (f" · {info['contrato']}" if info.get("contrato") else "") + \
                 (f" · {info['jornada']}" if info.get("jornada") else "")
         desc = ((new_desc + extra) if new_desc else r.get("description") or "")[:2000]
+        # ---- árbitro de salario (§1.3, ACCESO_OK únicamente) ----
+        from . import stats as _st
+        sal_fila = conn.execute(
+            "SELECT salary, salary_raw, salary_source, salary_status FROM ofertas WHERE group_id=?",
+            (r["group_id"],)).fetchone()
+        sal_actual = sal_fila["salary"] if sal_fila else ""
+        sal_source = sal_fila["salary_source"] if sal_fila else ""
+        sal_status = sal_fila["salary_status"] if sal_fila else ""
+        sal_texto_crudo = (info.get("salary") or "").strip()
+        sal_texto_val = _st.parse_salary_clp(sal_texto_crudo) if sal_texto_crudo else 0
+        arb_salary, arb_source, arb_status, arb_note = None, None, None, None
+        if sal_texto_val > 0:
+            # el texto declara salario: normalizado (annual→/12 según unidad explícita)
+            if re.search(r"/año|/year|anual", sal_texto_crudo, re.I) and sal_texto_val > _st.CEILING:
+                sal_texto_val = sal_texto_val // 12
+                arb_note = "annual_likely"
+            sal_feed_val = _st.parse_salary_clp(sal_actual)
+            feed_implausible = sal_status == "implausible" or \
+                (sal_feed_val > 0 and (sal_feed_val < _st.FLOOR or sal_feed_val > _st.CEILING))
+            coincide = sal_feed_val > 0 and abs(sal_feed_val - sal_texto_val) <= max(1, int(0.01 * sal_texto_val))
+            if feed_implausible or sal_source in ("", "feed") and sal_feed_val == 0:
+                # texto gana (única fuente verificable por humano)
+                arb_salary, arb_source, arb_status = sal_texto_crudo[:40], "text", "trusted"
+                arb_note = arb_note or ("text_wins" if feed_implausible else "text_confirms")
+            elif coincide:
+                arb_source, arb_status, arb_note = "text", "trusted", arb_note or "text_confirms"
+            else:
+                # ambos en rango pero distintos → texto gana (más fresco)
+                arb_salary, arb_source, arb_status, arb_note = sal_texto_crudo[:40], "text", "trusted", "text_wins"
+        elif sal_status == "implausible":
+            # texto NO declara salario y el feed era implausible → ocultar (honesto)
+            arb_salary, arb_source, arb_status, arb_note = "", "feed", "implausible", "source_unverifiable"
+        # clasificación estadística si hay salario vigente
+        if arb_salary is not None and arb_salary:
+            v = _st.parse_salary_clp(arb_salary)
+            pool = [_st.parse_salary_clp(s) for (s,) in conn.execute(
+                "SELECT salary FROM ofertas WHERE active=1 AND salary!='' AND salary IS NOT NULL AND group_id!=?",
+                (r["group_id"],))]
+            pool = [x for x in pool if x > 0]
+            stat_status, stat_note = _st.classify_salary(v, pool)
+            arb_status, arb_note = stat_status, stat_note or arb_note
         conn.execute("""UPDATE ofertas SET
             description=?,
             company=CASE WHEN company='' OR company IS NULL THEN ? ELSE company END,
             modality=COALESCE(NULLIF(modality,''), ?),
-            salary=COALESCE(NULLIF(salary,''), ?),
+            salary=COALESCE(?, salary),
+            salary_source=COALESCE(?, salary_source),
+            salary_status=COALESCE(?, salary_status),
+            salary_note=COALESCE(?, salary_note),
+            salary_raw=CASE WHEN salary_raw='' OR salary_raw IS NULL THEN COALESCE(salary, '') ELSE salary_raw END,
             techs=COALESCE(NULLIF(techs,''), ?),
             date_posted=COALESCE(NULLIF(date_posted,''), ?),
             valid_through=COALESCE(NULLIF(valid_through,''), ?),
@@ -382,7 +490,8 @@ def enrich_pending(conn, cfg: Config, max_n: int | None = None,
             remote_official=COALESCE(remote_official, ?),
             description_source=?
             WHERE group_id=?""",
-            (desc, info.get("company") or "", info.get("modality_badge") or "", info.get("salary") or "",
+            (desc, info.get("company") or "", info.get("modality_badge") or "", arb_salary,
+             arb_source, arb_status, arb_note,
              ";".join(info.get("techs_desc", [])), info.get("date_posted") or "",
              info.get("valid_through") or "", info.get("years_official"),
              info.get("remote_official"), info.get("employment_type") or "",
@@ -410,9 +519,15 @@ def ia_queue_count(conn) -> int:
         "(modality='' OR salary='' OR description IS NULL)").fetchone()[0]
 
 
-def apply_ia_result(conn, cfg: Config, r: dict, parsed: dict | None) -> bool:
+def apply_ia_result(conn, cfg: Config, r: dict, parsed: dict | None,
+                    ctx_version: str = "") -> bool:
     """Escribe los campos IA de UNA oferta en la DB. Solo el MAIN la llama
-    (patrón conexión única). Retorna True si escribió algo. parsed=None → no-op."""
+    (patrón conexión única). Retorna True si escribió algo. parsed=None → no-op.
+
+    ctx_version: hash8 del contexto de mercado usado (spec salarios-robustos §7.4)
+    — trazabilidad para regenerar opinions de eras obsoletas.
+    Guard A3: SOLO escribe salary si salary_source='' — nunca pisa procedencia
+    (feed/text) ni rellena un salary='' que el árbitro vació."""
     if not parsed:
         return False
     mod = {"R": "remoto", "H": "híbrido", "P": "presencial"}.get(parsed.get("modalidad"), "")
@@ -426,8 +541,10 @@ def apply_ia_result(conn, cfg: Config, r: dict, parsed: dict | None) -> bool:
         params += ["", "", ""]
     if not r.get("modality") and mod:
         sets.append("modality=?"); params.append(mod); ia_fields.append("modality")
-    if not r.get("salary") and parsed.get("salario_clp_mensual"):
+    # guard A3: la IA propone salary SOLO si no hay procedencia ya establecida
+    if not r.get("salary") and not r.get("salary_source") and parsed.get("salario_clp_mensual"):
         sets.append("salary=?"); params.append(f"CLP {parsed['salario_clp_mensual']}")
+        sets.append("salary_source=?"); params.append("ia")
         ia_fields.append("salary")
     if parsed.get("seniority_real") or parsed.get("seniority"):
         sets.append("seniority_real=?"); params.append(parsed.get("seniority_real") or parsed.get("seniority"))
@@ -465,6 +582,8 @@ def apply_ia_result(conn, cfg: Config, r: dict, parsed: dict | None) -> bool:
         return False
     sets.append("ia_model=?"); params.append(cfg.ia.model)
     sets.append("ia_fields=?"); params.append(",".join(ia_fields))
+    if ctx_version:
+        sets.append("ctx_version=?"); params.append(ctx_version)
     params.append(r["group_id"])
     conn.execute(f"UPDATE ofertas SET {', '.join(sets)} WHERE group_id=?", params)
     return True
@@ -482,6 +601,8 @@ def run_ia_batch(conn, cfg: Config, profile_desc: str, max_n: int | None = None,
     if not cfg.ia.enabled:
         return 0
     mercado = compute_market_context(conn)
+    import hashlib
+    ctx_version = "ctx-" + hashlib.sha256(mercado.encode()).hexdigest()[:8]
     if groups:
         qs = ",".join("?" for _ in groups)
         rows = conn.execute(
@@ -492,7 +613,8 @@ def run_ia_batch(conn, cfg: Config, profile_desc: str, max_n: int | None = None,
         # C9 (v4.1): cola relajada — la IA puede trabajar con lo que haya
         # (desc corta OK si la fuente ya dejó algo); solo excluye desc vacía total
         rows = conn.execute(
-            "SELECT group_id, title, company, location, description, modality, salary FROM ofertas "
+            "SELECT group_id, title, company, location, description, modality, salary, "
+            "salary_raw, salary_status, salary_note FROM ofertas "
             "WHERE active=1 AND ia_model='' AND (length(description)>200 OR description_source!='') AND "
             "(modality='' OR salary='' OR description IS NULL) "
             "ORDER BY score DESC").fetchall()   # primero las de mejor score (las visibles)
@@ -526,7 +648,7 @@ def run_ia_batch(conn, cfg: Config, profile_desc: str, max_n: int | None = None,
                 progress(i, total, r.get("title") or "")
             except Exception:
                 pass
-        if apply_ia_result(conn, cfg, r, parsed):
+        if apply_ia_result(conn, cfg, r, parsed, ctx_version=ctx_version):
             conn.commit()   # libera el lock entre ofertas — el batch tarda minutos
             done += 1
         time.sleep(3)

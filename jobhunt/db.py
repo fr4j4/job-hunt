@@ -74,6 +74,14 @@ def init_db(conn: sqlite3.Connection) -> None:
         ("notified_channel_at", "ALTER TABLE ofertas ADD COLUMN notified_channel_at TEXT DEFAULT ''"),
         ("date_canonical", "ALTER TABLE ofertas ADD COLUMN date_canonical TEXT DEFAULT ''"),
         ("ai_opinion", "ALTER TABLE ofertas ADD COLUMN ai_opinion TEXT DEFAULT ''"),
+        # spec salarios-robustos v2: procedencia + clasificación + trazabilidad
+        ("salary_raw", "ALTER TABLE ofertas ADD COLUMN salary_raw TEXT DEFAULT ''"),
+        ("salary_source", "ALTER TABLE ofertas ADD COLUMN salary_source TEXT DEFAULT ''"),
+        ("salary_status", "ALTER TABLE ofertas ADD COLUMN salary_status TEXT DEFAULT ''"),
+        ("salary_note", "ALTER TABLE ofertas ADD COLUMN salary_note TEXT DEFAULT ''"),
+        ("ctx_version", "ALTER TABLE ofertas ADD COLUMN ctx_version TEXT DEFAULT ''"),
+        ("fetch_fails", "ALTER TABLE ofertas ADD COLUMN fetch_fails INTEGER DEFAULT 0"),
+        ("last_fetch_ok", "ALTER TABLE ofertas ADD COLUMN last_fetch_ok TEXT DEFAULT ''"),
     ]:
         if col not in cols:
             conn.execute(ddl)
