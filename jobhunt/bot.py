@@ -756,25 +756,43 @@ def _handle_command(cfg: Config, message: dict, state: dict) -> None:
                                                      f"ejecutando en background — te reporto al terminar"})
                 threading.Thread(target=_run, daemon=True).start()
             elif action == "wipe":
-                conn2 = database.connect(cfg)
-                try:
-                    from .channel import channel_wipe
-                    stats = channel_wipe(cfg, conn2, api, dry_run=not confirm)
-                    if confirm:
+                # ack inmediato + thread (borrar N mensajes toma N×0.3s + latencia)
+                if not confirm:
+                    conn2 = database.connect(cfg)
+                    try:
+                        total = conn2.execute(
+                            "SELECT COUNT(*) FROM channel_posts WHERE message_id IS NOT NULL").fetchone()[0]
                         _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
-                                                     "text": f"🧨 canal limpiado: {stats['deleted']}/"
-                                                             f"{stats['total']} mensajes borrados, "
-                                                             f"{stats['skipped']} ya no existían. "
-                                                             f"Marcas reseteadas — /channel-publish "
-                                                             f"para repoblar"})
-                        log.info("canal wipe: %s", stats)
-                    else:
-                        _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
-                                                     "text": f"🧨 Wipe borraría {stats['total']} mensajes "
+                                                     "text": f"🧨 Wipe borraría {total} mensajes "
                                                              f"del canal y resetearía las marcas. "
                                                              f"Confirma con: <code>/channel-wipe-confirm</code>"})
-                finally:
-                    conn2.close()
+                    finally:
+                        conn2.close()
+                else:
+                    _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
+                                                 "text": "🧨 <code>channel-wipe</code> ejecutando en "
+                                                         "background — borrando todos los mensajes del "
+                                                         "canal, te reporto al terminar"})
+                    def _wipe():
+                        conn2 = database.connect(cfg)
+                        try:
+                            from .channel import channel_wipe
+                            stats = channel_wipe(cfg, conn2, api)
+                            _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
+                                                         "text": f"🧨 canal limpiado: {stats['deleted']}/"
+                                                                 f"{stats['total']} mensajes borrados, "
+                                                                 f"{stats['skipped']} ya no existían. "
+                                                                 f"Marcas reseteadas — /channel_publish "
+                                                                 f"para repoblar"})
+                            log.info("canal wipe: %s", stats)
+                        except Exception as exc:
+                            log.error("channel-wipe falló: %s", str(exc)[:150])
+                            _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
+                                                         "text": f"⚠️ channel-wipe falló: "
+                                                                 f"<code>{esc(str(exc)[:120])}</code>"})
+                        finally:
+                            conn2.close()
+                    threading.Thread(target=_wipe, daemon=True).start()
             elif action == "reset":
                 conn = database.connect(cfg)
                 try:
