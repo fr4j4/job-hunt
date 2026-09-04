@@ -391,15 +391,27 @@ def _bucket(kind: str, now: datetime) -> str:
 
 
 def _send_digest(cfg: Config, tg_api, kind: str, text: str, conn, now: datetime,
-                 chat_id: int | None = None) -> bool:
+                 chat_id: int | None = None, force: bool = False) -> bool:
     """Envía un digest con idempotencia (kind, bucket) + guard body_hash. True si envió.
 
-    chat_id: destino override (DM de prueba) — el bucket se separa con sufijo
-    'dm' para que el test no bloquee el envío real al canal del mismo día.
+    chat_id: destino override (DM de prueba) — SIN idempotencia: cada ejecución
+    envía (el operador puede repetir el comando cuantas veces quiera) y no
+    registra nada en channel_posts (no ensucia el historial del canal).
+    force=True (comando manual /channel_*): envía SIEMPRE, sin idempotencia
+    ni registro — el operador pidió explícitamente el envío. El daemon
+    automático (force=False, sin chat_id) conserva la idempotencia por bucket.
     """
+    if chat_id is not None or force:
+        cid = int(chat_id) if chat_id is not None else int(cfg.channel.chat_id)
+        try:
+            resp = tg_api("sendMessage", {
+                "chat_id": cid, "text": text,
+                "parse_mode": "HTML", "disable_web_page_preview": True})
+            return bool(resp.get("ok"))
+        except Exception as e:
+            log.warning("canal: digest %s (manual/DM) falló: %s", kind, e)
+            return False
     bucket = _bucket(kind, now)
-    if chat_id is not None:
-        bucket = f"{bucket}-dm"
     body_hash = hashlib.sha1(text.encode()).hexdigest()
     try:
         conn.execute("INSERT INTO channel_posts (kind, bucket, body_hash, posted_at) VALUES (?,?,?,?)",
@@ -415,10 +427,9 @@ def _send_digest(cfg: Config, tg_api, kind: str, text: str, conn, now: datetime,
         return False
     if dry_ok := True:
         pass
-    cid = int(chat_id) if chat_id is not None else int(cfg.channel.chat_id)
     try:
         resp = tg_api("sendMessage", {
-            "chat_id": cid, "text": text,
+            "chat_id": int(cfg.channel.chat_id), "text": text,
             "parse_mode": "HTML", "disable_web_page_preview": True})
         if not resp.get("ok"):
             conn.rollback()
@@ -477,12 +488,13 @@ def _dir_charts(cfg: Config) -> Path:
 
 
 def publish_daily_digest(cfg: Config, conn, tg_api, dry_run: bool = False,
-                         chat_id: int | None = None) -> bool:
+                         chat_id: int | None = None, force: bool = False) -> bool:
     """Digest B: top del día — 1 oferta por categoría (rol_categoria), la mejor de cada una.
 
     A1: diversifica por rol (Backend, Data, DevOps, ...) en vez de top-N por score
     (que terminaba siendo N ofertas del mismo rol). Umbral digest_min_score.
     chat_id: destino override (DM de prueba); None → canal.
+    force: envía siempre (comando manual), sin idempotencia.
     """
     now = datetime.now(timezone.utc)
     rows = [dict(r) for r in conn.execute(_GATE_SQL.replace(":min_score", ":min_score").replace(
@@ -506,7 +518,7 @@ def publish_daily_digest(cfg: Config, conn, tg_api, dry_run: bool = False,
     if dry_run:
         log.info("canal: dry-run digest diario:\n%s", text[:500])
         return False
-    ok = _send_digest(cfg, tg_api, "daily", text, conn, now, chat_id=chat_id)
+    ok = _send_digest(cfg, tg_api, "daily", text, conn, now, chat_id=chat_id, force=force)
     if ok:
         # B1+B2a+B2b+B4: gráficos de contexto (falla silenciosa por foto)
         try:
@@ -551,10 +563,11 @@ def _weekly_remote_rows(conn, cfg: Config) -> dict[str, list[dict]]:
 
 
 def publish_weekly_remote(cfg: Config, conn, tg_api, dry_run: bool = False,
-                          chat_id: int | None = None) -> bool:
+                          chat_id: int | None = None, force: bool = False) -> bool:
     """Digest C: mejor remoto de la semana × seniority (junior/semi/senior/lead).
 
     chat_id: destino override (DM de prueba); None → canal.
+    force: envía siempre (comando manual), sin idempotencia.
     """
     from .notify import esc
     now = datetime.now(timezone.utc)
@@ -574,16 +587,17 @@ def publish_weekly_remote(cfg: Config, conn, tg_api, dry_run: bool = False,
     if dry_run:
         log.info("canal: dry-run weekly-remote:\n%s", text[:400])
         return False
-    return _send_digest(cfg, tg_api, "weekly-remote", text, conn, now, chat_id=chat_id)
+    return _send_digest(cfg, tg_api, "weekly-remote", text, conn, now, chat_id=chat_id, force=force)
 
 
 def publish_weekly_rol(cfg: Config, conn, tg_api, dry_run: bool = False,
-                       chat_id: int | None = None) -> bool:
+                       chat_id: int | None = None, force: bool = False) -> bool:
     """Digest C2: mejor oferta de la semana POR ROL (Backend, Data, DevOps, ...).
 
     A3: complementa weekly-remote (por seniority) con diversidad por categoría —
     1 oferta por rol_categoria, la de mejor market_score de cada una.
     chat_id: destino override (DM de prueba); None → canal.
+    force: envía siempre (comando manual), sin idempotencia.
     """
     from .notify import esc
     now = datetime.now(timezone.utc)
@@ -608,7 +622,7 @@ def publish_weekly_rol(cfg: Config, conn, tg_api, dry_run: bool = False,
     if dry_run:
         log.info("canal: dry-run weekly-rol:\n%s", text[:400])
         return False
-    ok = _send_digest(cfg, tg_api, "weekly-rol", text, conn, now, chat_id=chat_id)
+    ok = _send_digest(cfg, tg_api, "weekly-rol", text, conn, now, chat_id=chat_id, force=force)
     if ok:
         try:
             from . import charts
@@ -622,12 +636,13 @@ def publish_weekly_rol(cfg: Config, conn, tg_api, dry_run: bool = False,
 
 
 def publish_weekly_salary(cfg: Config, conn, tg_api, dry_run: bool = False,
-                          chat_id: int | None = None) -> bool:
+                          chat_id: int | None = None, force: bool = False) -> bool:
     """Digest D: ranking salarial semanal (top 5 declarados) CON contexto de mediana por rol.
 
     A2: cada línea compara contra la mediana del mismo rol (stats robustas de
     stats.py) — '$2.8M (mediana DevOps $2.1M, +33%)' en vez de un número plano.
     chat_id: destino override (DM de prueba); None → canal.
+    force: envía siempre (comando manual), sin idempotencia.
     """
     from .notify import esc
     from .scoring import _salary_to_clp_monthly
@@ -671,7 +686,7 @@ def publish_weekly_salary(cfg: Config, conn, tg_api, dry_run: bool = False,
     if dry_run:
         log.info("canal: dry-run weekly-salary:\n%s", text[:400])
         return False
-    ok = _send_digest(cfg, tg_api, "weekly-salary", text, conn, now, chat_id=chat_id)
+    ok = _send_digest(cfg, tg_api, "weekly-salary", text, conn, now, chat_id=chat_id, force=force)
     if ok:
         try:
             from . import charts
@@ -692,10 +707,11 @@ def publish_weekly_digests(cfg: Config, conn, tg_api, dry_run: bool = False) -> 
 
 
 def publish_trends(cfg: Config, conn, tg_api, dry_run: bool = False,
-                   chat_id: int | None = None) -> bool:
+                   chat_id: int | None = None, force: bool = False) -> bool:
     """Digest E: tendencias mensuales (SQL puro; IA opcional con fallback).
 
     chat_id: destino override (DM de prueba); None → canal.
+    force: envía siempre (comando manual), sin idempotencia.
     """
     from .notify import esc
     now = datetime.now(timezone.utc)
@@ -743,7 +759,7 @@ def publish_trends(cfg: Config, conn, tg_api, dry_run: bool = False,
     if dry_run:
         log.info("canal: dry-run trends:\n%s", text[:500])
         return False
-    return _send_digest(cfg, tg_api, "trends", text, conn, now, chat_id=chat_id)
+    return _send_digest(cfg, tg_api, "trends", text, conn, now, chat_id=chat_id, force=force)
 
 
 def channel_wipe(cfg: Config, conn, tg_api, dry_run: bool = False) -> dict:

@@ -466,3 +466,27 @@ def test_digests_pospuesto_en_scan(cfg, monkeypatch):
     bot._digests_maybe(cfg, state)
     assert called["n"] == 0
     assert state["digest_log"] == {}
+
+
+# ---------- force: manual siempre envía (sin idempotencia) ----------
+
+def test_digest_force_envia_siempre(conn_mem, cfg):
+    """force=True (comando manual) → envía aunque el bucket ya exista."""
+    from jobhunt.channel import _send_digest
+    from datetime import datetime, timezone
+    cfg.channel.chat_id = "-1004495706494"
+    cfg.channel.digest_daily = True
+    now = datetime.now(timezone.utc)
+    enviados = {"n": 0}
+    def api(method, payload):
+        enviados["n"] += 1
+        return {"ok": True, "result": {"message_id": 1}}
+    # 1er envío (idempotente, registra bucket)
+    ok1 = _send_digest(cfg, api, "daily", "texto A", conn_mem, now)
+    assert ok1 and enviados["n"] == 1
+    # 2do envío idéntico SIN force → bloqueado por bucket
+    ok2 = _send_digest(cfg, api, "daily", "texto A", conn_mem, now)
+    assert not ok2 and enviados["n"] == 1
+    # 3er envío CON force → envía igual
+    ok3 = _send_digest(cfg, api, "daily", "texto A", conn_mem, now, force=True)
+    assert ok3 and enviados["n"] == 2

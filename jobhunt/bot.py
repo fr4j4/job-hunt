@@ -790,31 +790,31 @@ def _handle_command(cfg: Config, message: dict, state: dict) -> None:
                                 _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
                                                              "text": f"📢 canal publish: {stats}"})
                         if action in ("daily", "all"):
-                            ok = publish_daily_digest(cfg, conn, api)
+                            ok = publish_daily_digest(cfg, conn, api, force=True)
                             _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
                                                          "text": "📊 daily digest enviado" if ok else
                                                                  "📊 daily digest: sin candidatas o ya enviado hoy"})
                             _t.sleep(1)
                         if action in ("weekly-remote", "weekly", "all"):
-                            ok = publish_weekly_remote(cfg, conn, api)
+                            ok = publish_weekly_remote(cfg, conn, api, force=True)
                             _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
                                                          "text": "🌍 weekly-remote enviado" if ok else
                                                                  "🌍 weekly-remote: sin candidatas o ya enviado"})
                             _t.sleep(1)
                         if action in ("weekly-rol", "weekly", "all"):
-                            ok = publish_weekly_rol(cfg, conn, api)
+                            ok = publish_weekly_rol(cfg, conn, api, force=True)
                             _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
                                                          "text": "🏆 weekly-rol enviado" if ok else
                                                                  "🏆 weekly-rol: sin candidatas o ya enviado"})
                             _t.sleep(1)
                         if action in ("weekly-salary", "weekly", "all"):
-                            ok = publish_weekly_salary(cfg, conn, api)
+                            ok = publish_weekly_salary(cfg, conn, api, force=True)
                             _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
                                                          "text": "💰 weekly-salary enviado" if ok else
                                                                  "💰 weekly-salary: sin candidatas o ya enviado"})
                             _t.sleep(1)
                         if action in ("trends", "all"):
-                            ok = publish_trends(cfg, conn, api)
+                            ok = publish_trends(cfg, conn, api, force=True)
                             _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
                                                          "text": "📈 trends enviado" if ok else
                                                                  "📈 trends: sin datos o ya enviado este mes"})
