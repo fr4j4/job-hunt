@@ -616,6 +616,7 @@ def _help_text() -> str:
         "/db — conteos (activas, inactivas, purgables, no-dev)",
         "/db_old_confirm — elimina físicamente inactivas >30 días",
         "/db_nondev_confirm — elimina físicamente las no-dev activas",
+        "/db_all_confirm — borra TODO el pool (backup previo automático)",
         "",
         "/help — esta ayuda",
     ])
@@ -862,32 +863,52 @@ def _handle_command(cfg: Config, message: dict, state: dict) -> None:
                     _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
                         "text": f"🗄 <b>DB</b>\n✅ activas: {act}\n🪦 inactivas: {inact} "
                                 f"(>30d purgable: {old})\n🚫 no-dev activas: {nondev}\n"
-                                f"purge disponible: <code>old</code> ({old}) · <code>nondev</code> ({nondev})"})
+                                f"purge disponible: <code>old</code> ({old}) · <code>nondev</code> ({nondev}) · <code>all</code> (TODO)"})
                 finally:
                     conn.close()
-            elif action in ("old", "nondev"):
+            elif action in ("old", "nondev", "all"):
                 if confirm:
-                    conn = database.connect(cfg)
-                    try:
-                        import shutil, pathlib
-                        bak = pathlib.Path(cfg.data_dir) / "backups"
-                        bak.mkdir(exist_ok=True)
-                        shutil.copy2(cfg.db_path if hasattr(cfg, 'db_path') else cfg.data_dir / "ofertas.sqlite",
-                                     bak / f"ofertas-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M')}.sqlite")
-                        if action == "old":
-                            n = conn.execute("""DELETE FROM ofertas WHERE active=0
-                                AND last_seen < datetime('now', '-30 days')""").rowcount
-                        else:
-                            n = conn.execute("""DELETE FROM ofertas WHERE active=1
-                                AND rol_categoria IN ('Ingeniería no-software','No-tech','Profesor/Formación',
-                                'Analista/Empresa')""").rowcount
-                        conn.commit()
+                    def _purge():
+                        conn = database.connect(cfg)
+                        try:
+                            import shutil, pathlib
+                            bak = pathlib.Path(cfg.data_dir) / "backups"
+                            bak.mkdir(exist_ok=True)
+                            shutil.copy2(cfg.data_dir / "ofertas.sqlite",
+                                         bak / f"ofertas-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M')}.sqlite")
+                            if action == "old":
+                                n = conn.execute("""DELETE FROM ofertas WHERE active=0
+                                    AND last_seen < datetime('now', '-30 days')""").rowcount
+                            elif action == "nondev":
+                                n = conn.execute("""DELETE FROM ofertas WHERE active=1
+                                    AND rol_categoria IN ('Ingeniería no-software','No-tech','Profesor/Formación',
+                                    'Analista/Empresa')""").rowcount
+                            else:  # all
+                                n = conn.execute("DELETE FROM ofertas").rowcount
+                                conn.execute("DELETE FROM channel_posts")
+                                conn.execute("""DELETE FROM score_versions""")
+                            conn.commit()
+                            extra = " (también channel_posts y score_versions)" if action == "all" else ""
+                            _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
+                                                         "text": f"🗑 {n} ofertas eliminadas ({action}){extra} — "
+                                                                 f"backup previo en data/backups/"})
+                            log.info("db purge %s: %d filas", action, n)
+                        except Exception as exc:
+                            log.error("db purge %s falló: %s", action, str(exc)[:150])
+                            _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
+                                                         "text": f"⚠️ purge {action} falló: "
+                                                                 f"<code>{esc(str(exc)[:120])}</code>"})
+                        finally:
+                            conn.close()
+                    if action == "all":
+                        # all borra TODO — ack + thread (la DB es grande y el backup toma tiempo)
                         _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
-                                                     "text": f"🗑 {n} ofertas eliminadas ({action}) — "
-                                                             f"backup previo en data/backups/"})
-                        log.info("db purge %s: %d filas", action, n)
-                    finally:
-                        conn.close()
+                                                     "text": "🗑 <code>db-all</code> ejecutando en "
+                                                             "background — borrando TODAS las ofertas, "
+                                                             "te reporto al terminar"})
+                        threading.Thread(target=_purge, daemon=True).start()
+                    else:
+                        _purge()
                 else:
                     _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
                                                  "text": f"⚠️ /db-{action}: DELETE físico. "
@@ -1255,6 +1276,7 @@ def _register_commands(cfg: Config) -> None:
         {"command": "db", "description": "DB stats"},
         {"command": "db_old_confirm", "description": "Purge inactivas >30d (confirm)"},
         {"command": "db_nondev_confirm", "description": "Purge no-dev (confirm)"},
+        {"command": "db_all_confirm", "description": "Borrar TODO el pool (backup previo)"},
         {"command": "score",  "description": "Ofertas con score ≥ N (ej: /score 60)"},
         {"command": "jobs",   "description": "Filtra: remote, salary2.5, temuco… combinables"},
         {"command": "help",   "description": "Ayuda"},
