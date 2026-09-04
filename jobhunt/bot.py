@@ -683,18 +683,19 @@ def _handle_command(cfg: Config, message: dict, state: dict) -> None:
         elif cmd == "/stats":
             _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
                                          "text": _stats_text(cfg)})
-        elif cmd == "/channel":
+        elif cmd.startswith("/channel"):
+            sub = (cmd[len("/channel"):].replace("_", "-").strip("-")) or "status"
+            confirm = sub.endswith("-confirm")
+            if confirm:
+                sub = sub[:-len("-confirm")]
+            action = sub or "status"
             conn = database.connect(cfg)
             try:
                 from .channel import (publish_channel, publish_daily_digest,
                                       publish_weekly_remote, publish_weekly_salary,
                                       publish_trends, channel_status)
-                action = (arg or "").strip().lower()
-                confirm = action.endswith(" confirm")
-                if confirm:
-                    action = action.replace(" confirm", "").strip()
                 api = _tg_api_for_channel(cfg)
-                if action == "":
+                if action == "status":
                     _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
                                                  "text": channel_status(conn, cfg)})
                 elif action in ("publish", "daily", "weekly-remote", "weekly-salary",
@@ -751,19 +752,22 @@ def _handle_command(cfg: Config, message: dict, state: dict) -> None:
                                                      "text": f"⚠️ Esto limpiará las marcas de publicación "
                                                              f"de todas las activas ({cand} volverían a "
                                                              f"ser candidatas).\nConfirma con: "
-                                                             f"<code>/channel reset confirm</code>"})
+                                                             f"<code>/channel-reset-confirm</code>"})
                 else:
                     _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
-                                                 "text": "❓ /channel <action>\n"
-                                                         "<code>publish · daily · weekly-remote · "
-                                                         "weekly-salary · weekly · trends · all · dry · reset</code>"})
+                                                 "text": "❓ /channel-<action>\n"
+                                                         "<code>/channel · /channel-publish · "
+                                                         "/channel-daily · /channel-weekly-remote · "
+                                                         "/channel-weekly-salary · /channel-weekly · "
+                                                         "/channel-trends · /channel-all · "
+                                                         "/channel-dry · /channel-reset (-confirm)</code>"})
             finally:
                 conn.close()
-        elif cmd == "/db":
-            action = (arg or "").strip().lower()
-            confirm = action.endswith(" confirm")
+        elif cmd.startswith("/db"):
+            action = (cmd[len("/db"):].replace("_", "-").strip("-")) or "stats"
+            confirm = action.endswith("-confirm")
             if confirm:
-                action = action.replace(" confirm", "").strip()
+                action = action[:-len("-confirm")]
             if action == "" or action == "stats":
                 conn = database.connect(cfg)
                 try:
@@ -805,8 +809,8 @@ def _handle_command(cfg: Config, message: dict, state: dict) -> None:
                         conn.close()
                 else:
                     _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
-                                                 "text": f"⚠️ /db purge {action}: DELETE físico. "
-                                                         f"Confirma con: <code>/db {action} confirm</code>"})
+                                                 "text": f"⚠️ /db-{action}: DELETE físico. "
+                                                         f"Confirma con: <code>/db-{action}-confirm</code>"})
             else:
                 _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
                                              "text": "❓ /db <action>\n<code>stats · old · nondev</code>"})
@@ -1156,8 +1160,19 @@ def _register_commands(cfg: Config) -> None:
         {"command": "report", "description": "Análisis de mercado completo con PDF"},
         {"command": "latest", "description": "Últimas ofertas registradas"},
         {"command": "stats",  "description": "Cobertura IA y datos del pool"},
-        {"command": "channel", "description": "Canal: status, publish, daily, weekly-remote/salary, trends, all, dry, reset"},
-        {"command": "db", "description": "DB: stats y purge (old/nondev) con confirm"},
+        {"command": "channel", "description": "Estado del canal"},
+        {"command": "channel_publish", "description": "Publicar candidatas al canal ahora"},
+        {"command": "channel_daily", "description": "Daily digest ahora"},
+        {"command": "channel_weekly", "description": "Digests semanales ahora (remote+salary)"},
+        {"command": "channel_weekly_remote", "description": "Solo digest weekly-remote"},
+        {"command": "channel_weekly_salary", "description": "Solo ranking salarial"},
+        {"command": "channel_trends", "description": "Post mensual de tendencias"},
+        {"command": "channel_all", "description": "Publish + todos los digests"},
+        {"command": "channel_dry", "description": "Preview sin publicar"},
+        {"command": "channel_reset_confirm", "description": "Limpiar marcas de publicados"},
+        {"command": "db", "description": "DB stats"},
+        {"command": "db_old_confirm", "description": "Purge inactivas >30d (confirm)"},
+        {"command": "db_nondev_confirm", "description": "Purge no-dev (confirm)"},
         {"command": "score",  "description": "Ofertas con score ≥ N (ej: /score 60)"},
         {"command": "jobs",   "description": "Filtra: remote, salary2.5, temuco… combinables"},
         {"command": "help",   "description": "Ayuda"},
