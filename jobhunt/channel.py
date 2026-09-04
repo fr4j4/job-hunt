@@ -390,9 +390,16 @@ def _bucket(kind: str, now: datetime) -> str:
     return now.date().isoformat()
 
 
-def _send_digest(cfg: Config, tg_api, kind: str, text: str, conn, now: datetime) -> bool:
-    """Envía un digest con idempotencia (kind, bucket) + guard body_hash. True si envió."""
+def _send_digest(cfg: Config, tg_api, kind: str, text: str, conn, now: datetime,
+                 chat_id: int | None = None) -> bool:
+    """Envía un digest con idempotencia (kind, bucket) + guard body_hash. True si envió.
+
+    chat_id: destino override (DM de prueba) — el bucket se separa con sufijo
+    'dm' para que el test no bloquee el envío real al canal del mismo día.
+    """
     bucket = _bucket(kind, now)
+    if chat_id is not None:
+        bucket = f"{bucket}-dm"
     body_hash = hashlib.sha1(text.encode()).hexdigest()
     try:
         conn.execute("INSERT INTO channel_posts (kind, bucket, body_hash, posted_at) VALUES (?,?,?,?)",
@@ -408,9 +415,10 @@ def _send_digest(cfg: Config, tg_api, kind: str, text: str, conn, now: datetime)
         return False
     if dry_ok := True:
         pass
+    cid = int(chat_id) if chat_id is not None else int(cfg.channel.chat_id)
     try:
         resp = tg_api("sendMessage", {
-            "chat_id": int(cfg.channel.chat_id), "text": text,
+            "chat_id": cid, "text": text,
             "parse_mode": "HTML", "disable_web_page_preview": True})
         if not resp.get("ok"):
             conn.rollback()
@@ -444,15 +452,18 @@ def _top_row_line(r: dict) -> str:
     return s
 
 
-def _enviar_fotos(cfg: Config, tg_api, fotos: list[tuple[Path, str]]) -> None:
-    """Envía PNGs al canal con caption (complemento visual de un digest).
+def _enviar_fotos(cfg: Config, tg_api, fotos: list[tuple[Path, str]],
+                  chat_id: int | None = None) -> None:
+    """Envía PNGs con caption (complemento visual de un digest).
 
     fotos: [(path, caption_html), ...] — falla silenciosa por foto (no tumba el digest).
+    chat_id: destino override (DM de prueba); None → canal configurado.
     """
     from pathlib import Path
+    cid = int(chat_id) if chat_id is not None else int(cfg.channel.chat_id)
     for p, caption in fotos:
         try:
-            tg_api("sendPhoto", {"chat_id": int(cfg.channel.chat_id), "path": str(p),
+            tg_api("sendPhoto", {"chat_id": cid, "path": str(p),
                                  "caption": caption, "parse_mode": "HTML"})
         except Exception as e:
             log.warning("canal: foto %s falló: %s", Path(p).name, e)
@@ -465,11 +476,13 @@ def _dir_charts(cfg: Config) -> Path:
     return d
 
 
-def publish_daily_digest(cfg: Config, conn, tg_api, dry_run: bool = False) -> bool:
+def publish_daily_digest(cfg: Config, conn, tg_api, dry_run: bool = False,
+                         chat_id: int | None = None) -> bool:
     """Digest B: top del día — 1 oferta por categoría (rol_categoria), la mejor de cada una.
 
     A1: diversifica por rol (Backend, Data, DevOps, ...) en vez de top-N por score
     (que terminaba siendo N ofertas del mismo rol). Umbral digest_min_score.
+    chat_id: destino override (DM de prueba); None → canal.
     """
     now = datetime.now(timezone.utc)
     rows = [dict(r) for r in conn.execute(_GATE_SQL.replace(":min_score", ":min_score").replace(
@@ -493,7 +506,7 @@ def publish_daily_digest(cfg: Config, conn, tg_api, dry_run: bool = False) -> bo
     if dry_run:
         log.info("canal: dry-run digest diario:\n%s", text[:500])
         return False
-    ok = _send_digest(cfg, tg_api, "daily", text, conn, now)
+    ok = _send_digest(cfg, tg_api, "daily", text, conn, now, chat_id=chat_id)
     if ok:
         # B1+B2a+B2b+B4: gráficos de contexto (falla silenciosa por foto)
         try:
@@ -508,7 +521,7 @@ def publish_daily_digest(cfg: Config, conn, tg_api, dry_run: bool = False) -> bo
             ):
                 if p:
                     fotos.append((p, cap))
-            _enviar_fotos(cfg, tg_api, fotos)
+            _enviar_fotos(cfg, tg_api, fotos, chat_id=chat_id)
         except Exception as e:
             log.warning("canal: gráficos daily fallaron: %s", e)
     return ok
@@ -537,8 +550,12 @@ def _weekly_remote_rows(conn, cfg: Config) -> dict[str, list[dict]]:
     return by_sen
 
 
-def publish_weekly_remote(cfg: Config, conn, tg_api, dry_run: bool = False) -> bool:
-    """Digest C: mejor remoto de la semana × seniority (junior/semi/senior/lead)."""
+def publish_weekly_remote(cfg: Config, conn, tg_api, dry_run: bool = False,
+                          chat_id: int | None = None) -> bool:
+    """Digest C: mejor remoto de la semana × seniority (junior/semi/senior/lead).
+
+    chat_id: destino override (DM de prueba); None → canal.
+    """
     from .notify import esc
     now = datetime.now(timezone.utc)
     by_sen = _weekly_remote_rows(conn, cfg)
@@ -557,14 +574,16 @@ def publish_weekly_remote(cfg: Config, conn, tg_api, dry_run: bool = False) -> b
     if dry_run:
         log.info("canal: dry-run weekly-remote:\n%s", text[:400])
         return False
-    return _send_digest(cfg, tg_api, "weekly-remote", text, conn, now)
+    return _send_digest(cfg, tg_api, "weekly-remote", text, conn, now, chat_id=chat_id)
 
 
-def publish_weekly_rol(cfg: Config, conn, tg_api, dry_run: bool = False) -> bool:
+def publish_weekly_rol(cfg: Config, conn, tg_api, dry_run: bool = False,
+                       chat_id: int | None = None) -> bool:
     """Digest C2: mejor oferta de la semana POR ROL (Backend, Data, DevOps, ...).
 
     A3: complementa weekly-remote (por seniority) con diversidad por categoría —
     1 oferta por rol_categoria, la de mejor market_score de cada una.
+    chat_id: destino override (DM de prueba); None → canal.
     """
     from .notify import esc
     now = datetime.now(timezone.utc)
@@ -589,24 +608,26 @@ def publish_weekly_rol(cfg: Config, conn, tg_api, dry_run: bool = False) -> bool
     if dry_run:
         log.info("canal: dry-run weekly-rol:\n%s", text[:400])
         return False
-    ok = _send_digest(cfg, tg_api, "weekly-rol", text, conn, now)
+    ok = _send_digest(cfg, tg_api, "weekly-rol", text, conn, now, chat_id=chat_id)
     if ok:
         try:
             from . import charts
             d = _dir_charts(cfg)
             p = charts.chart_actividad(conn, d)
             if p:
-                _enviar_fotos(cfg, tg_api, [(p, "📅 Ofertas nuevas por día")])
+                _enviar_fotos(cfg, tg_api, [(p, "📅 Ofertas nuevas por día")], chat_id=chat_id)
         except Exception as e:
             log.warning("canal: gráfico weekly-rol falló: %s", e)
     return ok
 
 
-def publish_weekly_salary(cfg: Config, conn, tg_api, dry_run: bool = False) -> bool:
+def publish_weekly_salary(cfg: Config, conn, tg_api, dry_run: bool = False,
+                          chat_id: int | None = None) -> bool:
     """Digest D: ranking salarial semanal (top 5 declarados) CON contexto de mediana por rol.
 
     A2: cada línea compara contra la mediana del mismo rol (stats robustas de
     stats.py) — '$2.8M (mediana DevOps $2.1M, +33%)' en vez de un número plano.
+    chat_id: destino override (DM de prueba); None → canal.
     """
     from .notify import esc
     from .scoring import _salary_to_clp_monthly
@@ -650,14 +671,14 @@ def publish_weekly_salary(cfg: Config, conn, tg_api, dry_run: bool = False) -> b
     if dry_run:
         log.info("canal: dry-run weekly-salary:\n%s", text[:400])
         return False
-    ok = _send_digest(cfg, tg_api, "weekly-salary", text, conn, now)
+    ok = _send_digest(cfg, tg_api, "weekly-salary", text, conn, now, chat_id=chat_id)
     if ok:
         try:
             from . import charts
             d = _dir_charts(cfg)
             p = charts.chart_salarios_por_rol(conn, d)
             if p:
-                _enviar_fotos(cfg, tg_api, [(p, "💰 Mediana salarial por rol")])
+                _enviar_fotos(cfg, tg_api, [(p, "💰 Mediana salarial por rol")], chat_id=chat_id)
         except Exception as e:
             log.warning("canal: gráfico weekly-salary falló: %s", e)
     return ok
@@ -670,8 +691,12 @@ def publish_weekly_digests(cfg: Config, conn, tg_api, dry_run: bool = False) -> 
     return publish_weekly_salary(cfg, conn, tg_api, dry_run=dry_run) or sent
 
 
-def publish_trends(cfg: Config, conn, tg_api, dry_run: bool = False) -> bool:
-    """Digest E: tendencias mensuales (SQL puro; IA opcional con fallback)."""
+def publish_trends(cfg: Config, conn, tg_api, dry_run: bool = False,
+                   chat_id: int | None = None) -> bool:
+    """Digest E: tendencias mensuales (SQL puro; IA opcional con fallback).
+
+    chat_id: destino override (DM de prueba); None → canal.
+    """
     from .notify import esc
     now = datetime.now(timezone.utc)
     rows = [dict(r) for r in conn.execute("""SELECT title, company, techs, seniority_real,
@@ -718,7 +743,7 @@ def publish_trends(cfg: Config, conn, tg_api, dry_run: bool = False) -> bool:
     if dry_run:
         log.info("canal: dry-run trends:\n%s", text[:500])
         return False
-    return _send_digest(cfg, tg_api, "trends", text, conn, now)
+    return _send_digest(cfg, tg_api, "trends", text, conn, now, chat_id=chat_id)
 
 
 def channel_wipe(cfg: Config, conn, tg_api, dry_run: bool = False) -> dict:

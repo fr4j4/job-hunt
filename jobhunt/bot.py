@@ -619,6 +619,9 @@ def _help_text() -> str:
         "/channel_reset_confirm — limpia marcas: todas vuelven a ser candidatas",
         "/channel_wipe_confirm — borra TODOS los mensajes del canal + resetea marcas",
         "",
+        "🧪 <b>Reportes de prueba (DM)</b> — mismos digests, enviados a este chat",
+        "/report_daily · /report_weekly_remote · /report_weekly_rol · /report_weekly_salary · /report_trends · /report_all",
+        "",
         "🗄 <b>Mantenimiento DB</b>",
         "/db — conteos (activas, inactivas, purgables, no-dev)",
         "/db_old_confirm — elimina físicamente inactivas >30 días",
@@ -893,6 +896,67 @@ def _handle_command(cfg: Config, message: dict, state: dict) -> None:
                                                      "/channel-weekly-salary · /channel-weekly · "
                                                      "/channel-trends · /channel-all · "
                                                      "/channel-dry · /channel-reset (-confirm) · /channel-wipe (-confirm)</code>"})
+        elif cmd.startswith("/report_"):
+            # Versión DM de los reportes del canal (para testear sin ensuciar el canal):
+            # mismos digests, destino = este chat. Bucket separado '-dm' (no bloquea
+            # el envío real al canal del mismo día).
+            sub = cmd[len("/report_"):].replace("_", "-").strip("-")
+            action = sub or "help"
+            from .channel import (publish_daily_digest, publish_weekly_remote,
+                                  publish_weekly_rol, publish_weekly_salary,
+                                  publish_trends)
+            api = _tg_api_for_channel(cfg)
+            if action == "help":
+                _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
+                                             "text": "❓ /report-&lt;accion&gt; (DM — prueba de reportes)\n"
+                                                     "<code>/report-daily · /report-weekly-remote · "
+                                                     "/report-weekly-rol · /report-weekly-salary · "
+                                                     "/report-trends · /report-all</code>"})
+            else:
+                def _run():
+                    import time as _t
+                    conn = database.connect(cfg)
+                    try:
+                        if action in ("daily", "all"):
+                            ok = publish_daily_digest(cfg, conn, api, chat_id=chat_id)
+                            _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
+                                                         "text": "📊 report-daily enviado" if ok else
+                                                                 "📊 report-daily: sin candidatas o ya enviado hoy"})
+                            _t.sleep(1)
+                        if action in ("weekly-remote", "all"):
+                            ok = publish_weekly_remote(cfg, conn, api, chat_id=chat_id)
+                            _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
+                                                         "text": "🌍 report-weekly-remote enviado" if ok else
+                                                                 "🌍 report-weekly-remote: sin candidatas o ya enviado"})
+                            _t.sleep(1)
+                        if action in ("weekly-rol", "all"):
+                            ok = publish_weekly_rol(cfg, conn, api, chat_id=chat_id)
+                            _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
+                                                         "text": "🏆 report-weekly-rol enviado" if ok else
+                                                                 "🏆 report-weekly-rol: sin candidatas o ya enviado"})
+                            _t.sleep(1)
+                        if action in ("weekly-salary", "all"):
+                            ok = publish_weekly_salary(cfg, conn, api, chat_id=chat_id)
+                            _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
+                                                         "text": "💰 report-weekly-salary enviado" if ok else
+                                                                 "💰 report-weekly-salary: sin candidatas o ya enviado"})
+                            _t.sleep(1)
+                        if action in ("trends", "all"):
+                            ok = publish_trends(cfg, conn, api, chat_id=chat_id)
+                            _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
+                                                         "text": "📈 report-trends enviado" if ok else
+                                                                 "📈 report-trends: sin datos o ya enviado este mes"})
+                    except Exception as exc:
+                        log.error("report-%s falló: %s", action, str(exc)[:150])
+                        _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
+                                                     "text": f"⚠️ report-{action} falló: "
+                                                             f"<code>{esc(str(exc)[:120])}</code>"})
+                    finally:
+                        conn.close()
+                _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
+                                             "text": f"📢 <code>report-{action}</code> "
+                                                     f"ejecutando en background — te reporto al terminar"})
+                threading.Thread(target=_run, daemon=True).start()
         elif cmd.startswith("/db"):
             action = (cmd[len("/db"):].replace("_", "-").strip("-")) or "stats"
             confirm = action.endswith("-confirm")
@@ -1425,6 +1489,10 @@ def _register_commands(cfg: Config) -> None:
         {"command": "channel_trends", "description": "Post mensual de tendencias"},
         {"command": "channel_all", "description": "Publish + todos los digests"},
         {"command": "channel_dry", "description": "Preview sin publicar"},
+        {"command": "report_daily", "description": "Prueba DM: top del día por categoría"},
+        {"command": "report_weekly_rol", "description": "Prueba DM: mejor de la semana por rol"},
+        {"command": "report_weekly_salary", "description": "Prueba DM: ranking salarial con contexto"},
+        {"command": "report_all", "description": "Prueba DM: todos los reportes"},
         {"command": "channel_reset_confirm", "description": "Limpiar marcas de publicados"},
         {"command": "channel_wipe_confirm", "description": "Borrar TODOS los mensajes del canal"},
         {"command": "db", "description": "DB stats"},
