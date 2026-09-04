@@ -1063,7 +1063,7 @@ def _ia_batch_async(cfg: Config, chat_id: int | None, scheduled: bool = False, s
     if scheduled:
         state = state or {}
         state.setdefault("ia_log", {})["day"] = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    _IA_STATE.update(running=True, done=0, total=0, t0=time.time())   # lock temprano: cierra la ventana de carrera
+    _IA_STATE.update(running=True, done=0, total=0, current="", t0=time.time())   # lock temprano: cierra la ventana de carrera
     try:
         conn = database.connect(cfg)
         try:
@@ -1076,7 +1076,7 @@ def _ia_batch_async(cfg: Config, chat_id: int | None, scheduled: bool = False, s
                 "chat_id": chat_id, "parse_mode": "HTML",
                 "text": f"🧠 <b>Batch IA iniciado</b> — {cola} ofertas en cola · "
                         f"avance con <code>/enrich status</code>"})
-        _IA_STATE.update(running=True, done=0, total=0, t0=time.time())
+        _IA_STATE.update(running=True, done=0, total=cola, current="", t0=time.time())
         t0 = time.time()
         conn = database.connect(cfg)
         try:
@@ -1086,7 +1086,7 @@ def _ia_batch_async(cfg: Config, chat_id: int | None, scheduled: bool = False, s
         finally:
             conn.close()
         dur = int(time.time() - t0)
-        _IA_STATE["running"] = False
+        _IA_STATE.update(running=False, done=0, total=0, current="")   # reset completo — evita "0/0 lote 8" fantasma
         # recalcular cola real tras el batch (la variable `cola` era previa al inicio)
         try:
             conn2 = database.connect(cfg)
@@ -1118,7 +1118,7 @@ def _ia_batch_async(cfg: Config, chat_id: int | None, scheduled: bool = False, s
                 "text": f"🧠 <b>Batch IA terminado</b> — {done} ofertas enriquecidas{cola_txt} · rescore: {rescored} · {dur // 60}m{dur % 60:02d}s"})
         log.info("batch IA OK: %d ofertas, rescore %d (%ds)", done, rescored, dur)
     except Exception as exc:
-        _IA_STATE["running"] = False
+        _IA_STATE.update(running=False, done=0, total=0, current="")   # reset completo también en fallo
         log.error("batch IA falló: %s", exc)
         if chat_id:
             try:
