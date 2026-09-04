@@ -187,17 +187,41 @@ IA_SCHEMA = ('{"modalidad": "R"|"H"|"P"|"?", "salario_clp_mensual": numero|null,
 
 def compute_market_context(conn) -> str:
     """Contexto de mercado para el comentario editorial — se calcula UNA vez por lote
-    en el MAIN y se pasa como argumento a ia_extract (los workers NO tocan la DB)."""
+    en el MAIN y se pasa como argumento a ia_extract (los workers NO tocan la DB).
+
+    Stats honestas: mediana real (percentil sobre salarios parseados), outliers
+    en cuarentena (no se descartan del pool, solo de la estadística), P75 y
+    % declarantes calculados — nada hardcodeado.
+    """
     try:
-        med = conn.execute("""SELECT AVG(CAST(REPLACE(REPLACE(salary,'CLP ',''),' ','') AS INTEGER))
-            FROM ofertas WHERE salary LIKE 'CLP %'""").fetchone()[0]
-        n_rem = conn.execute("SELECT COUNT(*) FROM ofertas WHERE active=1 AND modality='remoto'").fetchone()[0]
+        rows = conn.execute(
+            "SELECT salary FROM ofertas WHERE active=1 AND salary LIKE 'CLP %' AND salary != ''"
+        ).fetchall()
+        vals = []
+        for (raw,) in rows:
+            m = re.search(r"(\d[\d.]*)", raw or "")
+            if not m:
+                continue
+            v = int(m.group(1))
+            # cuarentena estadística: <400k o >15M/mes no es salario mensual dev creíble
+            if 400_000 <= v <= 15_000_000:
+                vals.append(v)
         n_tot = conn.execute("SELECT COUNT(*) FROM ofertas WHERE active=1").fetchone()[0]
-        return (f"mediana salarial dev ${int(med or 2300000):,} · solo ~8% de las ofertas declara "
-                f"salario · remoto total: {n_rem} de {n_tot} activas · P75: $2.7M · "
-                f"inglés requerido suele pagar $3M+")
+        n_rem = conn.execute(
+            "SELECT COUNT(*) FROM ofertas WHERE active=1 AND modality='remoto'").fetchone()[0]
+        n_decl = len(vals)
+        pct_decl = int(100 * n_decl / n_tot) if n_tot else 0
+        if n_decl < 10:
+            return (f"muestra salarial insuficiente ({n_decl} ofertas declaran de {n_tot} activas) — "
+                    f"NO cites estadísticas de salario en opinion; describe solo la oferta. "
+                    f"remoto: {n_rem} de {n_tot} activas")
+        vals.sort()
+        med = vals[n_decl // 2]
+        p75 = vals[min(n_decl - 1, int(n_decl * 0.75))]
+        return (f"mediana salarial dev ${med:,} (P75: ${p75:,}) calculada de {n_decl} ofertas "
+                f"con sueldo declarado · {pct_decl}% declara · remoto: {n_rem} de {n_tot} activas")
     except Exception:
-        return "mediana salarial dev $2.300.000 · P75: $2.7M"
+        return "estadística de mercado no disponible — no cites números de mercado en opinion"
 
 
 def ia_extract_detail(cfg: Config, job: dict, profile_desc: str,
@@ -224,8 +248,13 @@ def ia_extract_detail(cfg: Config, job: dict, profile_desc: str,
                                      "NUNCA consejos al candidato (prohibido 'destaca', 'pregunta', "
                                      "'no apliques', 'practica'). "
                                      "Si el sueldo está declarado, la opinion DEBE comentarlo "
-                                     "(comparar contra la mediana del mercado); no digas 'sin salario' "
-                                     "si el campo Sueldo declarado trae un valor."},
+                                     "(comparar contra la mediana del CONTEXTO provisto); no digas 'sin salario' "
+                                     "si el campo Sueldo declarado trae un valor. "
+                                     "ANTI-ALUCINACIÓN: los únicos números de mercado que puedes citar en "
+                                     "opinion son los del CONTEXTO DE MERCADO provisto arriba — prohibido "
+                                     "citar medianas, percentiles o estadísticas de tu conocimiento propio "
+                                     "o de otras fuentes. Si el contexto dice que la muestra es insuficiente, "
+                                     "no compares salarios: describe solo la oferta."},
                          {"role": "user", "content": prompt}],
             "temperature": 0, "format": "json"}
     if cfg.ia.reasoning_effort:          # knob opcional (default: off — flash ya responde rápido)
@@ -389,6 +418,12 @@ def apply_ia_result(conn, cfg: Config, r: dict, parsed: dict | None) -> bool:
     mod = {"R": "remoto", "H": "híbrido", "P": "presencial"}.get(parsed.get("modalidad"), "")
     ia_fields = []
     sets, params = [], []
+    # registro sin marca IA pero con contenido generado previamente (fósil de otra
+    # era del pool): la opinión nueva reemplaza SIEMPRE — si la IA no trae un campo
+    # regenerable, el fósil se limpia (iaclear solo desmarca; el enrich sanitiza)
+    if not r.get("ia_model") and (r.get("ai_opinion") or r.get("ai_resumen") or r.get("ai_fit_reason")):
+        sets += ["ai_opinion=?", "ai_resumen=?", "ai_fit_reason=?"]
+        params += ["", "", ""]
     if not r.get("modality") and mod:
         sets.append("modality=?"); params.append(mod); ia_fields.append("modality")
     if not r.get("salary") and parsed.get("salario_clp_mensual"):
