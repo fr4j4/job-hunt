@@ -74,7 +74,7 @@ def test_schema_estructura():
     props = item["properties"]
     assert props["idx"]["type"] == "integer"
     assert "fit_reason" in props and "ingles" in props and "benefits" in props
-    assert "techs" not in props
+    assert "techs" in props          # v2: la IA detecta techs y se persisten
     assert item["additionalProperties"] is False
     assert "idiomas" in item["required"]
 
@@ -400,3 +400,46 @@ def test_lote_salario_null_no_escribe(mem_db, monkeypatch):
     en.enrich_pending(mem_db, cfg, max_n=1)
     sal = mem_db.execute("SELECT salary FROM ofertas WHERE group_id='g1'").fetchone()[0]
     assert sal == ""   # 0 no escribe salary
+
+
+# ---------- 11. techs de la IA se persisten (cobertura 15%→~80%) ----------
+def test_lote_techs_ia_se_persisten(mem_db, monkeypatch):
+    cfg = _cfg()
+    _insert(mem_db, "g1", salary="")
+    monkeypatch.setattr(en, "extract_structured",
+                        lambda url: {"description": "x" * 500, "_access": "ok"})
+    monkeypatch.setattr(en, "ia_extract_lote",
+                        lambda *a, **k: ([{"idx": 1, "opinion": "x", "resumen": "r",
+                                           "fit_reason": "f", "seniority_real": "s",
+                                           "rol_categoria": "Backend", "ingles": "B2",
+                                           "idiomas": [], "modalidad": "R",
+                                           "salario_clp_mensual": 0,
+                                           "techs": ["Python", "Kubernetes", "AWS"],
+                                           "red_flags": [], "green_flags": [],
+                                           "benefits": []}], ""))
+    en.enrich_pending(mem_db, cfg, max_n=1)
+    row = mem_db.execute("SELECT techs, ia_fields FROM ofertas WHERE group_id='g1'").fetchone()
+    assert row["techs"] == "Py;K8s;AWS"      # normalizadas a abreviaturas
+    assert "techs" in (row["ia_fields"] or "")
+
+
+def test_lote_techs_ia_no_pisa_feed(mem_db, monkeypatch):
+    """Si la columna techs ya tiene datos del feed, la IA NO la pisa."""
+    cfg = _cfg()
+    _insert(mem_db, "g1", salary="")
+    mem_db.execute("UPDATE ofertas SET techs='Java;Spring' WHERE group_id='g1'")
+    mem_db.commit()
+    monkeypatch.setattr(en, "extract_structured",
+                        lambda url: {"description": "x" * 500, "_access": "ok"})
+    monkeypatch.setattr(en, "ia_extract_lote",
+                        lambda *a, **k: ([{"idx": 1, "opinion": "x", "resumen": "r",
+                                           "fit_reason": "f", "seniority_real": "s",
+                                           "rol_categoria": "Backend", "ingles": "B2",
+                                           "idiomas": [], "modalidad": "R",
+                                           "salario_clp_mensual": 0,
+                                           "techs": ["Python"],
+                                           "red_flags": [], "green_flags": [],
+                                           "benefits": []}], ""))
+    en.enrich_pending(mem_db, cfg, max_n=1)
+    techs = mem_db.execute("SELECT techs FROM ofertas WHERE group_id='g1'").fetchone()[0]
+    assert techs == "Java;Spring"   # intacto

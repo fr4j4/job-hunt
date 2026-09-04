@@ -17,6 +17,29 @@ import requests
 
 from .config import Config
 from .logging_setup import get_logger
+from .scoring import _norm
+
+# Normalización de techs IA → abreviaturas canónicas (columna techs)
+_TECH_ABBR = {
+    "python": "Py", "py": "Py",
+    "java": "Java",
+    "typescript": "TS", "ts": "TS",
+    "javascript": "JS", "js": "JS",
+    "react": "React", "angular": "Angular", "vue": "Vue",
+    "node": "Node", "node.js": "Node",
+    "kubernetes": "K8s", "k8s": "K8s",
+    "docker": "Docker",
+    "aws": "AWS", "gcp": "GCP", "azure": "Azure",
+    "terraform": "TF", "tf": "TF",
+    "scala": "Scala", "golang": "Go", "go": "Go",
+    ".net": ".NET", "c#": "C#",
+    "sql": "SQL", "postgres": "Postgres", "postgresql": "Postgres",
+    "mongo": "Mongo", "mongodb": "Mongo",
+    "redis": "Redis", "kafka": "Kafka",
+    "fastapi": "FastAPI", "django": "Django",
+    "spring": "Spring", "nifi": "NiFi",
+    "jenkins": "Jenkins", "ci/cd": "CI/CD",
+}
 
 log = get_logger(__name__)
 
@@ -370,12 +393,13 @@ _LOTE_SCHEMA = {
                 "required": ["idioma", "nivel", "excluyente"], "additionalProperties": False}},
             "modalidad": {"type": "string"},
             "salario_clp_mensual": {"type": "integer"},
+            "techs": {"type": "array", "items": {"type": "string"}},
             "red_flags": {"type": "array", "items": {"type": "string"}},
             "green_flags": {"type": "array", "items": {"type": "string"}},
             "benefits": {"type": "array", "items": {"type": "string"}}},
         "required": ["idx", "opinion", "resumen", "fit_reason", "seniority_real",
                       "rol_categoria", "ingles", "idiomas", "modalidad",
-                      "salario_clp_mensual", "red_flags", "green_flags", "benefits"],
+                      "salario_clp_mensual", "techs", "red_flags", "green_flags", "benefits"],
         "additionalProperties": False}},
         "required": ["ofertas"], "additionalProperties": False}}
 
@@ -409,7 +433,11 @@ def _lote_prompt(rows: list[dict], profile_desc: str, mercado: str) -> str:
             + "\n\n".join(bloques) +
             "\n\nResponde un JSON array con UN objeto por oferta (idx 1..N), cada uno con: "
             "idx, opinion, resumen, fit_reason, seniority_real, rol_categoria, ingles, idiomas, "
-            "modalidad, salario_clp_mensual, red_flags, green_flags, benefits. "
+            "modalidad, salario_clp_mensual, techs, red_flags, green_flags, benefits. "
+            "techs: lista de tecnologías detectadas en la descripción (máx 8, "
+            "abreviadas: Py, Java, AWS, React, Angular, K8s, Docker, SQL, Node, TS, "
+            "NiFi, Spring, GCP, Azure, Scala, Go, .NET, FastAPI, Kafka, Terraform, "
+            "Postgres, Mongo, Redis, Vue, Jenkins, CI/CD). "
             "Si una oferta no declara salario, salario_clp_mensual = 0 (cero, nunca inventes un monto).")
 
 
@@ -686,7 +714,7 @@ def enrich_pending(conn, cfg: Config | None, max_n: int | None = None,
         qs = ",".join("?" for _ in vivas)
         recargadas = [dict(x) for x in conn.execute(
             f"SELECT group_id, title, company, location, description, salary, modality, "
-            f"salary_raw, salary_status, salary_note FROM ofertas "
+            f"salary_raw, salary_status, salary_note, techs FROM ofertas "
             f"WHERE active=1 AND group_id IN ({qs})", tuple(vivas))]
         if not recargadas:
             continue
@@ -786,6 +814,19 @@ def apply_ia_result(conn, cfg: Config, r: dict, parsed: dict | None,
         sets.append("rol_categoria=?")
         params.append(str(parsed["rol_categoria"])[:40])
         ia_fields.append("rol_categoria")
+    # techs de la IA: SOLO si la columna está vacía (no piso techs del feed/ficha).
+    # Normaliza a abreviaturas canónicas y limita a 8 — sube cobertura 15%→~80%.
+    if parsed.get("techs") and isinstance(parsed["techs"], list) and not (r.get("techs") or "").strip():
+        techs_limpio = []
+        for t in parsed["techs"][:8]:
+            t = str(t).strip()
+            if not t:
+                continue
+            techs_limpio.append(_TECH_ABBR.get(_norm(t), t[:20]))
+        if techs_limpio:
+            sets.append("techs=?")
+            params.append(";".join(techs_limpio))
+            ia_fields.append("techs")
     if parsed.get("idiomas") and isinstance(parsed["idiomas"], list) and parsed["idiomas"]:
         idiomas_limpio = [
             {"idioma": str(i.get("idioma", ""))[:20].lower(),
