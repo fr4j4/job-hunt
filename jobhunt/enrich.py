@@ -814,9 +814,10 @@ def apply_ia_result(conn, cfg: Config, r: dict, parsed: dict | None,
         sets.append("rol_categoria=?")
         params.append(str(parsed["rol_categoria"])[:40])
         ia_fields.append("rol_categoria")
-    # techs de la IA: SOLO si la columna está vacía (no piso techs del feed/ficha).
-    # Normaliza a abreviaturas canónicas y limita a 8 — sube cobertura 15%→~80%.
-    if parsed.get("techs") and isinstance(parsed["techs"], list) and not (r.get("techs") or "").strip():
+    # techs de la IA: REFRESCA la columna siempre que detecte (lista no vacía) —
+    # una run anterior pudo no detectarlas (desc corta, modelo viejo). Solo
+    # preserva lo existente si la IA no detecta nada ([] → no toca).
+    if parsed.get("techs") and isinstance(parsed["techs"], list):
         techs_limpio = []
         for t in parsed["techs"][:8]:
             t = str(t).strip()
@@ -872,7 +873,7 @@ def run_ia_batch(conn, cfg: Config, profile_desc: str, max_n: int | None = None,
         qs = ",".join("?" for _ in groups)
         rows = conn.execute(
             f"SELECT group_id, title, company, location, description, modality, salary, "
-            f"salary_raw, salary_status, salary_note FROM ofertas WHERE active=1 AND group_id IN ({qs})",
+            f"salary_raw, salary_status, salary_note, techs FROM ofertas WHERE active=1 AND group_id IN ({qs})",
             tuple(groups)).fetchall()
     else:
         # C9 (v4.1) ampliado: cola relajada — la IA puede trabajar con lo que haya
@@ -881,7 +882,7 @@ def run_ia_batch(conn, cfg: Config, profile_desc: str, max_n: int | None = None,
         # intenta corregir con la ficha y la IA comenta la anomalía).
         rows = conn.execute(
             "SELECT group_id, title, company, location, description, modality, salary, "
-            "salary_raw, salary_status, salary_note FROM ofertas "
+            "salary_raw, salary_status, salary_note, techs FROM ofertas "
             "WHERE active=1 AND ia_model='' AND (length(description)>200 OR description_source!='') AND "
             "(modality='' OR salary='' OR description IS NULL OR "
             "salary_status IN ('implausible','suspect')) "

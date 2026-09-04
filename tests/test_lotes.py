@@ -423,8 +423,8 @@ def test_lote_techs_ia_se_persisten(mem_db, monkeypatch):
     assert "techs" in (row["ia_fields"] or "")
 
 
-def test_lote_techs_ia_no_pisa_feed(mem_db, monkeypatch):
-    """Si la columna techs ya tiene datos del feed, la IA NO la pisa."""
+def test_lote_techs_ia_refresca_existente(mem_db, monkeypatch):
+    """La IA REFRESCA techs aunque la columna tenga valor (run anterior pudo fallar)."""
     cfg = _cfg()
     _insert(mem_db, "g1", salary="")
     mem_db.execute("UPDATE ofertas SET techs='Java;Spring' WHERE group_id='g1'")
@@ -437,7 +437,29 @@ def test_lote_techs_ia_no_pisa_feed(mem_db, monkeypatch):
                                            "rol_categoria": "Backend", "ingles": "B2",
                                            "idiomas": [], "modalidad": "R",
                                            "salario_clp_mensual": 0,
-                                           "techs": ["Python"],
+                                           "techs": ["Python", "AWS"],
+                                           "red_flags": [], "green_flags": [],
+                                           "benefits": []}], ""))
+    en.enrich_pending(mem_db, cfg, max_n=1)
+    techs = mem_db.execute("SELECT techs FROM ofertas WHERE group_id='g1'").fetchone()[0]
+    assert techs == "Py;AWS"   # refrescado por la IA
+
+
+def test_lote_techs_ia_vacia_no_toca(mem_db, monkeypatch):
+    """Si la IA no detecta techs ([]), la columna existente se preserva."""
+    cfg = _cfg()
+    _insert(mem_db, "g1", salary="")
+    mem_db.execute("UPDATE ofertas SET techs='Java;Spring' WHERE group_id='g1'")
+    mem_db.commit()
+    monkeypatch.setattr(en, "extract_structured",
+                        lambda url: {"description": "x" * 500, "_access": "ok"})
+    monkeypatch.setattr(en, "ia_extract_lote",
+                        lambda *a, **k: ([{"idx": 1, "opinion": "x", "resumen": "r",
+                                           "fit_reason": "f", "seniority_real": "s",
+                                           "rol_categoria": "Backend", "ingles": "B2",
+                                           "idiomas": [], "modalidad": "R",
+                                           "salario_clp_mensual": 0,
+                                           "techs": [],
                                            "red_flags": [], "green_flags": [],
                                            "benefits": []}], ""))
     en.enrich_pending(mem_db, cfg, max_n=1)
