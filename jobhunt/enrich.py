@@ -636,12 +636,14 @@ def enrich_pending(conn, cfg: Config | None, max_n: int | None = None,
             f"SELECT {cols} FROM ofertas "
             f"WHERE active=1 AND (description IS NULL OR length(description)<200 OR "
             f"salary_status IN ('implausible','suspect')) "
+            f"AND COALESCE(fetch_fails,0) < 3 "
             f"AND group_id IN ({qs}) ORDER BY score DESC", tuple(groups)).fetchall()
     else:
         rows = conn.execute(
             f"SELECT {cols} FROM ofertas "
             "WHERE active=1 AND (description IS NULL OR length(description)<200 OR "
             "salary_status IN ('implausible','suspect')) "
+            "AND COALESCE(fetch_fails,0) < 3 "
             "ORDER BY score DESC").fetchall()
     pending = [dict(r) for r in rows]
     if max_n:

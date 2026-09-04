@@ -192,15 +192,11 @@ def test_3_strikes(mem_db, monkeypatch):
     monkeypatch.setattr(en, "fetch_page", lambda url: ("", "blocked"))
     en.enrich_pending(mem_db, None, max_n=1)
     row = mem_db.execute("SELECT fetch_fails, active FROM ofertas WHERE group_id='g6'").fetchone()
-    assert row["fetch_fails"] == 3
-    # 3 strikes + last_fetch_ok viejo (>48h) → active=0 (lo aplica el sweep de zombis;
-    # aquí verificamos el contador — la regla 3-strikes se evalúa en el sweep)
-    # 2 blocked + ok → activa con ficha:
-    html = '<html><script type="application/ld+json">{"@type":"JobPosting","description":"' + "z"*300 + '"}</script></html>'
-    monkeypatch.setattr(en, "fetch_page", lambda url: (html, "ok"))
+    assert row["fetch_fails"] == 3   # 2° strike → 3 (aún califica: fails<3)
+    # 3 strikes → EXCLUIDA del reselect (sigue activa, no se reintenta en cada pase):
     en.enrich_pending(mem_db, None, max_n=1)
     row = mem_db.execute("SELECT fetch_fails, active FROM ofertas WHERE group_id='g6'").fetchone()
-    assert row["fetch_fails"] == 0 and row["active"] == 1
+    assert row["fetch_fails"] == 3 and row["active"] == 1   # sin reintento, sin desactivar
 
 # ---------- 14. upsert preserva raw/status (A7) ----------
 def test_upsert_preserva_raw_status(mem_db):
