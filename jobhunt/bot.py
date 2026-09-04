@@ -689,19 +689,24 @@ def _handle_command(cfg: Config, message: dict, state: dict) -> None:
             if confirm:
                 sub = sub[:-len("-confirm")]
             action = sub or "status"
-            conn = database.connect(cfg)
-            try:
-                from .channel import (publish_channel, publish_daily_digest,
-                                      publish_weekly_remote, publish_weekly_salary,
-                                      publish_trends, channel_status)
-                api = _tg_api_for_channel(cfg)
-                if action == "status":
+            from .channel import (publish_channel, publish_daily_digest,
+                                  publish_weekly_remote, publish_weekly_salary,
+                                  publish_trends, channel_status)
+            api = _tg_api_for_channel(cfg)
+            if action == "status":
+                conn = database.connect(cfg)
+                try:
                     _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
                                                  "text": channel_status(conn, cfg)})
-                elif action in ("publish", "daily", "weekly-remote", "weekly-salary",
-                                "weekly", "trends", "all", "dry"):
-                    def _run():
-                        import time as _t
+                finally:
+                    conn.close()
+            elif action in ("publish", "daily", "weekly-remote", "weekly-salary",
+                            "weekly", "trends", "all", "dry"):
+                def _run():
+                    # conn se abre EN el thread (SQLite no permite compartir entre threads)
+                    import time as _t
+                    conn = database.connect(cfg)
+                    try:
                         if action in ("publish", "dry", "all"):
                             stats = publish_channel(cfg, conn, api, dry_run=(action == "dry"))
                             if action == "dry":
@@ -736,8 +741,17 @@ def _handle_command(cfg: Config, message: dict, state: dict) -> None:
                             _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
                                                          "text": "📈 trends enviado" if ok else
                                                                  "📈 trends: sin datos o ya enviado este mes"})
-                    threading.Thread(target=_run, daemon=True).start()
-                elif action == "reset":
+                    except Exception as exc:
+                        log.error("channel-%s falló: %s", action, str(exc)[:150])
+                        _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
+                                                     "text": f"⚠️ channel-{action} falló: "
+                                                             f"<code>{esc(str(exc)[:120])}</code>"})
+                    finally:
+                        conn.close()
+                threading.Thread(target=_run, daemon=True).start()
+            elif action == "reset":
+                conn = database.connect(cfg)
+                try:
                     if confirm:
                         n = conn.execute("""UPDATE ofertas SET notified_channel_at=''
                             WHERE active=1 AND notified_channel_at != ''""").rowcount
@@ -753,16 +767,16 @@ def _handle_command(cfg: Config, message: dict, state: dict) -> None:
                                                              f"de todas las activas ({cand} volverían a "
                                                              f"ser candidatas).\nConfirma con: "
                                                              f"<code>/channel-reset-confirm</code>"})
-                else:
-                    _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
-                                                 "text": "❓ /channel-<action>\n"
-                                                         "<code>/channel · /channel-publish · "
-                                                         "/channel-daily · /channel-weekly-remote · "
-                                                         "/channel-weekly-salary · /channel-weekly · "
-                                                         "/channel-trends · /channel-all · "
-                                                         "/channel-dry · /channel-reset (-confirm)</code>"})
-            finally:
-                conn.close()
+                finally:
+                    conn.close()
+            else:
+                _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
+                                             "text": "❓ /channel-<action>\n"
+                                                     "<code>/channel · /channel-publish · "
+                                                     "/channel-daily · /channel-weekly-remote · "
+                                                     "/channel-weekly-salary · /channel-weekly · "
+                                                     "/channel-trends · /channel-all · "
+                                                     "/channel-dry · /channel-reset (-confirm)</code>"})
         elif cmd.startswith("/db"):
             action = (cmd[len("/db"):].replace("_", "-").strip("-")) or "stats"
             confirm = action.endswith("-confirm")
