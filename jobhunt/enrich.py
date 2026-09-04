@@ -634,12 +634,14 @@ def enrich_pending(conn, cfg: Config | None, max_n: int | None = None,
         qs = ",".join("?" for _ in groups)
         rows = conn.execute(
             f"SELECT {cols} FROM ofertas "
-            f"WHERE active=1 AND (description IS NULL OR length(description)<200) "
+            f"WHERE active=1 AND (description IS NULL OR length(description)<200 OR "
+            f"salary_status IN ('implausible','suspect')) "
             f"AND group_id IN ({qs}) ORDER BY score DESC", tuple(groups)).fetchall()
     else:
         rows = conn.execute(
             f"SELECT {cols} FROM ofertas "
-            "WHERE active=1 AND (description IS NULL OR length(description)<200) "
+            "WHERE active=1 AND (description IS NULL OR length(description)<200 OR "
+            "salary_status IN ('implausible','suspect')) "
             "ORDER BY score DESC").fetchall()
     pending = [dict(r) for r in rows]
     if max_n:
@@ -726,11 +728,13 @@ def profile_description(cfg: Config) -> str:
 
 
 def ia_queue_count(conn) -> int:
-    """Ofertas en cola para el batch IA (con descripción, faltan datos, sin IA)."""
+    """Ofertas en cola para el batch IA (con descripción, faltan datos, sin IA).
+    C9 ampliado: salarios implausible/suspect SIEMPRE califican (auto-curativo)."""
     return conn.execute(
         "SELECT COUNT(*) FROM ofertas WHERE active=1 AND ia_model='' AND "
         "(length(description)>200 OR description_source!='') AND "
-        "(modality='' OR salary='' OR description IS NULL)").fetchone()[0]
+        "(modality='' OR salary='' OR description IS NULL OR "
+        "salary_status IN ('implausible','suspect'))").fetchone()[0]
 
 
 def apply_ia_result(conn, cfg: Config, r: dict, parsed: dict | None,
@@ -824,13 +828,16 @@ def run_ia_batch(conn, cfg: Config, profile_desc: str, max_n: int | None = None,
             f"salary_raw, salary_status, salary_note FROM ofertas WHERE active=1 AND group_id IN ({qs})",
             tuple(groups)).fetchall()
     else:
-        # C9 (v4.1): cola relajada — la IA puede trabajar con lo que haya
-        # (desc corta OK si la fuente ya dejó algo); solo excluye desc vacía total
+        # C9 (v4.1) ampliado: cola relajada — la IA puede trabajar con lo que haya
+        # (desc corta OK si la fuente ya dejó algo); solo excluye desc vacía total.
+        # Salarios implausible/suspect SIEMPRE califican (auto-curativo — el árbitro
+        # intenta corregir con la ficha y la IA comenta la anomalía).
         rows = conn.execute(
             "SELECT group_id, title, company, location, description, modality, salary, "
             "salary_raw, salary_status, salary_note FROM ofertas "
             "WHERE active=1 AND ia_model='' AND (length(description)>200 OR description_source!='') AND "
-            "(modality='' OR salary='' OR description IS NULL) "
+            "(modality='' OR salary='' OR description IS NULL OR "
+            "salary_status IN ('implausible','suspect')) "
             "ORDER BY score DESC").fetchall()   # primero las de mejor score (las visibles)
     # max_n=None con groups = TODAS las ofertas del grupo (sin tope de batch);
     # sin groups, el default sigue siendo cfg.ia.batch_size (batch nocturno controlado)
