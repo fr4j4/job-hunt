@@ -1076,19 +1076,32 @@ def _ia_batch_async(cfg: Config, chat_id: int | None, scheduled: bool = False, s
     try:
         conn = database.connect(cfg)
         try:
-            from .enrich import run_ia_batch, profile_description, ia_queue_count
+            from .enrich import run_ia_batch, profile_description, ia_queue_count, enrich_pending
             cola = ia_queue_count(conn)
+            sin_ficha = conn.execute(
+                "SELECT COUNT(*) FROM ofertas WHERE active=1 AND ia_model='' AND "
+                "NOT (length(description)>200 OR description_source!='')").fetchone()[0]
         finally:
             conn.close()
         if chat_id:
             _tg_api(cfg, "sendMessage", {
                 "chat_id": chat_id, "parse_mode": "HTML",
-                "text": f"🧠 <b>Batch IA iniciado</b> — {cola} ofertas en cola · "
-                        f"avance con <code>/enrich status</code>"})
-        _IA_STATE.update(running=True, done=0, total=cola, current="", t0=time.time())
+                "text": f"🧠 <b>Batch IA iniciado</b> — {cola} en cola + {sin_ficha} sin ficha "
+                        f"(bajaré fichas primero) · avance con <code>/enrich status</code>"})
+        _IA_STATE.update(running=True, done=0, total=cola + sin_ficha, current="", t0=time.time())
         t0 = time.time()
         conn = database.connect(cfg)
         try:
+            # FIX: bajar fichas de las sin descripción ANTES de la IA (rescate global).
+            # enrich_pending global: fetch paralelo + árbitro + IA por lote sobre las
+            # recargadas — un solo /enrich rescata las huérfanas (mismo patrón cmd_enrich).
+            fichas = 0
+            try:
+                fichas = enrich_pending(conn, cfg, stop_event=_STOP_EVENT)
+                if fichas:
+                    log.info("enrich_pending global: %d fichas bajadas/procesadas", fichas)
+            except Exception as e:
+                log.warning("enrich_pending global falló (continúa con la cola): %s", e)
             done = run_ia_batch(conn, cfg, profile_description(cfg),
                                 progress=(_mk_progress_cb(cfg, chat_id) if chat_id else None),
                                 stop_event=_STOP_EVENT)
