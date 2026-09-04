@@ -605,6 +605,7 @@ def _help_text() -> str:
         "📢 <b>Canal (broadcast)</b>",
         "/channel — estado del canal (umbral, cola, distribución market score)",
         "/channel_publish — publica las candidatas en cola ahora",
+        "/channel_publish_ia — igual, pero SOLO ofertas ya revisadas por IA",
         "/channel_daily — digest diario 'Top del día' ahora",
         "/channel_weekly — digests semanales ahora (remote + salary)",
         "/channel_weekly_remote — solo digest remoto por seniority",
@@ -730,15 +731,16 @@ def _handle_command(cfg: Config, message: dict, state: dict) -> None:
                                                  "text": channel_status(conn, cfg)})
                 finally:
                     conn.close()
-            elif action in ("publish", "daily", "weekly-remote", "weekly-salary",
+            elif action in ("publish", "publish-ia", "daily", "weekly-remote", "weekly-salary",
                             "weekly", "trends", "all", "dry"):
                 def _run():
                     # conn se abre EN el thread (SQLite no permite compartir entre threads)
                     import time as _t
                     conn = database.connect(cfg)
                     try:
-                        if action in ("publish", "dry", "all"):
-                            stats = publish_channel(cfg, conn, api, dry_run=(action == "dry"))
+                        if action in ("publish", "publish-ia", "dry", "all"):
+                            stats = publish_channel(cfg, conn, api, dry_run=(action == "dry"),
+                                                    require_ia=(action == "publish-ia"))
                             if action == "dry":
                                 for p in stats.get("dry_run_preview", []):
                                     _tg_api(cfg, "sendMessage", {
@@ -1310,6 +1312,7 @@ def _register_commands(cfg: Config) -> None:
         {"command": "stats",  "description": "Cobertura IA y datos del pool"},
         {"command": "channel", "description": "Estado del canal"},
         {"command": "channel_publish", "description": "Publicar candidatas al canal ahora"},
+        {"command": "channel_publish_ia", "description": "Publicar solo ofertas revisadas por IA"},
         {"command": "channel_daily", "description": "Daily digest ahora"},
         {"command": "channel_weekly", "description": "Digests semanales ahora (remote+salary)"},
         {"command": "channel_weekly_remote", "description": "Solo digest weekly-remote"},

@@ -206,9 +206,16 @@ WHERE active=1 AND market_score >= :min_score
   ORDER BY market_score DESC, first_seen DESC"""
 
 
-def select_channel_offers(conn, cfg: Config) -> list[dict]:
-    """Candidatas al canal (market gate + edad + dev + no notificadas)."""
-    rows = conn.execute(_GATE_SQL, {
+def select_channel_offers(conn, cfg: Config, require_ia: bool = False) -> list[dict]:
+    """Candidatas al canal (market gate + edad + dev + no notificadas).
+
+    require_ia=True: solo ofertas ya revisadas por IA (ia_model != '') —
+    garantiza que todo post lleve comentario/editorial generado.
+    """
+    sql = _GATE_SQL
+    if require_ia:
+        sql = _GATE_SQL.replace("WHERE active=1", "WHERE active=1 AND ia_model != ''")
+    rows = conn.execute(sql, {
         "min_score": cfg.channel.min_score,
         "max_age": cfg.channel.max_age_days,
     }).fetchall()
@@ -233,7 +240,7 @@ def select_channel_offers(conn, cfg: Config) -> list[dict]:
 
 
 def publish_channel(cfg: Config, conn, tg_api, dry_run: bool = False,
-                    budget: int | None = None) -> dict:
+                    budget: int | None = None, require_ia: bool = False) -> dict:
     """Publica al canal las candidatas (gates spec v3 §4, presupuesto v4.1 §3.3). Retorna stats.
 
     tg_api: callable (method, payload) → dict (el bot inyecta _tg_api).
@@ -241,6 +248,7 @@ def publish_channel(cfg: Config, conn, tg_api, dry_run: bool = False,
     budget: tope de posts de ESTA invocación (presupuesto restante del barrido —
     v4.1 A3); si None, solo rige cfg.channel.max_posts. Commit POR POST (C3):
     un crash entre send y commit no pierde las marcas ya enviadas.
+    require_ia=True: solo ofertas revisadas por IA (ia_model != '').
     """
     stats: dict = {"candidates": 0, "posted": 0, "skipped_age": 0, "skipped_score": 0,
                    "skipped_notified": 0, "skipped_dev": 0}
@@ -251,7 +259,10 @@ def publish_channel(cfg: Config, conn, tg_api, dry_run: bool = False,
         return stats
 
     # todas las que cumplen score+notified (sin tope) para stats reales de skips
-    rows = [dict(r) for r in conn.execute(_GATE_SQL, {
+    gate_sql = _GATE_SQL
+    if require_ia:
+        gate_sql = _GATE_SQL.replace("WHERE active=1", "WHERE active=1 AND ia_model != ''")
+    rows = [dict(r) for r in conn.execute(gate_sql, {
         "min_score": cfg.channel.min_score, "max_age": cfg.channel.max_age_days}).fetchall()]
     stats["candidates"] = len(rows)
 
