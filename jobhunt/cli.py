@@ -188,7 +188,7 @@ def lotes_por_fit(new_jobs: list[dict], lote_size: int) -> list[list[dict]]:
             for i in range(0, len(ordenados), lote_size)] if new_jobs else []
 
 
-def cmd_run(cfg, notify: bool = True, on_phase=None) -> None:
+def cmd_run(cfg, notify: bool = True, on_phase=None, stop_event: threading.Event | None = None):
     """on_phase(fuente, query, page) — callback opcional para progreso por fuente/query/página."""
     def phase(fuente: str, query: str = "", page: int = 0, detail: str = ""):
         if on_phase:
@@ -312,6 +312,11 @@ def cmd_run(cfg, notify: bool = True, on_phase=None) -> None:
             n_lotes = len(lotes)
 
             for n_lote, lote in enumerate(lotes):
+                # /stop: corte limpio ENTRE lotes — lo hecho queda commiteado,
+                # el resto del pool vuelve a la cola nocturna C9
+                if stop_event is not None and stop_event.is_set():
+                    log.warning("barrido detenido por /stop tras %d/%d lotes", n_lote, n_lotes)
+                    break
                 lote_ids = {j["group_id"] for j in lote}
                 phase("IA complementaria",
                       detail=f"{hechas_acum}/{total_new} · lote {n_lote + 1}/{n_lotes}")

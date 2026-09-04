@@ -436,7 +436,8 @@ def apply_ia_result(conn, cfg: Config, r: dict, parsed: dict | None) -> bool:
 
 
 def run_ia_batch(conn, cfg: Config, profile_desc: str, max_n: int | None = None,
-                 groups: set[str] | None = None, progress=None) -> int:
+                 groups: set[str] | None = None, progress=None,
+                 stop_event=None) -> int:
     """Anillo C: IA para los que A+B no resolvieron. 1x/día (o grupos específicos).
 
     groups: si se pasa, procesa SOLO esos group_id (ofertas recién indexadas),
@@ -468,6 +469,10 @@ def run_ia_batch(conn, cfg: Config, profile_desc: str, max_n: int | None = None,
     done = 0
     rate_racha = 0   # OPS-4: circuito nocturno ante tormenta 429/5xx (backoff + corte)
     for i, r in enumerate(pending, 1):
+        # /stop: corte limpio ENTRE ofertas — lo procesado ya está commiteado
+        if stop_event is not None and stop_event.is_set():
+            log.warning("batch IA detenido por /stop tras %d/%d", done, total)
+            break
         t0 = time.time()
         parsed, err_kind = ia_extract_detail(cfg, r, profile_desc, mercado)
         log.info("IA %d/%d %s — %s (%.1fs)", i, total, r["group_id"][:20],

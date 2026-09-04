@@ -491,6 +491,7 @@ def _latest_offers(cfg: Config, n: int = 10) -> list[dict]:
 
 
 _SEARCH_STATE: dict = {"running": False, "t0": 0.0}
+_STOP_EVENT = threading.Event()   # /stop: termina search/IA/report en su próximo punto seguro
 _REPORT_STATE: dict = {"running": False, "phase": 0, "phase_msg": "", "t0": 0.0,
                        "pdf": ""}
 
@@ -596,6 +597,7 @@ def _help_text() -> str:
         "🧠 <b>Enriquecimiento IA</b>",
         "/enrich — corre el batch IA ahora (modalidad, sueldo, inglés, techs…)",
         "/enrich status — avance del batch IA (o tamaño de la cola)",
+        "/stop — detiene la operación en curso (search/enrich/report) con corte limpio",
         "",
         "📊 <b>Análisis y estado</b>",
         "/report — análisis completo del mercado con gráficos → PDF",
@@ -714,6 +716,29 @@ def _handle_command(cfg: Config, message: dict, state: dict) -> None:
         elif cmd == "/stats":
             _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
                                          "text": _stats_text(cfg)})
+        elif cmd == "/stop":
+            busy = _op_busy()
+            if not busy:
+                _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
+                                             "text": "ℹ️ No hay operación en curso — nada que detener"})
+            elif _STOP_EVENT.is_set():
+                _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
+                                             "text": f"⏹ Stop ya solicitado — {busy} terminando en su próximo punto seguro…"})
+            else:
+                _STOP_EVENT.set()
+                _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
+                                             "text": f"⏹ <b>Deteniendo {busy}</b> — corte limpio en el próximo "
+                                                     f"punto seguro (lo procesado queda guardado). "
+                                                     f"Te confirmo al terminar."})
+                def _ack_done():
+                    # auto-limpieza: cuando la operación suelta su estado, resetea el flag y avisa
+                    import time as _ts
+                    while _op_busy():
+                        _ts.sleep(2)
+                    _STOP_EVENT.clear()
+                    _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
+                                                 "text": "✅ Operación detenida — bot libre"})
+                threading.Thread(target=_ack_done, daemon=True).start()
         elif cmd.startswith("/channel"):
             sub = (cmd[len("/channel"):].replace("_", "-").strip("-")) or "status"
             confirm = sub.endswith("-confirm")
@@ -1056,7 +1081,8 @@ def _ia_batch_async(cfg: Config, chat_id: int | None, scheduled: bool = False, s
         conn = database.connect(cfg)
         try:
             done = run_ia_batch(conn, cfg, profile_description(cfg),
-                                progress=(_mk_progress_cb(cfg, chat_id) if chat_id else None))
+                                progress=(_mk_progress_cb(cfg, chat_id) if chat_id else None),
+                                stop_event=_STOP_EVENT)
         finally:
             conn.close()
         dur = int(time.time() - t0)
@@ -1307,6 +1333,7 @@ def _register_commands(cfg: Config) -> None:
     commands = [
         {"command": "search", "description": "Gatilla una búsqueda ahora"},
         {"command": "enrich", "description": "Corre el batch IA ahora (rellena datos faltantes)"},
+        {"command": "stop", "description": "Detiene la operación en curso (corte limpio)"},
         {"command": "report", "description": "Análisis de mercado completo con PDF"},
         {"command": "latest", "description": "Últimas ofertas registradas"},
         {"command": "stats",  "description": "Cobertura IA y datos del pool"},
@@ -1343,7 +1370,7 @@ def _register_commands(cfg: Config) -> None:
 def _do_sweep(cfg: Config, on_phase=None) -> tuple[list[dict], dict]:
     """Barrido completo + pool refrescado. Retorna (ofertas ≥min_score, stats del scan_log)."""
     with _sweep_lock:
-        cmd_run(cfg, notify=False, on_phase=on_phase)   # barrido SIN mensaje push
+        cmd_run(cfg, notify=False, on_phase=on_phase, stop_event=_STOP_EVENT)   # barrido SIN mensaje push
         conn = database.connect(cfg)
         try:
             offers = [dict(r) for r in conn.execute(
@@ -1472,8 +1499,31 @@ def run_daemon(cfg: Config) -> None:
     except Exception as exc:
         log.warning("init_db al arranque falló (se reintenta en el barrido): %s", exc)
 
-    # ancla inicial con el pool existente — SIN barrido de fuentes al arrancar
-    _refresh_anchor(cfg, state)
+    # mensaje de arranque (fancy, con resumen del pool) — SIN lista de jobs;
+    # la ancla se crea solo tras un barrido (search agendado o manual)
+    try:
+        _c = database.connect(cfg)
+        try:
+            _q = lambda s: _c.execute(s).fetchone()[0]
+            n_act = _q("SELECT COUNT(*) FROM ofertas WHERE active=1")
+            n_ia = _q("SELECT COUNT(*) FROM ofertas WHERE active=1 AND ia_model!=''")
+            n_canal = _q("SELECT COUNT(*) FROM channel_posts")
+        finally:
+            _c.close()
+        pct = int(100 * n_ia / n_act) if n_act else 0
+        bar = "█" * (pct // 10) + "░" * (10 - pct // 10)
+        _tg_api(cfg, "sendMessage", {
+            "chat_id": cfg.telegram.chat_id, "parse_mode": "HTML",
+            "text": (f"🚀 <b>JobHunt iniciado</b> · {datetime.now(timezone.utc).strftime('%H:%M UTC')}\n"
+                     f"━━━━━━━━━━━━━━━━━━\n"
+                     f"📁 Pool: <b>{n_act}</b> activas · 🧠 IA: <b>{pct}%</b> {bar}\n"
+                     f"📢 Canal: {n_canal} posts históricos\n"
+                     f"⏰ Barridos agendados: {cfg.daemon.sweep_hours_utc} UTC\n"
+                     f"🧠 Batch nocturno: {cfg.ia.run_hours_utc} UTC\n"
+                     f"━━━━━━━━━━━━━━━━━━\n"
+                     f"✅ Comandos listos — <code>/help</code> para el menú")})
+    except Exception as exc:
+        log.warning("mensaje de arranque falló (no tumba daemon): %s", exc)
 
     offset = 0
     while True:
