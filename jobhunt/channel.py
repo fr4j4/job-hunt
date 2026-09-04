@@ -147,11 +147,13 @@ def _fuente(row: dict) -> str:
     return _ABBR_FUENTE.get(src, src[:10] or "?")
 
 
-def render_offer_post(row: dict) -> str:
-    """Post individual de oferta al canal (spec v3 §5-A). Sin botones; líneas sin dato se omiten."""
+def render_offer_post(row: dict) -> tuple[str, dict | None]:
+    """Post individual de oferta al canal (spec v3 §5-A) con botón URL.
+
+    Retorna (texto, reply_markup | None). Líneas sin dato se omiten.
+    """
     from .notify import esc
     from .scoring import _salary_to_clp_monthly
-    esc_ = esc  # reutilizado por todos los renders del módulo (import local, sin ciclo)
 
     lines: list[str] = []
     ms = row.get("market_score") or 0
@@ -173,6 +175,9 @@ def render_offer_post(row: dict) -> str:
     techs = [t.strip() for t in (row.get("techs") or "").split(";") if t.strip()][:6]
     if techs:
         lines.append("🧰 " + esc(" · ".join(techs)))
+    opinion = (row.get("ai_opinion") or "").strip()
+    if opinion:
+        lines.append(f"💬 {esc(opinion[:200])}")
     tail: list[str] = []
     ing = (row.get("ai_idiomas") or "").strip()
     if ing and "inglés" in ing.lower():
@@ -184,10 +189,12 @@ def render_offer_post(row: dict) -> str:
     tail.append(f"🌐 {_fuente(row)}")
     if tail:
         lines.append(" · ".join(tail))
+    text = "\n".join(lines)
     url = (row.get("url") or "").strip()
     if url:
-        lines.append(f"🔗 {esc(url)}")
-    return "\n".join(lines)
+        kb = {"inline_keyboard": [[{"text": "🔗 Ver y postular", "url": url}]]}
+        return text, kb
+    return text, None
 
 
 # ---------------- publish ----------------
@@ -251,17 +258,22 @@ def publish_channel(cfg: Config, conn, tg_api, dry_run: bool = False) -> dict:
         posteadas.append(r)
 
     if dry_run:
-        stats["dry_run_preview"] = [render_offer_post(r) for r in posteadas]
+        stats["dry_run_preview"] = [{"text": t, "kb": kb} for t, kb in
+                                    (render_offer_post(r) for r in posteadas)]
         return stats
 
     now = datetime.now(timezone.utc).isoformat()
     for r in posteadas:
         try:
-            resp = tg_api("sendMessage", {
+            text, kb = render_offer_post(r)
+            payload: dict = {
                 "chat_id": int(cfg.channel.chat_id),
-                "text": render_offer_post(r),
+                "text": text,
                 "parse_mode": "HTML",
-                "disable_web_page_preview": True})
+                "disable_web_page_preview": True}
+            if kb:
+                payload["reply_markup"] = kb
+            resp = tg_api("sendMessage", payload)
             if resp.get("ok"):
                 conn.execute("UPDATE ofertas SET notified_channel_at=? WHERE group_id=?",
                              (now, r["group_id"]))
@@ -343,6 +355,9 @@ def _top_row_line(r: dict) -> str:
         s += f"\n   🏢 {esc(r['company'][:35])}" + (f" · 📍 {esc(r['modality'][:20])}" if r.get("modality") else "")
     if sal:
         s += f"\n   💰 ${sal:,}".replace(",", ".")
+    op = (r.get("ai_opinion") or "").strip()
+    if op:
+        s += f"\n   💡 {esc(op[:140])}"
     if r.get("url"):
         s += f"\n   🔗 {esc(r['url'])}"
     return s

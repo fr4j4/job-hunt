@@ -238,7 +238,8 @@ def test_publish_dry_run_no_api(conn_mem):
     stats = publish_channel(cfg, conn_mem, spy, dry_run=True)
     assert called == []
     assert len(stats["dry_run_preview"]) == 1
-    assert "🎯" in stats["dry_run_preview"][0]
+    assert "🎯" in stats["dry_run_preview"][0]["text"]
+    assert stats["dry_run_preview"][0]["kb"]["inline_keyboard"][0][0]["url"] == "https://x.cl/1"
 
 
 def test_gate_dev_bloquea_cobol(conn_mem):
@@ -251,7 +252,7 @@ def test_gate_dev_bloquea_cobol(conn_mem):
     from jobhunt.channel import publish_channel
     stats = publish_channel(cfg, conn_mem, lambda *a: {"ok": True, "result": {"message_id": 1}},
                             dry_run=True)
-    previews = "\n".join(stats["dry_run_preview"])
+    previews = "\n".join(p["text"] for p in stats["dry_run_preview"])
     assert "COBOL" in previews
     assert "Guardia" not in previews
 
@@ -262,12 +263,24 @@ def test_render_omite_lineas_sin_dato():
     r = {"market_score": 70, "title": "Dev <b>Python</b>", "company": "", "modality": "",
          "location": "", "salary": "", "techs": "", "ai_idiomas": "", "url": "",
          "first_seen": "2026-09-02", "date_posted": "2026-09-02", "source": "test:x"}
-    post = render_offer_post(r)
+    post, kb = render_offer_post(r)
     assert "&lt;b&gt;" in post          # HTML escapado
     assert "💰" not in post             # sin salario → línea omitida
     assert "🧰" not in post
-    assert "🔗" not in post             # sin url
+    assert kb is None                   # sin url → sin botón
     assert "📅 2d" in post
+
+
+def test_render_con_boton_url():
+    r = {"market_score": 86, "title": "Senior Java Dev", "company": "23people",
+         "modality": "remoto", "salary": "CLP 3050000", "techs": "Java;Spring",
+         "ai_opinion": "Salario sobre el P75 del mercado.", "url": "https://x.cl/1",
+         "first_seen": "2026-09-02", "date_posted": "2026-09-02", "source": "test:x"}
+    post, kb = render_offer_post(r)
+    assert "🔗" not in post             # el link va en el botón, no en el texto
+    assert kb["inline_keyboard"][0][0]["text"] == "🔗 Ver y postular"
+    assert kb["inline_keyboard"][0][0]["url"] == "https://x.cl/1"
+    assert "💬 Salario sobre el P75" in post
 
 
 # ---------- 7. rescore dual-write + aislamiento ----------

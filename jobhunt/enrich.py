@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import re
+import sqlite3
 import time
 import urllib.request
 from html import unescape as _u
@@ -180,21 +181,40 @@ IA_SCHEMA = ('{"modalidad": "R"|"H"|"P"|"?", "salario_clp_mensual": numero|null,
              '"red_flags": ["..."], "green_flags": ["..."], "benefits": ["..."], '
              '"idiomas": [{"idioma": "inglés|alemán|francés|portugués|chino|japonés|italiano|otro", "nivel": "básico|intermedio|avanzado|nativo|fluido", "excluyente": true|false}], '
              '"rol_categoria": "Full Stack"|"Backend"|"Frontend"|"Data"|"Mobile"|"AI/ML"|"Tech Lead"|"DevOps/Cloud"|"QA"|"Software"|"Seguridad"|"Ingeniería no-software"|"Analista/Empresa"|"Profesor/Formación"|"Soporte/TI"|"No-tech"|"Otro", '
-             '"resumen": "max 120 chars", "fit_reason": "max 140 chars por qué conviene o no al perfil"}')
+             '"resumen": "max 120 chars", "fit_reason": "max 140 chars por qué conviene o no al perfil", '
+             '"opinion": "max 160 chars — comentario editorial sobre la oferta: contexto de mercado, señal notable (empresa conocida, staffing, nicho escaso), comparación con la mediana salarial o red flag relevante. PROHIBIDO consejos al candidato (nada de destaca/pregunta/no apliques). No repitas el resumen"}')
 
 
 def ia_extract(cfg: Config, job: dict, profile_desc: str) -> dict | None:
     """Llama al modelo IA con JSON forzado. Retorna dict o None."""
     if not cfg.ia.enabled or not cfg.ia.api_key:
         return None
+    # contexto de mercado para el comentario editorial (espec v3: opinion de canal)
+    try:
+        conn = sqlite3.connect(cfg.db_path)
+        med = conn.execute("""SELECT AVG(CAST(REPLACE(REPLACE(salary,'CLP ',''),' ','') AS INTEGER))
+            FROM ofertas WHERE salary LIKE 'CLP %'""").fetchone()[0]
+        n_rem = conn.execute("SELECT COUNT(*) FROM ofertas WHERE active=1 AND modality='remoto'").fetchone()[0]
+        n_tot = conn.execute("SELECT COUNT(*) FROM ofertas WHERE active=1").fetchone()[0]
+        conn.close()
+        mercado = (f"mediana salarial dev ${int(med or 2300000):,} · solo ~8% de las ofertas declara "
+                   f"salario · remoto total: {n_rem} de {n_tot} activas · P75: $2.7M · "
+                   f"inglés requerido suele pagar $3M+")
+    except Exception:
+        mercado = "mediana salarial dev $2.300.000 · P75: $2.7M"
     prompt = (f'Perfil del candidato: {profile_desc}\n\n'
+              f'Contexto de mercado (para el campo opinion): {mercado}\n\n'
               f'Oferta:\nTítulo: {job.get("title","")}\nEmpresa: {job.get("company","")}\n'
               f'Ubicación: {job.get("location","")}\nDescripción: {(job.get("description") or "")[:1400]}\n\n'
               f'Responde SOLO JSON: {IA_SCHEMA}')
     body = {"model": cfg.ia.model,
             "messages": [{"role": "system",
                           "content": "Eres un extractor de datos de ofertas de empleo chilenas. "
-                                     "Respondes SOLO JSON válido. Dato ausente → null. No inventes."},
+                                     "Respondes SOLO JSON válido. Dato ausente → null. No inventes. "
+                                     "El campo 'opinion' es un comentario editorial sobre la oferta "
+                                     "(contexto de mercado, señal notable, comparación salarial) — "
+                                     "NUNCA consejos al candidato (prohibido 'destaca', 'pregunta', "
+                                     "'no apliques', 'practica')."},
                          {"role": "user", "content": prompt}],
             "temperature": 0, "format": "json"}
     for attempt in range(cfg.ia.retries + 1):
@@ -369,6 +389,10 @@ def run_ia_batch(conn, cfg: Config, profile_desc: str, max_n: int | None = None,
                 sets.append(f"ai_{field}=?")
                 params.append(str(parsed[field])[:300])
                 ia_fields.append(field)
+        if parsed.get("opinion"):
+            sets.append("ai_opinion=?")
+            params.append(str(parsed["opinion"])[:200])
+            ia_fields.append("opinion")
         # categoría de rol según IA (complementa el regex de market.py)
         if parsed.get("rol_categoria"):
             sets.append("rol_categoria=?")
