@@ -17,9 +17,36 @@ from .logging_setup import get_logger
 
 log = get_logger(__name__)
 from . import db as database
-from .scoring import compute_score
+from .scoring import compute_score, compute_market_score
 from .dedup import find_duplicate
 from .notify import send_digest
+import json
+import urllib.error
+import urllib.request
+
+
+def _tg_api_for_channel(cfg):
+    """Adapter: publish_channel espera tg_api(method, payload) → dict con .get('ok').
+
+    No lanza excepciones (contrato publish_channel: los fallos del canal no tumban
+    el barrido) — retorna {"ok": False, "error": ...} en fallos HTTP.
+    """
+    def call(method: str, payload: dict) -> dict:
+        req = urllib.request.Request(
+            f"https://api.telegram.org/bot{cfg.telegram.bot_token}/{method}",
+            data=json.dumps(payload).encode(),
+            headers={"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                return json.loads(resp.read().decode())
+        except urllib.error.HTTPError as exc:
+            detail = ""
+            try:
+                detail = exc.read().decode()[:200]
+            except Exception:
+                pass
+            return {"ok": False, "error": f"{exc} {detail}".strip()}
+    return call
 
 
 def _now() -> str:
@@ -155,7 +182,18 @@ def cmd_run(cfg, notify: bool = True, on_phase=None) -> None:
 
         # re-score de las que cambiaron (descripción nueva)
         phase("rescore pool")
-        database.rescore_all(conn, compute_score, version_id, cfg)
+        database.rescore_all(conn, compute_score, version_id, cfg,
+                              market_score_fn=compute_market_score)
+
+        # canal: publicar ofertas nuevas que pasan el gate (ÚNICO punto de publish)
+        if cfg.channel.enabled and cfg.channel.chat_id:
+            phase("canal: publicando nuevas")
+            try:
+                from .channel import publish_channel
+                ch_stats = publish_channel(cfg, conn, _tg_api_for_channel(cfg))
+                log.info("canal: %s", ch_stats)
+            except Exception as e:
+                log.warning("canal falló (barrido continúa): %s", e)
 
         # digest: solo >= ALERT_MIN_SCORE
         threshold = cfg.alerts.min_score
@@ -191,7 +229,8 @@ def cmd_rescore(cfg) -> None:
     database.init_db(conn)
     version_id = "env-" + datetime.now(timezone.utc).strftime("%Y%m%d%H%M")
     database.register_criteria_version(conn, version_id, cfg)
-    updated = database.rescore_all(conn, compute_score, version_id, cfg)
+    updated = database.rescore_all(conn, compute_score, version_id, cfg,
+                              market_score_fn=compute_market_score)
     print(f"rescore completado: {updated} ofertas → versión {version_id} "
           f"({database.needs_rescore(conn, version_id)} pendientes)")
 
@@ -229,11 +268,12 @@ def cmd_ia(conn_unused=None) -> None:
     done = run_ia_batch(conn, cfg, profile_description(cfg))
     print(f"IA enriqueció: {done} ofertas")
     # re-score con los datos nuevos de IA (salary/modality/seniority cambian el score)
-    from .scoring import compute_score
+    from .scoring import compute_score, compute_market_score
     version_id = database.current_version(conn) or (
         "env-" + datetime.now(timezone.utc).strftime("%Y%m%d%H%M"))
     database.register_criteria_version(conn, version_id, cfg)
-    rescored = database.rescore_all(conn, compute_score, version_id, cfg)
+    rescored = database.rescore_all(conn, compute_score, version_id, cfg,
+                              market_score_fn=compute_market_score)
     print(f"rescore: {rescored} ofertas → versión {version_id}")
 
 
@@ -263,6 +303,23 @@ def main():
         cmd_enrich(cfg)
     elif cmd == "market":
         cmd_market(cfg)
+    elif cmd == "channel":
+        # python -m jobhunt channel [--dry-run] [--digest]
+        from .db import connect, init_db
+        from .channel import (publish_channel, publish_daily_digest,
+                              publish_weekly_digests, publish_tendencias)
+        conn = connect(cfg)
+        init_db(conn)
+        dry = "--dry-run" in sys.argv
+        only_digest = "--digest" in sys.argv
+        if not only_digest:
+            stats = publish_channel(cfg, conn, _tg_api_for_channel(cfg), dry_run=dry)
+            print(f"canal: {stats}")
+        if "--digest" in sys.argv or dry:
+            publish_daily_digest(cfg, conn, _tg_api_for_channel(cfg), dry_run=dry)
+            publish_weekly_digests(cfg, conn, _tg_api_for_channel(cfg), dry_run=dry)
+            publish_tendencias(cfg, conn, _tg_api_for_channel(cfg), dry_run=dry)
+        conn.close()
     elif cmd == "ia":
         conn = database.connect(cfg)
         database.init_db(conn)

@@ -1,0 +1,515 @@
+"""Modo canal (broadcast): fechas canónicas, gates, publish y digests.
+
+Decisiones de producto implementadas (spec-canal-v3-final.md):
+- Republicación = evento nuevo (dedup SOLO por group_id vía notified_channel_at)
+- Ventana de antigüedad: date_canonical = min(date_posted, first_seen), 14d default
+- Canal = broadcast puro: posts individuales + digests, sin paginación
+"""
+from __future__ import annotations
+
+import hashlib
+import re
+import time
+from collections import Counter
+from datetime import date, datetime, timedelta, timezone
+
+from .config import Config
+from .logging_setup import get_logger
+
+log = get_logger(__name__)
+
+# ---------------- fechas ----------------
+
+_MESES = {"enero": 1, "febrero": 2, "marzo": 3, "abril": 4, "mayo": 5, "junio": 6,
+          "julio": 7, "agosto": 8, "septiembre": 9, "octubre": 10, "noviembre": 11,
+          "diciembre": 12, "ene": 1, "feb": 2, "mar": 3, "abr": 4, "may": 5, "jun": 6,
+          "jul": 7, "ago": 8, "sep": 9, "oct": 10, "nov": 11, "dic": 12}
+
+
+def normalize_date(raw: str | int | float | None, now: datetime | None = None) -> str:
+    """Convierte los formatos de fecha de las 8 fuentes a YYYY-MM-DD ('' si no parseable).
+
+    LinkedIn: ISO datetime · Laborum: DD-MM-YYYY · Jooble: 'Publicado el 21 de Jul, 2026'
+    Computrabajo: 'Hace X horas/días' (relativo) · AIRA: publication_days (int) · epoch.
+    """
+    if raw is None:
+        return ""
+    now = now or datetime.now(timezone.utc)
+    if isinstance(raw, (int, float)):
+        # publication_days (días desde publicación) o epoch
+        n = int(raw)
+        if 0 <= n < 400:            # publication_days
+            return (now - timedelta(days=n)).date().isoformat()
+        if n > 10**12:              # epoch ms
+            return datetime.fromtimestamp(n / 1000, timezone.utc).date().isoformat()
+        if n > 10**9:               # epoch s
+            return datetime.fromtimestamp(n, timezone.utc).date().isoformat()
+        return ""
+    s = str(raw).strip()
+    if not s:
+        return ""
+    # ISO completo o YYYY-MM-DD
+    m = re.match(r"(\d{4})-(\d{2})-(\d{2})", s)
+    if m:
+        return s[:10]
+    # DD-MM-YYYY (Laborum)
+    m = re.match(r"(\d{1,2})-(\d{1,2})-(\d{4})", s)
+    if m:
+        d, mo, y = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        try:
+            return date(y, mo, d).isoformat()
+        except ValueError:
+            return ""
+    # 'Publicado el 21 de Jul, 2026' (Jooble)
+    m = re.search(r"(\d{1,2})\s+de\s+([A-Za-zÁÉÍÓÚáéíóúñ]+),?\s+(\d{4})", s, re.I)
+    if m:
+        mes = _MESES.get(m.group(2).lower()[:3])
+        if mes:
+            try:
+                return date(int(m.group(3)), mes, int(m.group(1))).isoformat()
+            except ValueError:
+                return ""
+    # 'Hace X horas/días' / 'Hoy' / 'Ayer' (Computrabajo)
+    m = re.search(r"[Hh]ace\s+([\d\s]+)\s*(minuto|hora|día|dia|semana)", s)
+    if m:
+        n = int(re.sub(r"\D", "", m.group(1)) or 1)
+        unit = m.group(2).lower()
+        delta = {"minuto": 0, "hora": 0, "día": n, "dia": n, "semana": n * 7}[unit]
+        return (now - timedelta(days=delta)).date().isoformat()
+    if re.search(r"\bhoy\b", s, re.I):
+        return now.date().isoformat()
+    if re.search(r"\bayer\b", s, re.I):
+        return (now - timedelta(days=1)).date().isoformat()
+    # epoch string
+    if s.isdigit():
+        return normalize_date(int(s), now)
+    return ""
+
+
+def canonical_date(row: dict, now: datetime | None = None) -> str:
+    """Fecha canónica de la oferta: min(date_posted, first_seen) con clamp.
+
+    - sin date_posted → first_seen (cota honesta: Indeed filtro 168h)
+    - date_posted más fresca que first_seen → clamp a first_seen (anti repost-fresh)
+    """
+    now = now or datetime.now(timezone.utc)
+    d = normalize_date(row.get("date_posted") or "", now)
+    fs = str(row.get("first_seen") or "")[:10]
+    if not re.match(r"\d{4}-\d{2}-\d{2}", fs):
+        return d
+    if not d:
+        return fs
+    return d if d <= fs else fs
+
+
+def age_days(row: dict, now: datetime | None = None) -> int:
+    """Días de antigüedad según date_canonical. Negativa → 0."""
+    now = now or datetime.now(timezone.utc)
+    c = canonical_date(row, now)
+    if not re.match(r"\d{4}-\d{2}-\d{2}", c):
+        return 0
+    try:
+        dd = (datetime.now(timezone.utc).date() if now is None
+              else now.date()) - date.fromisoformat(c)
+        return max(0, dd.days)
+    except ValueError:
+        return 0
+
+
+# ---------------- gate dev ----------------
+
+_DEV_CATEGORIES = {"Full Stack", "Backend", "Frontend", "Data", "Mobile", "AI/ML",
+                   "Tech Lead", "DevOps/Cloud", "QA", "Software", "Seguridad"}
+
+
+def is_dev(rol_categoria: str | None, title: str, cfg: Config) -> bool:
+    """Gate dev: rol_categoria IA primero; fallback regex nontech_titles (H4)."""
+    rc = (rol_categoria or "").strip()
+    if rc:
+        return rc in _DEV_CATEGORIES
+    t = (title or "").lower()
+    if re.search(cfg.relevance.nontech_titles, t, re.I):
+        return False
+    # sin rol ni match negativo → conservador pero no excluyente con títulos tech obvios
+    return bool(re.search(r"dev|desarroll|software|backend|frontend|full.?stack|data|"
+                          r"python|java|qa|devops|sistemas|informátic|informatic", t, re.I))
+
+
+# ---------------- render de posts ----------------
+
+_ABBR_FUENTE = {"linkedin": "LinkedIn", "computrabajo": "CB", "indeed": "Indeed",
+                "glassdoor": "Glassdoor", "laborum": "Laborum", "jooble": "Jooble",
+                "accenture": "Accenture", "aira": "AIRA"}
+
+
+def _fuente(row: dict) -> str:
+    src = (row.get("source") or "").split(":")[0].lower()
+    return _ABBR_FUENTE.get(src, src[:10] or "?")
+
+
+def render_offer_post(row: dict) -> str:
+    """Post individual de oferta al canal (spec v3 §5-A). Sin botones; líneas sin dato se omiten."""
+    from .notify import esc
+    from .scoring import _salary_to_clp_monthly
+    esc_ = esc  # reutilizado por todos los renders del módulo (import local, sin ciclo)
+
+    lines: list[str] = []
+    ms = row.get("market_score") or 0
+    lines.append(f"🎯 [<b>{ms}</b>] {esc((row.get('title') or 'Sin título')[:110])}")
+    meta: list[str] = []
+    if row.get("company"):
+        meta.append(f"🏢 {esc(row['company'][:40])}")
+    mod = (row.get("modality") or "").strip()
+    loc = esc((row.get("location") or "").strip()[:40])
+    if mod:
+        meta.append(f"📍 {esc(mod)}" + (f" · {loc}" if loc else ""))
+    elif loc:
+        meta.append(f"📍 {loc}")
+    if meta:
+        lines.append(" · ".join(meta))
+    sal = _salary_to_clp_monthly(row.get("salary") or "", row.get("description") or "")
+    if sal:
+        lines.append(f"💰 ${sal:,}".replace(",", "."))
+    techs = [t.strip() for t in (row.get("techs") or "").split(";") if t.strip()][:6]
+    if techs:
+        lines.append("🧰 " + esc(" · ".join(techs)))
+    tail: list[str] = []
+    ing = (row.get("ai_idiomas") or "").strip()
+    if ing and "inglés" in ing.lower():
+        excl = '"excluyente": true' in ing
+        tail.append("🗣 EN!" if excl else "🗣 EN")
+    edad = age_days(row)
+    if edad or row.get("date_canonical"):
+        tail.append(f"📅 {edad}d" if edad < 14 else "📅 >2 sem")
+    tail.append(f"🌐 {_fuente(row)}")
+    if tail:
+        lines.append(" · ".join(tail))
+    url = (row.get("url") or "").strip()
+    if url:
+        lines.append(f"🔗 {esc(url)}")
+    return "\n".join(lines)
+
+
+# ---------------- publish ----------------
+
+_GATE_SQL = """SELECT * FROM ofertas
+WHERE active=1 AND market_score >= :min_score
+  AND notified_channel_at = ''
+  AND date_canonical >= date('now', '-' || :max_age || ' days')
+  ORDER BY market_score DESC, first_seen DESC"""
+
+
+def select_channel_offers(conn, cfg: Config) -> list[dict]:
+    """Candidatas al canal (market gate + edad + dev + no notificadas)."""
+    rows = conn.execute(_GATE_SQL, {
+        "min_score": cfg.channel.min_score,
+        "max_age": cfg.channel.max_age_days,
+    }).fetchall()
+    out = []
+    for r in rows:
+        d = dict(r)
+        if cfg.channel.require_dev and not is_dev(d.get("rol_categoria"), d.get("title") or "", cfg):
+            continue
+        if cfg.channel.max_first_seen_hours:
+            fs = str(d.get("first_seen") or "")
+            try:
+                dt = datetime.fromisoformat(fs.replace("Z", "+00:00"))
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                hours = (datetime.now(timezone.utc) - dt).total_seconds() / 3600
+                if hours > cfg.channel.max_first_seen_hours:
+                    continue
+            except ValueError:
+                pass
+        out.append(d)
+    return out[:cfg.channel.max_posts]
+
+
+def publish_channel(cfg: Config, conn, tg_api, dry_run: bool = False) -> dict:
+    """Publica al canal las candidatas (gates spec v3 §4). Retorna stats.
+
+    tg_api: callable (method, payload) → dict (el bot inyecta _tg_api).
+    notified_channel_at se setea SOLO si Telegram aceptó (ok=true).
+    """
+    stats: dict = {"candidates": 0, "posted": 0, "skipped_age": 0, "skipped_score": 0,
+                   "skipped_notified": 0, "skipped_dev": 0}
+    if not cfg.channel.enabled or not cfg.channel.chat_id:
+        return stats
+
+    # todas las que cumplen score+notified (sin tope) para stats reales de skips
+    rows = [dict(r) for r in conn.execute(_GATE_SQL, {
+        "min_score": cfg.channel.min_score, "max_age": cfg.channel.max_age_days}).fetchall()]
+    stats["candidates"] = len(rows)
+
+    posteadas = []
+    for r in rows:
+        if cfg.channel.require_dev and not is_dev(r.get("rol_categoria"), r.get("title") or "", cfg):
+            stats["skipped_dev"] += 1
+            continue
+        if len(posteadas) >= cfg.channel.max_posts:
+            break
+        posteadas.append(r)
+
+    if dry_run:
+        stats["dry_run_preview"] = [render_offer_post(r) for r in posteadas]
+        return stats
+
+    now = datetime.now(timezone.utc).isoformat()
+    for r in posteadas:
+        try:
+            resp = tg_api("sendMessage", {
+                "chat_id": int(cfg.channel.chat_id),
+                "text": render_offer_post(r),
+                "parse_mode": "HTML",
+                "disable_web_page_preview": True})
+            if resp.get("ok"):
+                conn.execute("UPDATE ofertas SET notified_channel_at=? WHERE group_id=?",
+                             (now, r["group_id"]))
+                # bucket = group_id para kind='offer' (el índice único (kind,bucket) exige
+                # unicidad; para digests el bucket es la fecha/semana/mes)
+                conn.execute("""INSERT INTO channel_posts (message_id, group_id, kind, bucket,
+                    body_hash, posted_at) VALUES (?, ?, 'offer', ?, '', ?)""",
+                             (resp["result"]["message_id"], r["group_id"], r["group_id"], now))
+                stats["posted"] += 1
+                import time
+                time.sleep(cfg.channel.sleep_s)
+            else:
+                log.warning("canal: sendMessage sin ok → %s", str(resp)[:120])
+        except Exception as e:
+            log.warning("canal: post falló (%.40s): %s", r.get("title") or "", e)
+    conn.commit()
+    log.info("canal: %d/%d publicadas (dev-skip %d, sobrantes por tope %d)",
+             stats["posted"], stats["candidates"], stats["skipped_dev"],
+             stats["candidates"] - stats["skipped_dev"] - stats["posted"])
+    return stats
+
+
+# ---------------- digests (B/C/D/E — spec v3 §5) ----------------
+
+def _bucket(kind: str, now: datetime) -> str:
+    if kind == "daily":
+        return now.date().isoformat()
+    if kind in ("weekly-remoto", "weekly-salario"):
+        iso = now.date().isocalendar()
+        return f"{iso[0]}-W{iso[1]:02d}"
+    if kind == "tendencias":
+        return now.date().strftime("%Y-%m")
+    return now.date().isoformat()
+
+
+def _send_digest(cfg: Config, tg_api, kind: str, text: str, conn, now: datetime) -> bool:
+    """Envía un digest con idempotencia (kind, bucket) + guard body_hash. True si envió."""
+    bucket = _bucket(kind, now)
+    body_hash = hashlib.sha1(text.encode()).hexdigest()
+    try:
+        conn.execute("INSERT INTO channel_posts (kind, bucket, body_hash, posted_at) VALUES (?,?,?,?)",
+                     (kind, bucket, body_hash, now.isoformat()))
+    except Exception:
+        return False  # (kind, bucket) ya existe → doble envío bloqueado
+    prev = conn.execute(
+        "SELECT body_hash FROM channel_posts WHERE kind=? AND bucket<>? ORDER BY id DESC LIMIT 1",
+        (kind, bucket)).fetchone()
+    if prev and prev["body_hash"] == body_hash and cfg.channel.digest_daily:
+        # pool quieto → digest idéntico al anterior → skip (el INSERT de arriba se revierte abajo)
+        conn.rollback()
+        return False
+    if dry_ok := True:
+        pass
+    try:
+        resp = tg_api("sendMessage", {
+            "chat_id": int(cfg.channel.chat_id), "text": text,
+            "parse_mode": "HTML", "disable_web_page_preview": True})
+        if not resp.get("ok"):
+            conn.rollback()
+            return False
+    except Exception as e:
+        log.warning("canal: digest %s falló: %s", kind, e)
+        conn.rollback()
+        return False
+    # actualizar message_id del registro de bucket
+    conn.execute("""UPDATE channel_posts SET message_id=? WHERE kind=? AND bucket=?""",
+                 (resp["result"]["message_id"], kind, bucket))
+    conn.commit()
+    log.info("canal: digest %s enviado (bucket %s)", kind, bucket)
+    return True
+
+
+def _top_row_line(r: dict) -> str:
+    from .notify import esc
+    from .scoring import _salary_to_clp_monthly
+    sal = _salary_to_clp_monthly(r.get("salary") or "", r.get("description") or "")
+    s = f"🎯 [<b>{r.get('market_score') or 0}</b>] {esc((r.get('title') or '')[:80])}"
+    if r.get("company"):
+        s += f"\n   🏢 {esc(r['company'][:35])}" + (f" · 📍 {esc(r['modality'][:20])}" if r.get("modality") else "")
+    if sal:
+        s += f"\n   💰 ${sal:,}".replace(",", ".")
+    if r.get("url"):
+        s += f"\n   🔗 {esc(r['url'])}"
+    return s
+
+
+def publish_daily_digest(cfg: Config, conn, tg_api, dry_run: bool = False) -> bool:
+    """Digest B: top del día (umbral relajado digest_min_score, excluye posteadas 24h)."""
+    now = datetime.now(timezone.utc)
+    rows = [dict(r) for r in conn.execute(_GATE_SQL.replace(":min_score", ":min_score").replace(
+        ":max_age", ":max_age"), {"min_score": cfg.channel.digest_min_score,
+                                  "max_age": cfg.channel.max_age_days}).fetchall()]
+    # excluir las publicadas como individuales en las últimas 24h (doble ángulo)
+    out, seen = [], set()
+    for r in rows:
+        if r["group_id"] in seen:
+            continue
+        seen.add(r["group_id"])
+        if cfg.channel.require_dev and not is_dev(r.get("rol_categoria"), r.get("title") or "", cfg):
+            continue
+        out.append(r)
+        if len(out) >= cfg.channel.digest_max:
+            break
+    if not out:
+        log.info("canal: digest diario sin candidatas — silencio honesto")
+        return False
+    header = f"📊 <b>Top del día</b> · {len(out)} ofertas · {now.strftime('%d %b')}"
+    text = header + "\n\n" + "\n\n".join(_top_row_line(r) for r in out)
+    if dry_run:
+        log.info("canal: dry-run digest diario:\n%s", text[:500])
+        return False
+    return _send_digest(cfg, tg_api, "daily", text, conn, now)
+
+
+def publish_weekly_digests(cfg: Config, conn, tg_api, dry_run: bool = False) -> bool:
+    """Digests C (remoto por seniority) y D (ranking salarial) — mismo tick, 2 mensajes."""
+    from .notify import esc
+    now = datetime.now(timezone.utc)
+    sent = False
+    # ---- C: remoto por seniority ----
+    rows = [dict(r) for r in conn.execute("""SELECT * FROM ofertas WHERE active=1
+        AND market_score >= :min_score AND date_canonical >= date('now', '-' || :max_age || ' days')
+        AND (modality LIKE '%remot%' OR remote_official LIKE '%TELECOMMUTE%')
+        AND seniority_real != '' AND notified_channel_at = ''
+        ORDER BY market_score DESC, first_seen DESC LIMIT 60""",
+        {"min_score": cfg.channel.min_score - 5, "max_age": cfg.channel.max_age_days}).fetchall()]
+    by_sen: dict[str, list[dict]] = {}
+    featured = set()
+    # variedad: excluir destacados en digests de las últimas 4 semanas
+    try:
+        featured = {r["group_id"] for r in conn.execute("""SELECT group_id FROM channel_posts
+            WHERE kind IN ('daily','weekly-remoto','weekly-salario') AND group_id != ''
+            AND posted_at >= datetime('now', '-28 days')""").fetchall()}
+    except Exception:
+        pass
+    for r in rows:
+        sen = r["seniority_real"]
+        if r["group_id"] in featured or len(by_sen.get(sen, [])) >= 3:
+            continue
+        by_sen.setdefault(sen, []).append(r)
+    sections = []
+    for sen, label in (("junior", "🟢 Junior"), ("semi", "🟡 Semi"),
+                       ("senior", "🟠 Senior"), ("lead", "🔴 Lead")):
+        items = by_sen.get(sen)
+        if not items:
+            continue
+        body = "\n\n".join(_top_row_line(r) for r in items)
+        sections.append(f"{label}\n{body}")
+    if sections:
+        text = "🌍 <b>Mejor remoto de la semana</b> · por seniority\n\n" + "\n\n".join(sections)
+        if dry_run:
+            log.info("canal: dry-run digest semanal remoto:\n%s", text[:400])
+        else:
+            sent = _send_digest(cfg, tg_api, "weekly-remoto", text, conn, now) or sent
+    # ---- D: ranking salarial ----
+    from .scoring import _salary_to_clp_monthly
+    sal_rows = []
+    for r in rows:
+        sal = _salary_to_clp_monthly(r.get("salary") or "", r.get("description") or "")
+        if sal:
+            sal_rows.append((sal, r))
+    sal_rows.sort(key=lambda x: -x[0])
+    if sal_rows:
+        lines = []
+        for i, (sal, r) in enumerate(sal_rows[:5], 1):
+            lines.append(f"{i}. ${sal:,}".replace(",", ".") +
+                         f" — {esc(r['title'][:60])} ({esc((r.get('company') or '?')[:25])})")
+        text = "💰 <b>Top salarios de la semana</b>\n" + "\n".join(lines)
+        if dry_run:
+            log.info("canal: dry-run ranking salarial:\n%s", text[:400])
+        else:
+            sent = _send_digest(cfg, tg_api, "weekly-salario", text, conn, now) or sent
+    return sent
+
+
+def publish_tendencias(cfg: Config, conn, tg_api, dry_run: bool = False) -> bool:
+    """Digest E: tendencias mensuales (SQL puro; IA opcional con fallback)."""
+    from .notify import esc
+    now = datetime.now(timezone.utc)
+    rows = [dict(r) for r in conn.execute("""SELECT title, company, techs, seniority_real,
+        rol_categoria, salary FROM ofertas
+        WHERE active=1 AND date_canonical >= date('now', '-30 days') LIMIT 1500""").fetchall()]
+    if not rows:
+        return False
+    from collections import Counter
+    comp = Counter((r.get("company") or "").strip() for r in rows
+                   if r.get("company") and not re.search(r"importante|confidencial", r["company"], re.I))
+    top_emp = [f"{c} ({n})" for c, n in comp.most_common(5) if n >= 2]
+    def techs_pct(subset):
+        c = Counter()
+        for r in subset:
+            for t in (r.get("techs") or "").split(";"):
+                t = t.strip()
+                if t:
+                    c[t] += 1
+        tot = sum(c.values()) or 1
+        return " · ".join(f"{t} {100*n//tot}%" for t, n in c.most_common(5))
+    data = Counter(r.get("rol_categoria") or "" for r in rows)
+    pct_dev = 100 * sum(v for k, v in data.items() if k in _DEV_CATEGORIES) // max(1, len(rows))
+    pct_sal = 100 * sum(1 for r in rows if r.get("salary")) // max(1, len(rows))
+    lines = [f"📈 <b>Mercado tech · últimos 30 días</b>"]
+    if top_emp:
+        lines.append("🏢 Más activas: " + esc(" · ".join(top_emp[:4])))
+    for sen in ("Data", "Senior", "Junior"):
+        sub = [r for r in rows if (sen.lower() in (r.get("seniority_real") or "") or
+                                   (sen == "Data" and (r.get("rol_categoria") or "") == "Data"))]
+        tp = techs_pct(sub)
+        if tp:
+            lines.append(f"🧰 {sen}: {esc(tp)}")
+    lines.append(f"✅ {pct_dev}% del pool es dev · {pct_sal}% declara salario")
+    text = "\n".join(lines)
+    # IA opcional: 2-3 bullets de interpretación (fallback: bloque numérico igual)
+    try:
+        from .market import _ia_call
+        out = _ia_call(cfg, "En 2 bullets de máx 15 palabras, interpreta estos datos del mercado "
+                             "dev chileno (sin inventar cifras):\n" + text, temperature=0.3)
+        if out and isinstance(out, dict) and out.get("bullets"):
+            text += "\n\n" + "\n".join(f"• {esc(str(b)[:90])}" for b in out["bullets"][:2])
+    except Exception as e:
+        log.info("canal: tendencias sin IA (%s) — fallback determinístico", str(e)[:60])
+    if dry_run:
+        log.info("canal: dry-run tendencias:\n%s", text[:500])
+        return False
+    return _send_digest(cfg, tg_api, "tendencias", text, conn, now)
+
+
+def channel_status(conn, cfg: Config) -> str:
+    """Observabilidad (H10): estado del canal para el comando admin /channel (al GRUPO)."""
+    from .notify import esc
+    from collections import Counter as _C
+    ch = cfg.channel
+    if not ch.enabled or not ch.chat_id:
+        return "📢 Canal: DESACTIVADO (sin TELEGRAM_CHANNEL_ID)"
+    last = conn.execute("""SELECT posted_at, kind FROM channel_posts ORDER BY id DESC LIMIT 1""").fetchone()
+    cola = conn.execute(_GATE_SQL, {"min_score": ch.min_score, "max_age": ch.max_age_days}).fetchall()
+    dev_ok = [r for r in cola if is_dev(r["rol_categoria"], r["title"], cfg)]
+    dist = Counter()
+    for (ms,) in conn.execute("SELECT market_score FROM ofertas WHERE active=1"):
+        dist[(ms or 0) // 10 * 10] += 1
+    reposts = conn.execute("""SELECT COUNT(*) FROM channel_posts p1 JOIN channel_posts p2
+        ON p1.id < p2.id AND p1.kind='offer' AND p2.kind='offer'
+        AND p1.posted_at >= date('now','-14 days') AND p2.posted_at >= date('now','-14 days')
+        WHERE p1.group_id IN (SELECT o1.group_id FROM ofertas o1 WHERE o1.title = (SELECT o2.title FROM ofertas o2 WHERE o2.group_id = p2.group_id))
+        AND p1.group_id != p2.group_id""").fetchone()[0]
+    lines = [f"📢 <b>Canal</b> — {'ON' if ch.enabled else 'OFF'} · {esc(str(ch.chat_id))}",
+             f"🎯 Umbral {ch.min_score} · ventana {ch.max_age_days}d · dev-gate {'ON' if ch.require_dev else 'OFF'}",
+             f"📤 Última publicación: {esc(last['posted_at'][:16] if last else 'nunca')} ({last['kind'] if last else '-'})",
+             f"⏳ En cola: {len(dev_ok)} dev de {len(cola)} candidatas",
+             f"📈 market_score pool: " + " · ".join(f"{k}s:{v}" for k, v in sorted(dist.items())),
+             f"🔁 Posibles republicaciones (14d): {reposts} (informativo)"]
+    return "\n".join(lines)

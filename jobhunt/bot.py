@@ -586,6 +586,7 @@ def _help_text() -> str:
         "/report status · /report list — avance del reporte · historial de PDFs",
         "/latest — últimas ofertas registradas (default 10, /latest 20 para más)",
         "/stats — cobertura del pool (procesadas IA, datos faltantes)",
+        "/channel — estado del canal (umbral, cola, distribución market score)",
         "/score N — ofertas con score ≥ N (ej: /score 60)",
         "/jobs [filtros] — filtra el pool (combinables):",
         "    remote · hybrid · onsite · salary (con sueldo publicado) ·",
@@ -682,6 +683,14 @@ def _handle_command(cfg: Config, message: dict, state: dict) -> None:
         elif cmd == "/stats":
             _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
                                          "text": _stats_text(cfg)})
+        elif cmd == "/channel":
+            conn = database.connect(cfg)
+            try:
+                from .channel import channel_status
+                _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
+                                             "text": channel_status(conn, cfg)})
+            finally:
+                conn.close()
         elif cmd == "/latest":
             try:
                 n = max(1, min(25, int(arg))) if arg else 10
@@ -803,11 +812,12 @@ def _ia_batch_async(cfg: Config, chat_id: int | None):
         try:
             conn3 = database.connect(cfg)
             try:
-                from .scoring import compute_score
+                from .scoring import compute_score, compute_market_score, compute_market_score
                 version_id = database.current_version(conn3) or (
                     "env-" + datetime.now(timezone.utc).strftime("%Y%m%d%H%M"))
                 database.register_criteria_version(conn3, version_id, cfg)
-                rescored = database.rescore_all(conn3, compute_score, version_id, cfg)
+                rescored = database.rescore_all(conn3, compute_score, version_id, cfg,
+                                            market_score_fn=compute_market_score)
             finally:
                 conn3.close()
         except Exception as e:
@@ -965,6 +975,55 @@ def _ia_sweep_maybe(cfg: Config, state: dict) -> None:
     threading.Thread(target=_ia_batch_async, args=(cfg, None), daemon=True).start()
 
 
+def _tg_api_for_channel(cfg: Config):
+    """Adapter para channel.py: tg_api(method, payload) → dict, sin lanzar excepciones."""
+    def call(method: str, payload: dict) -> dict:
+        try:
+            return _tg_api(cfg, method, payload)
+        except Exception as e:
+            return {"ok": False, "error": str(e)[:200]}
+    return call
+
+
+def _digests_maybe(cfg: Config, state: dict) -> None:
+    """Digests del canal (B diario / C+D semanal / E mensual) — patrón _ia_sweep_maybe."""
+    if not cfg.channel.enabled or not cfg.channel.chat_id:
+        return
+    now = datetime.now(timezone.utc)
+    keys = state.setdefault("digest_log", {})
+    try:
+        conn = database.connect(cfg)
+    except Exception as e:
+        log.warning("digests: conn falló: %s", e)
+        return
+    try:
+        from .channel import (publish_daily_digest, publish_weekly_digests,
+                              publish_tendencias)
+        # diario
+        if cfg.channel.digest_daily and now.hour >= cfg.channel.digest_daily_hour_utc:
+            k = f"daily:{now.strftime('%Y-%m-%d')}"
+            if keys.get(k) != 1:
+                keys[k] = 1
+                publish_daily_digest(cfg, conn, _tg_api_for_channel(cfg))
+        # semanal
+        if cfg.channel.digest_weekly and now.weekday() == cfg.channel.digest_weekly_day_utc \
+                and now.hour >= cfg.channel.digest_weekly_hour_utc:
+            k = f"weekly:{now.strftime('%G-W%V')}"
+            if keys.get(k) != 1:
+                keys[k] = 1
+                publish_weekly_digests(cfg, conn, _tg_api_for_channel(cfg))
+        # tendencias (día 1 de mes)
+        if cfg.channel.digest_tendencias and now.day == 1 and now.hour >= 13:
+            k = f"tend:{now.strftime('%Y-%m')}"
+            if keys.get(k) != 1:
+                keys[k] = 1
+                publish_tendencias(cfg, conn, _tg_api_for_channel(cfg))
+    except Exception as e:
+        log.warning("digests falló (no tumba daemon): %s", e)
+    finally:
+        conn.close()
+
+
 def _register_commands(cfg: Config) -> None:
     """Registra los comandos en Telegram (menú "/" del cliente)."""
     commands = [
@@ -973,6 +1032,7 @@ def _register_commands(cfg: Config) -> None:
         {"command": "report", "description": "Análisis de mercado completo con PDF"},
         {"command": "latest", "description": "Últimas ofertas registradas"},
         {"command": "stats",  "description": "Cobertura IA y datos del pool"},
+        {"command": "channel", "description": "Estado del canal (umbral, cola, market score)"},
         {"command": "score",  "description": "Ofertas con score ≥ N (ej: /score 60)"},
         {"command": "jobs",   "description": "Filtra: remote, salary2.5, temuco… combinables"},
         {"command": "help",   "description": "Ayuda"},
@@ -1112,3 +1172,9 @@ def run_daemon(cfg: Config) -> None:
 
         # 3. batch IA nocturno (hora agendada en IA_RUN_HOURS_UTC, default 03)
         _ia_sweep_maybe(cfg, state)
+
+        # 4. digests del canal (diario/semanal/mensual según hora agendada)
+        try:
+            _digests_maybe(cfg, state)
+        except Exception as exc:
+            log.warning("digests error: %s", str(exc)[:120])

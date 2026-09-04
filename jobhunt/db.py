@@ -12,6 +12,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .config import Config
+from .logging_setup import get_logger
+
+log = get_logger("jobhunt.db")
 
 
 def connect(cfg: Config) -> sqlite3.Connection:
@@ -67,9 +70,29 @@ def init_db(conn: sqlite3.Connection) -> None:
     for col, ddl in [
         ("ai_idiomas", "ALTER TABLE ofertas ADD COLUMN ai_idiomas TEXT DEFAULT ''"),
         ("rol_categoria", "ALTER TABLE ofertas ADD COLUMN rol_categoria TEXT DEFAULT ''"),
+        ("market_score", "ALTER TABLE ofertas ADD COLUMN market_score INTEGER DEFAULT 0"),
+        ("notified_channel_at", "ALTER TABLE ofertas ADD COLUMN notified_channel_at TEXT DEFAULT ''"),
+        ("date_canonical", "ALTER TABLE ofertas ADD COLUMN date_canonical TEXT DEFAULT ''"),
     ]:
         if col not in cols:
             conn.execute(ddl)
+    # backfill inicial de date_canonical (idempotente: solo filas vacías)
+    conn.execute("""UPDATE ofertas SET date_canonical =
+        COALESCE(NULLIF(date_posted,''), substr(first_seen,1,10))
+        WHERE date_canonical = '' AND (date_posted != '' OR first_seen != '')""")
+    # memoria del canal: idempotencia digests + observabilidad + message_id futuro
+    conn.execute("""CREATE TABLE IF NOT EXISTS channel_posts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        message_id INTEGER,
+        group_id TEXT DEFAULT '',
+        kind TEXT NOT NULL,
+        bucket TEXT DEFAULT '',
+        body_hash TEXT DEFAULT '',
+        posted_at TEXT NOT NULL
+    )""")
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_cp_kind_bucket ON channel_posts(kind, bucket)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_cp_group ON channel_posts(group_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_ofertas_market ON ofertas(market_score)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_ofertas_score ON ofertas(score)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_ofertas_active ON ofertas(active)")
     conn.execute("""CREATE TABLE IF NOT EXISTS score_versions (
@@ -127,18 +150,36 @@ def needs_rescore(conn: sqlite3.Connection, version_id: str) -> int:
         (version_id,)).fetchone()[0]
 
 
-def rescore_all(conn: sqlite3.Connection, score_fn, version_id: str, cfg: Config) -> int:
+def rescore_all(conn: sqlite3.Connection, score_fn, version_id: str, cfg: Config,
+                market_score_fn=None) -> int:
     """Recalcula el score de TODAS las ofertas activas con el criterio vigente.
 
     score_fn(job_dict, cfg) → (score, breakdown).  Puro cómputo local.
+    market_score_fn(job_dict) → (score, breakdown) opcional (dual-write, spec
+    canal v3 §6.2): un fallo en market score NO tumba el rescore del fit
+    (try/except por fila, market queda en 0 con log).
+    También refresca date_canonical (min(date_posted, first_seen)).
     """
+    from .channel import canonical_date  # import local evita ciclo
+
     rows = conn.execute("SELECT * FROM ofertas WHERE active=1").fetchall()
     updated = 0
     for r in rows:
         job = dict(r)
         score, _breakdown = score_fn(job, cfg)
-        conn.execute("UPDATE ofertas SET score=?, score_version=? WHERE group_id=?",
-                     (score, version_id, r["group_id"]))
+        ms = 0
+        if market_score_fn:
+            try:
+                ms, _mb = market_score_fn(job)
+            except Exception as e:
+                log.warning("market score falló para %s (%.40s): %s",
+                            r["group_id"], (job.get("title") or "")[:40], e)
+                ms = 0
+        dc = canonical_date({"date_posted": job.get("date_posted"),
+                             "first_seen": job.get("first_seen")})
+        conn.execute("""UPDATE ofertas SET score=?, score_version=?,
+            market_score=?, date_canonical=? WHERE group_id=?""",
+                     (score, version_id, ms, dc, r["group_id"]))
         updated += 1
     conn.commit()
     return updated
