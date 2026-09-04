@@ -659,8 +659,9 @@ def _handle_command(cfg: Config, message: dict, state: dict) -> None:
                         "chat_id": chat_id, "parse_mode": "HTML",
                         "text": f"⏳ Hay una operación en curso ({busy}, {_op_minutes(busy)}m) — "
                                 f"espera que termine antes de lanzar el batch IA"})
-                    return
-                threading.Thread(target=_ia_batch_async, args=(cfg, chat_id), daemon=True).start()
+                else:
+                    # ack inmediato — el batch corre en background y reporta por sí solo
+                    threading.Thread(target=_ia_batch_async, args=(cfg, chat_id), daemon=True).start()
         elif cmd == "/report":
             if arg.lower() == "status":
                 _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
@@ -679,7 +680,8 @@ def _handle_command(cfg: Config, message: dict, state: dict) -> None:
                         "text": f"⏳ Hay una operación en curso ({busy}, {_op_minutes(busy)}m) — "
                                 f"espera que termine antes de lanzar el reporte"})
                     return
-                threading.Thread(target=_report_async, args=(cfg, chat_id), daemon=True).start()
+                else:
+                    threading.Thread(target=_report_async, args=(cfg, chat_id), daemon=True).start()
         elif cmd == "/stats":
             _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
                                          "text": _stats_text(cfg)})
@@ -748,6 +750,10 @@ def _handle_command(cfg: Config, message: dict, state: dict) -> None:
                                                              f"<code>{esc(str(exc)[:120])}</code>"})
                     finally:
                         conn.close()
+                # ack inmediato — la acción corre en background y reporta al terminar
+                _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
+                                             "text": f"📢 <code>channel-{action}</code> "
+                                                     f"ejecutando en background — te reporto al terminar"})
                 threading.Thread(target=_run, daemon=True).start()
             elif action == "reset":
                 conn = database.connect(cfg)
