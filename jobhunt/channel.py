@@ -121,12 +121,64 @@ def age_days(row: dict, now: datetime | None = None) -> int:
 _DEV_CATEGORIES = {"Full Stack", "Backend", "Frontend", "Data", "Mobile", "AI/ML",
                    "Tech Lead", "DevOps/Cloud", "QA", "Software", "Seguridad"}
 
+# stems que delatan roles dev en texto libre (modo lote puede escribir
+# "Backend Developer", "Fullstack Developer", "Desarrollo Móvil", "Cloud"…)
+_DEV_STEMS = ("dev", "backend", "frontend", "full", "stack", "data", "mobile", "móvil",
+              "movil", "ai", "ml", "lead", "cloud", "qa", "software", "seguridad",
+              "secops", "infra", "sistemas", "informátic", "informatic", "python",
+              "java", "node", "react", "devops")
+
+
+def _categorias_dev(rc: str) -> set[str]:
+    """Normaliza rol_categoria libre → categorías dev canónicas:
+    'Backend Developer' → {Backend} · 'Fullstack Developer' → {Full Stack, Backend, Frontend}
+    'DevOps' → {DevOps/Cloud} · 'Desarrollo Móvil' → {Mobile} · 'Cloud / Infra' → {DevOps/Cloud}."""
+    r = rc.lower()
+    out: set[str] = set()
+    if "backend" in r:
+        out.add("Backend")
+    if "frontend" in r or "front" in r:
+        out.add("Frontend")
+    if "full" in r or "stack" in r:
+        out.add("Full Stack")
+    if "móvil" in r or "movil" in r or "mobile" in r:
+        out.add("Mobile")
+    if "data" in r or "datos" in r:
+        out.add("Data")
+    if "ai" in r or "ml" in r:
+        out.add("AI/ML")
+    if "tech lead" in r or "lead" in r:
+        out.add("Tech Lead")
+    if "devops" in r:
+        out.add("DevOps/Cloud")
+    if "cloud" in r or "infra" in r:
+        out.add("DevOps/Cloud")
+    if "qa" in r or "testing" in r:
+        out.add("QA")
+    if "software" in r or "desarroll" in r:
+        out.add("Software")
+    if "seguridad" in r or "secops" in r or "security" in r:
+        out.add("Seguridad")
+    return out
+
+
+_NONDEV_CATEGORIES = {"Ingeniería no-software", "Analista/Empresa", "Profesor/Formación",
+                      "Soporte/TI", "No-tech", "Otro"}
+
 
 def is_dev(rol_categoria: str | None, title: str, cfg: Config) -> bool:
-    """Gate dev: rol_categoria IA primero; fallback regex nontech_titles (H4)."""
+    """Gate dev: rol_categoria IA primero; fallback regex nontech_titles (H4).
+    Capa 2 (fix modo lote): si el rol es texto libre que no matchea el enum exacto,
+    normaliza por stems — tolera 'Backend Developer', 'Fullstack Developer', 'Móvil'.
+    La IA es la autoridad: categoría no-dev explícita → False siempre."""
     rc = (rol_categoria or "").strip()
     if rc:
-        return rc in _DEV_CATEGORIES
+        if rc in _NONDEV_CATEGORIES:
+            return False
+        if rc in _DEV_CATEGORIES:
+            return True
+        if _categorias_dev(rc) & _DEV_CATEGORIES:
+            return True
     t = (title or "").lower()
     if re.search(cfg.relevance.nontech_titles, t, re.I):
         return False
