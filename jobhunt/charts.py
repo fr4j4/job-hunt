@@ -9,7 +9,7 @@ import sqlite3
 from collections import Counter
 from pathlib import Path
 
-from .scoring import _salary_to_clp_monthly, _norm
+from .scoring import _salary_to_clp_monthly, _norm, _MARKET_TECHS_TITLE_RE
 
 _ROL_LABELS = {
     "Full Stack": "Full Stack", "Backend": "Backend", "Frontend": "Frontend",
@@ -18,6 +18,42 @@ _ROL_LABELS = {
     "Seguridad": "Seguridad", "Otro": "Otro",
 }
 _SEN_LABELS = {"senior": "Senior", "semi": "Semi-senior", "lead": "Lead", "junior": "Junior"}
+
+# Normalización de techs (columna abreviada + títulos libres → nombre canónico)
+_TECH_CANON = {
+    "py": "Python", "python": "Python",
+    "ts": "TypeScript", "typescript": "TypeScript",
+    "js": "JavaScript", "javascript": "JavaScript",
+    "k8s": "Kubernetes", "kubernetes": "Kubernetes",
+    "tf": "Terraform", "terraform": "Terraform",
+    "golang": "Go", "go": "Go",
+    "node": "Node.js", "node.js": "Node.js",
+    "postgres": "PostgreSQL", "postgresql": "PostgreSQL",
+    "mongo": "MongoDB", "mongodb": "MongoDB",
+    "react": "React", "angular": "Angular", "spring": "Spring",
+    "aws": "AWS", "gcp": "GCP", "azure": "Azure",
+    "docker": "Docker", "scala": "Scala", "java": "Java",
+    "sql": "SQL", "nifi": "NiFi", "kafka": "Kafka",
+    "fastapi": "FastAPI", "redis": "Redis", "vue": "Vue",
+    ".net": ".NET", "c#": "C#", "c++": "C++", "php": "PHP",
+    "ci/cd": "CI/CD", "jenkins": "Jenkins", "git": "Git",
+    "linux": "Linux", "bash": "Bash", "airflow": "Airflow",
+    "spark": "Spark", "hadoop": "Hadoop", "snowflake": "Snowflake",
+    "databricks": "Databricks", "tableau": "Tableau", "power bi": "Power BI",
+    "sap": "SAP", "abap": "ABAP", "cobol": "COBOL",
+}
+
+
+def _techs_de_fila(r: dict) -> set[str]:
+    """Techs de una oferta: columna techs (abreviada) + títulos (libres), normalizadas."""
+    out = set()
+    for t in (r.get("techs") or "").split(";"):
+        t = t.strip()
+        if t:
+            out.add(_TECH_CANON.get(_norm(t), t))
+    for m in _MARKET_TECHS_TITLE_RE.findall(r.get("title") or ""):
+        out.add(_TECH_CANON.get(_norm(m), m))
+    return out
 
 
 def _setup_plt():
@@ -170,3 +206,88 @@ def chart_modalidad(conn: sqlite3.Connection, out_dir: Path) -> Path | None:
     plt = _setup_plt()
     return _barh(plt, pairs, "modalidad.png",
                  "Modalidad de las ofertas activas (%)", "#94e2d5", "%", out_dir)
+
+
+# ============ reporte de tecnologías (T1-T3) ============
+
+def _techs_pool(conn: sqlite3.Connection, dias: int = 30) -> list[dict]:
+    """Ofertas activas de los últimos N días (para el reporte de techs)."""
+    return [dict(r) for r in conn.execute(
+        "SELECT * FROM ofertas WHERE active=1 AND date_canonical >= date('now', ?)",
+        (f"-{dias} days",)).fetchall()]
+
+
+def _frecuencia_techs(rows: list[dict]) -> Counter:
+    c = Counter()
+    for r in rows:
+        c.update(_techs_de_fila(r))
+    return c
+
+
+def chart_techs_top(conn: sqlite3.Connection, out_dir: Path, dias: int = 30,
+                    top: int = 12) -> Path | None:
+    """T1: top tecnologías más pedidas (columna + títulos, normalizadas)."""
+    rows = _techs_pool(conn, dias)
+    c = _frecuencia_techs(rows)
+    pairs = [(t, n) for t, n in c.most_common(top) if n > 0]
+    if not pairs:
+        return None
+    plt = _setup_plt()
+    return _barh(plt, pairs, "techs_top.png",
+                 f"Tecnologías más pedidas (últimos {dias} días)", "#a6e3a1",
+                 "ofertas", out_dir)
+
+
+def chart_techs_emergentes(conn: sqlite3.Connection, out_dir: Path) -> Path | None:
+    """T2: techs emergentes — frecuencia últimos 7d vs 8-30d (crecimiento)."""
+    from datetime import date, timedelta
+    rows = _techs_pool(conn, 30)
+    hoy = date.today()
+    recientes, anteriores = Counter(), Counter()
+    for r in rows:
+        try:
+            d = date.fromisoformat((r.get("date_canonical") or "")[:10])
+        except Exception:
+            continue
+        techs = _techs_de_fila(r)
+        if d >= hoy - timedelta(days=7):
+            recientes.update(techs)
+        elif d >= hoy - timedelta(days=30):
+            anteriores.update(techs)
+    pairs = []
+    for t in recientes:
+        n7, n30 = recientes[t], anteriores.get(t, 0)
+        if n7 >= 2 and n7 > n30:
+            pairs.append((f"{t} (x{n7 / max(1, n30):.1f})", n7))
+    if not pairs:
+        return None
+    pairs.sort(key=lambda kv: -kv[1])
+    plt = _setup_plt()
+    return _barh(plt, pairs[:10], "techs_emergentes.png",
+                 "Techs emergentes — 7d vs mes anterior (crecimiento)",
+                 "#f9e2af", "ofertas 7d", out_dir)
+
+
+def chart_techs_salario(conn: sqlite3.Connection, out_dir: Path) -> Path | None:
+    """T3: mediana salarial por tech (solo techs con n>=3 declarados)."""
+    rows = _techs_pool(conn, 30)
+    por_tech: dict[str, list[int]] = {}
+    for r in rows:
+        v = _salary_to_clp_monthly(r.get("salary") or "", r.get("description") or "")
+        if not v:
+            continue
+        for t in _techs_de_fila(r):
+            por_tech.setdefault(t, []).append(v)
+    pairs = []
+    for t, vals in por_tech.items():
+        if len(vals) < 3:
+            continue
+        vals.sort()
+        pairs.append((f"{t} (n={len(vals)})", vals[len(vals) // 2]))
+    if not pairs:
+        return None
+    pairs.sort(key=lambda kv: -kv[1])
+    plt = _setup_plt()
+    return _barh(plt, pairs[:10], "techs_salario.png",
+                 "Mediana salarial por tecnología (CLP/mes)", "#cba6f7",
+                 "CLP", out_dir)

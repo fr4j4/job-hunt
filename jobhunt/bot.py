@@ -609,9 +609,10 @@ def _help_text() -> str:
         "/channel_publish — publica las candidatas en cola ahora",
         "/channel_publish_ia — igual, pero SOLO ofertas ya revisadas por IA",
         "/channel_daily — digest diario 'Top del día' ahora",
-        "/channel_weekly — digests semanales ahora (remote + rol + salary)",
+        "/channel_weekly — digests semanales ahora (remote + rol + techs + salary)",
         "/channel_weekly_remote — solo digest remoto por seniority",
         "/channel_weekly_rol — solo mejor de la semana por rol",
+        "/channel_weekly_techs — solo tecnologías del mercado (top + emergentes + salarios)",
         "/channel_weekly_salary — solo ranking salarial",
         "/channel_trends — post mensual de tendencias",
         "/channel_all — publish + todos los digests",
@@ -620,7 +621,7 @@ def _help_text() -> str:
         "/channel_wipe_confirm — borra TODOS los mensajes del canal + resetea marcas",
         "",
         "🧪 <b>Reportes de prueba (DM)</b> — mismos digests, enviados a este chat",
-        "/report_daily · /report_weekly_remote · /report_weekly_rol · /report_weekly_salary · /report_trends · /report_all",
+        "/report_daily · /report_weekly_remote · /report_weekly_rol · /report_weekly_techs · /report_weekly_salary · /report_trends · /report_all",
         "",
         "🗄 <b>Mantenimiento DB</b>",
         "/db — conteos (activas, inactivas, purgables, no-dev)",
@@ -760,7 +761,8 @@ def _handle_command(cfg: Config, message: dict, state: dict) -> None:
             action = sub or "status"
             from .channel import (publish_channel, publish_daily_digest,
                                   publish_weekly_remote, publish_weekly_rol,
-                                  publish_weekly_salary, publish_trends, channel_status)
+                                  publish_weekly_salary, publish_weekly_techs,
+                                  publish_trends, channel_status)
             api = _tg_api_for_channel(cfg)
             if action == "status":
                 conn = database.connect(cfg)
@@ -770,7 +772,7 @@ def _handle_command(cfg: Config, message: dict, state: dict) -> None:
                 finally:
                     conn.close()
             elif action in ("publish", "publish-ia", "daily", "weekly-remote", "weekly-rol",
-                            "weekly-salary", "weekly", "trends", "all", "dry"):
+                            "weekly-techs", "weekly-salary", "weekly", "trends", "all", "dry"):
                 def _run():
                     # conn se abre EN el thread (SQLite no permite compartir entre threads)
                     import time as _t
@@ -806,6 +808,12 @@ def _handle_command(cfg: Config, message: dict, state: dict) -> None:
                             _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
                                                          "text": "🏆 weekly-rol enviado" if ok else
                                                                  "🏆 weekly-rol: sin candidatas o ya enviado"})
+                            _t.sleep(1)
+                        if action in ("weekly-techs", "weekly", "all"):
+                            ok = publish_weekly_techs(cfg, conn, api, force=True)
+                            _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
+                                                         "text": "🧰 weekly-techs enviado" if ok else
+                                                                 "🧰 weekly-techs: sin datos o ya enviado"})
                             _t.sleep(1)
                         if action in ("weekly-salary", "weekly", "all"):
                             ok = publish_weekly_salary(cfg, conn, api, force=True)
@@ -904,14 +912,14 @@ def _handle_command(cfg: Config, message: dict, state: dict) -> None:
             action = sub or "help"
             from .channel import (publish_daily_digest, publish_weekly_remote,
                                   publish_weekly_rol, publish_weekly_salary,
-                                  publish_trends)
+                                  publish_weekly_techs, publish_trends)
             api = _tg_api_for_channel(cfg)
             if action == "help":
                 _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
                                              "text": "❓ /report-&lt;accion&gt; (DM — prueba de reportes)\n"
                                                      "<code>/report-daily · /report-weekly-remote · "
                                                      "/report-weekly-rol · /report-weekly-salary · "
-                                                     "/report-trends · /report-all</code>"})
+                                                     "/report-weekly-techs · /report-trends · /report-all</code>"})
             else:
                 def _run():
                     import time as _t
@@ -934,6 +942,12 @@ def _handle_command(cfg: Config, message: dict, state: dict) -> None:
                             _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
                                                          "text": "🏆 report-weekly-rol enviado" if ok else
                                                                  "🏆 report-weekly-rol: sin candidatas o ya enviado"})
+                            _t.sleep(1)
+                        if action in ("weekly-techs", "all"):
+                            ok = publish_weekly_techs(cfg, conn, api, chat_id=chat_id)
+                            _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
+                                                         "text": "🧰 report-weekly-techs enviado" if ok else
+                                                                 "🧰 report-weekly-techs: sin datos o ya enviado"})
                             _t.sleep(1)
                         if action in ("weekly-salary", "all"):
                             ok = publish_weekly_salary(cfg, conn, api, chat_id=chat_id)
@@ -1485,12 +1499,14 @@ def _register_commands(cfg: Config) -> None:
         {"command": "channel_weekly", "description": "Digests semanales ahora (remote+rol+salary)"},
         {"command": "channel_weekly_remote", "description": "Solo digest weekly-remote"},
         {"command": "channel_weekly_rol", "description": "Solo mejor de la semana por rol"},
+        {"command": "channel_weekly_techs", "description": "Solo tecnologías del mercado"},
         {"command": "channel_weekly_salary", "description": "Solo ranking salarial"},
         {"command": "channel_trends", "description": "Post mensual de tendencias"},
         {"command": "channel_all", "description": "Publish + todos los digests"},
         {"command": "channel_dry", "description": "Preview sin publicar"},
         {"command": "report_daily", "description": "Prueba DM: top del día por categoría"},
         {"command": "report_weekly_rol", "description": "Prueba DM: mejor de la semana por rol"},
+        {"command": "report_weekly_techs", "description": "Prueba DM: tecnologías del mercado"},
         {"command": "report_weekly_salary", "description": "Prueba DM: ranking salarial con contexto"},
         {"command": "report_all", "description": "Prueba DM: todos los reportes"},
         {"command": "channel_reset_confirm", "description": "Limpiar marcas de publicados"},

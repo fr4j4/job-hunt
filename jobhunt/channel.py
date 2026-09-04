@@ -699,10 +699,98 @@ def publish_weekly_salary(cfg: Config, conn, tg_api, dry_run: bool = False,
     return ok
 
 
+def publish_weekly_techs(cfg: Config, conn, tg_api, dry_run: bool = False,
+                         chat_id: int | None = None, force: bool = False) -> bool:
+    """Digest F: tecnologías del mercado — qué pide el mercado y qué paga.
+
+    T1: top techs (columna + títulos, normalizadas) · T2: emergentes 7d vs mes
+    anterior · T3: mediana salarial por tech. Texto con insights + 3 PNG.
+    chat_id: destino override (DM de prueba); None → canal.
+    force: envía siempre (comando manual), sin idempotencia.
+    """
+    from .notify import esc
+    from .scoring import _salary_to_clp_monthly
+    from . import charts
+    from collections import Counter
+    now = datetime.now(timezone.utc)
+    rows = charts._techs_pool(conn, 30)
+    if not rows:
+        log.info("canal: weekly-techs sin candidatas — silencio honesto")
+        return False
+    c = charts._frecuencia_techs(rows)
+    top = c.most_common(8)
+    # emergentes (7d vs 8-30d)
+    from datetime import date, timedelta
+    hoy = date.today()
+    recientes, anteriores = Counter(), Counter()
+    for r in rows:
+        try:
+            d = date.fromisoformat((r.get("date_canonical") or "")[:10])
+        except Exception:
+            continue
+        techs = charts._techs_de_fila(r)
+        if d >= hoy - timedelta(days=7):
+            recientes.update(techs)
+        elif d >= hoy - timedelta(days=30):
+            anteriores.update(techs)
+    emergentes = [(t, recientes[t], anteriores.get(t, 0)) for t in recientes
+                  if recientes[t] >= 2 and recientes[t] > anteriores.get(t, 0)]
+    emergentes.sort(key=lambda x: -x[1])
+    # mediana salarial por tech
+    por_tech: dict[str, list[int]] = {}
+    for r in rows:
+        v = _salary_to_clp_monthly(r.get("salary") or "", r.get("description") or "")
+        if not v:
+            continue
+        for t in charts._techs_de_fila(r):
+            por_tech.setdefault(t, []).append(v)
+    sal_tech = []
+    for t, vals in por_tech.items():
+        if len(vals) >= 3:
+            vals.sort()
+            sal_tech.append((t, vals[len(vals) // 2], len(vals)))
+    sal_tech.sort(key=lambda x: -x[1])
+
+    lines = [f"🧰 <b>Mercado de tecnologías</b> · últimos 30 días · {now.strftime('%d %b')}"]
+    if top:
+        lines.append("\n🔥 <b>Más pedidas</b>")
+        lines.append(" · ".join(f"{esc(t)} ({n})" for t, n in top))
+    if emergentes:
+        lines.append("\n🚀 <b>Emergentes</b> (7d vs mes anterior)")
+        for t, n7, n30 in emergentes[:5]:
+            x = n7 / max(1, n30)
+            lines.append(f"  {esc(t)}: {n7} ofertas (x{x:.1f})")
+    if sal_tech:
+        lines.append("\n💰 <b>Mejor pagadas</b> (mediana, n≥3)")
+        for t, med, n in sal_tech[:5]:
+            lines.append(f"  {esc(t)}: ${med:,}".replace(",", ".") + f" (n={n})")
+    text = "\n".join(lines)
+    if dry_run:
+        log.info("canal: dry-run weekly-techs:\n%s", text[:500])
+        return False
+    ok = _send_digest(cfg, tg_api, "weekly-techs", text, conn, now, chat_id=chat_id, force=force)
+    if ok:
+        try:
+            d = _dir_charts(cfg)
+            fotos = []
+            for p, cap in (
+                (charts.chart_techs_top(conn, d), "🔥 Tecnologías más pedidas (30d)"),
+                (charts.chart_techs_emergentes(conn, d), "🚀 Emergentes — 7d vs mes anterior"),
+                (charts.chart_techs_salario(conn, d), "💰 Mediana salarial por tecnología"),
+            ):
+                if p:
+                    fotos.append((p, cap))
+            _enviar_fotos(cfg, tg_api, fotos, chat_id=chat_id)
+        except Exception as e:
+            log.warning("canal: gráficos weekly-techs fallaron: %s", e)
+    return ok
+
+
 def publish_weekly_digests(cfg: Config, conn, tg_api, dry_run: bool = False) -> bool:
-    """Wrapper compat: dispara C, C2 y D (daemon semanal)."""
+    """Wrapper compat: dispara C, C2, F y D (daemon semanal)."""
     sent = publish_weekly_remote(cfg, conn, tg_api, dry_run=dry_run)
     sent = publish_weekly_rol(cfg, conn, tg_api, dry_run=dry_run) or sent
+    sent = publish_weekly_techs(cfg, conn, tg_api, dry_run=dry_run) or sent
     return publish_weekly_salary(cfg, conn, tg_api, dry_run=dry_run) or sent
 
 
