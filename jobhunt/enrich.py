@@ -370,6 +370,208 @@ def ia_extract(cfg: Config, job: dict, profile_desc: str, mercado: str = "") -> 
     return ia_extract_detail(cfg, job, profile_desc, mercado)[0]
 
 
+# ============ IA local (spec-ia-local v2.1) — 2 tareas por oferta ============
+
+_PROMPT_EXTRACT_LOCAL = (
+    "Eres un extractor de datos de ofertas de empleo chilenas. REGLAS OBLIGATORIAS "
+    "(violarlas invalida la respuesta):\n"
+    "1. Respondes EXCLUSIVAMENTE un objeto JSON válido. Nada más, sin texto, sin markdown.\n"
+    "2. modalidad SOLO puede ser uno de estos 4 valores exactos: \"R\" (remoto), "
+    "\"H\" (híbrido), \"P\" (presencial), \"?\" (no se puede determinar). "
+    "PROHIBIDO escribir la palabra completa.\n"
+    "3. ingles SOLO puede ser: \"no\", \"deseable\", \"requerido\", \"desconocido\". "
+    "PROHIBIDO true/false/null.\n"
+    "4. seniority_real SOLO puede ser: \"junior\", \"semi\", \"senior\", \"lead\", o \"\" "
+    "(vacío si no se puede inferir).\n"
+    "5. salario_clp_mensual es un NÚMERO entero. 0 si no se declara. PROHIBIDO strings.\n"
+    "6. Dato ausente → null o \"\" según el campo. Nunca inventes.\n\n"
+    "Oferta:\nTítulo: {title}\nEmpresa: {company}\nUbicación: {location}\n"
+    "Sueldo declarado: {salary}\nModalidad declarada: {modality}\n"
+    "Descripción: {description}\n\n"
+    "Responde SOLO JSON con EXACTAMENTE estas claves: techs (array de máx 8 "
+    "abreviaturas: Py, Java, TS, JS, React, Angular, Vue, Node, K8s, Docker, AWS, "
+    "GCP, Azure, TF, Scala, Go, .NET, C#, SQL, Postgres, Mongo, Redis, Kafka, "
+    "FastAPI, Django, Spring, NiFi, Jenkins, CI/CD), modalidad (\"R\"|\"H\"|\"P\"|\"?\"), "
+    "seniority_real (\"junior\"|\"semi\"|\"senior\"|\"lead\"|\"\"), rol_categoria (\"Full Stack\"|"
+    "\"Backend\"|\"Frontend\"|\"Data\"|\"Mobile\"|\"AI/ML\"|\"Tech Lead\"|\"DevOps/Cloud\"|\"QA\"|"
+    "\"Software\"|\"Seguridad\"|\"Ingeniería no-software\"|\"Analista/Empresa\"|"
+    "\"Profesor/Formación\"|\"Soporte/TI\"|\"No-tech\"|\"Otro\"), ingles (\"no\"|\"deseable\"|"
+    "\"requerido\"|\"desconocido\"), idiomas (array de {{idioma, nivel, excluyente}}), "
+    "red_flags (array), green_flags (array), benefits (array), salario_clp_mensual "
+    "(entero, 0 si no se declara).\n\n"
+    "Ejemplo de respuesta VÁLIDA:\n"
+    "{{\"techs\": [\"Java\", \"Spring\"], \"modalidad\": \"R\", \"seniority_real\": \"senior\", "
+    "\"rol_categoria\": \"Backend\", \"ingles\": \"deseable\", \"idiomas\": [], "
+    "\"red_flags\": [], \"green_flags\": [], \"benefits\": [], "
+    "\"salario_clp_mensual\": 2500000}}"
+)
+
+_PROMPT_OPINION_LOCAL = (
+    "Eres un comentarista editorial de ofertas de empleo tech chilenas. REGLAS "
+    "OBLIGATORIAS (violarlas invalida la respuesta):\n"
+    "1. Respondes EXCLUSIVAMENTE un objeto JSON válido. Nada más, sin texto, sin markdown.\n"
+    "2. opinion: max 160 chars. resumen: max 120 chars. fit_reason: max 140 chars.\n"
+    "3. opinion = comentario editorial: contexto de mercado, señal notable, comparación "
+    "salarial. NUNCA consejos al candidato (prohibido 'destaca', 'pregunta', "
+    "'no apliques', 'practica').\n"
+    "4. ANTI-ALUCINACIÓN: los únicos números de mercado que puedes citar son los del "
+    "CONTEXTO DE MERCADO provisto. Si la muestra es insuficiente, describe solo la oferta.\n"
+    "5. Si el sueldo está declarado, DEBE comentarlo (comparar contra la mediana del contexto).\n"
+    "6. Si la oferta tiene nota de anomalía: cita el valor tal cual, señala la anomalía "
+    "con la hipótesis provista, compara contra la mediana. NUNCA corrijas ni omitas.\n"
+    "7. fit_reason: por qué conviene o no al PERFIL del candidato provisto.\n\n"
+    "Perfil del candidato: {perfil}\n\n"
+    "Contexto de mercado (los ÚNICOS números que puedes citar):\n{mercado}\n\n"
+    "Oferta:\nTítulo: {title}\nEmpresa: {company}\nSueldo declarado: {salary}\n"
+    "Datos extraídos: {extraidos}\n{nota}\n\n"
+    "Responde SOLO JSON con EXACTAMENTE estas claves: opinion, resumen, fit_reason.\n\n"
+    "Ejemplo de respuesta VÁLIDA:\n"
+    "{{\"opinion\": \"Sueldo sobre la mediana del mercado; empresa reconocida.\", "
+    "\"resumen\": \"Backend Java con AWS, remoto.\", "
+    "\"fit_reason\": \"Stack coincide con el perfil; seniority adecuada.\"}}"
+)
+
+
+def _prompt_extract_local(job: dict) -> str:
+    return _PROMPT_EXTRACT_LOCAL.format(
+        title=job.get("title", ""), company=job.get("company", ""),
+        location=job.get("location", ""),
+        salary=job.get("salary") or "(no declarado)",
+        modality=job.get("modality") or "(no declarada)",
+        description=(job.get("description") or "")[:2000])
+
+
+def _prompt_opinion_local(job: dict, perfil: str, mercado: str,
+                          extraidos: dict, nota: str = "") -> str:
+    extra = ", ".join(f"{k}={v}" for k, v in extraidos.items() if v not in ("", None, [], {}))
+    return _PROMPT_OPINION_LOCAL.format(
+        perfil=perfil, mercado=mercado, title=job.get("title", ""),
+        company=job.get("company", ""), salary=job.get("salary") or "(no declarado)",
+        extraidos=extra or "sin datos", nota=nota)
+
+
+def _llm_local(cfg: Config, prompt: str) -> tuple[dict | None, str]:
+    """Llamada HTTP al endpoint local (Ollama/llama.cpp/vLLM). HTTP puro, sin SQLite.
+
+    Retorna (dict, "") si OK, (None, "timeout"|"rate"|"other") en fallo.
+    Connection refused → fallback inmediato (sin esperar timeout — P2-3).
+    """
+    body = {"model": cfg.ia.local_model,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0,
+            "response_format": {"type": "json_object"}}
+    for attempt in range(cfg.ia.local_retries + 1):
+        try:
+            req = requests.post(f"{cfg.ia.local_base_url}/chat/completions",
+                                json=body, timeout=cfg.ia.local_timeout,
+                                headers={"Authorization": "Bearer local",
+                                         "Content-Type": "application/json"})
+            if req.status_code >= 400:
+                kind = "rate" if (req.status_code == 429 or req.status_code >= 500) else "other"
+                if attempt == cfg.ia.local_retries:
+                    log.warning("IA local HTTP %d: %s", req.status_code, req.text[:120])
+                    return None, kind
+                time.sleep(2)
+                continue
+            d = req.json()
+            content = d["choices"][0]["message"]["content"]
+            data = json.loads(content)
+            return (data, "") if isinstance(data, dict) else (None, "other")
+        except requests.exceptions.ConnectionError:
+            log.warning("IA local connection refused (fallback inmediato)")
+            return None, "other"
+        except requests.exceptions.Timeout:
+            if attempt == cfg.ia.local_retries:
+                log.warning("IA local timeout")
+                return None, "timeout"
+            time.sleep(2)
+        except Exception as e:
+            if attempt == cfg.ia.local_retries:
+                log.warning("IA local falló: %s", e)
+                return None, "other"
+            time.sleep(2)
+    return None, "other"
+
+
+def _normalizar_extract_local(d: dict) -> dict:
+    """Coerción de tipos post-respuesta (P2-6): un 7B puede emitir strings
+    donde el schema pide listas/ints. Defensa de segundo nivel."""
+    out = dict(d)
+    # salario: string → int/0
+    sal = out.get("salario_clp_mensual")
+    if isinstance(sal, str):
+        try:
+            out["salario_clp_mensual"] = int(float(sal.replace(".", "").replace(",", "")))
+        except ValueError:
+            out["salario_clp_mensual"] = 0
+    elif not isinstance(sal, int):
+        out["salario_clp_mensual"] = 0
+    # listas: string → []
+    for campo in ("techs", "red_flags", "green_flags", "benefits"):
+        v = out.get(campo)
+        if isinstance(v, str):
+            out[campo] = [v]
+        elif not isinstance(v, list):
+            out[campo] = []
+    # idiomas: string → [] (apply_ia_result normaliza dicts)
+    if isinstance(out.get("idiomas"), str):
+        out["idiomas"] = []
+    elif not isinstance(out.get("idiomas"), list):
+        out["idiomas"] = []
+    # modalidad: palabra completa → código (defensa P1-1)
+    mod = _norm(str(out.get("modalidad") or ""))
+    if "remot" in mod:
+        out["modalidad"] = "R"
+    elif "híbrid" in mod or "hibrid" in mod:
+        out["modalidad"] = "H"
+    elif "presencial" in mod:
+        out["modalidad"] = "P"
+    elif mod not in ("r", "h", "p", "?"):
+        out["modalidad"] = "?"
+    # ingles: boolean → nivel (defensa P1-1)
+    ing = out.get("ingles")
+    if isinstance(ing, bool):
+        out["ingles"] = "requerido" if ing else "desconocido"
+    elif isinstance(ing, str) and ing.lower() not in ("no", "deseable", "requerido", "desconocido"):
+        out["ingles"] = "desconocido"
+    return out
+
+
+def ia_extract_local(cfg: Config, job: dict, profile_desc: str,
+                     mercado: str = "") -> tuple[dict | None, str]:
+    """TAREA 1 (EXTRACT) + TAREA 2 (OPINION) en 2 llamadas locales.
+
+    Retorna (dict combinado, "") si ambas tareas OK; (None, err_kind) si alguna falla.
+    El dict combinado tiene la MISMA forma que ia_extract_detail (incluye ingles).
+    """
+    if not cfg.ia.local_enabled:
+        return None, "other"
+    from . import stats as _st
+    # TAREA 1 — EXTRACT
+    d1, err1 = _llm_local(cfg, _prompt_extract_local(job))
+    if d1 is None:
+        return None, err1
+    d1 = _normalizar_extract_local(d1)
+    # TAREA 2 — OPINION (input: datos extraídos + contexto + perfil)
+    nota = ""
+    sal_esta = _st.parse_salary_clp(job.get("salary") or "")
+    if job.get("salary_status") in ("suspect", "implausible") and sal_esta > 0:
+        if _st.annual_likely(sal_esta, _st.parse_salary_clp("CLP 2150000") or 2150000):
+            hip = f"probable cifra anual (≈ ${sal_esta // 12:,}/mes)"
+        else:
+            hip = "error de la fuente"
+        raw = (job.get("salary_raw") or job.get("salary") or "").strip()
+        monto = raw if raw else f"{sal_esta:,}"
+        nota = (f"\nNota: el sueldo declarado de esta oferta (${monto}) fue clasificado "
+                f"anómalo (motivo: {job.get('salary_note') or 'estadística'}; hipótesis: {hip}) "
+                f"— coméntalo en opinion según las reglas.")
+    d2, err2 = _llm_local(cfg, _prompt_opinion_local(job, profile_desc, mercado, d1, nota))
+    if d2 is None:
+        return None, err2
+    d1.update(d2)
+    return d1, ""
+
+
 # --- Modo lote (spec-enrich-lotes §2) ---
 _LOTE_SCHEMA = {
     "type": "object",
@@ -688,12 +890,14 @@ def enrich_pending(conn, cfg: Config | None, max_n: int | None = None,
     ctx_version = "ctx-" + hashlib.sha256(mercado.encode()).hexdigest()[:8] if cfg else ""
     perfil = profile_description(cfg) if cfg else ""
     N = cfg.ia.batch_prompt if (cfg and cfg.ia.batch_prompt > 1 and not solo_fetch) else 1
+    local = bool(cfg and cfg.ia.local_enabled)
+    N_fetch = 5 if local else N   # P1-7: fetch agrupado en paralelo aunque la IA sea individual
     done = 0
-    for i in range(0, len(pending), N):
+    for i in range(0, len(pending), N_fetch):
         if stop_event is not None and stop_event.is_set():
             log.info("enrich_pending: stop_event seteado — corte entre grupos")
             break
-        grupo = pending[i:i + N]
+        grupo = pending[i:i + N_fetch]
         # fetch paralelo: threads SOLO HTTP (P0-3); AIRA serializado (5 chromium = no)
         if len(grupo) > 1 and not any("airavirtual.com" in (r.get("url") or "") for r in grupo):
             with ThreadPoolExecutor(max_workers=min(len(grupo), 5)) as ex:
@@ -718,7 +922,16 @@ def enrich_pending(conn, cfg: Config | None, max_n: int | None = None,
             f"WHERE active=1 AND group_id IN ({qs})", tuple(vivas))]
         if not recargadas:
             continue
-        if N > 1:
+        if local:
+            # spec-ia-local: IA individual (2 tareas) con fallback cloud por oferta
+            for r in recargadas:
+                parsed, _ = ia_extract_local(cfg, r, perfil, mercado)
+                if parsed is None and cfg.ia.local_fallback_cloud:
+                    parsed, _ = ia_extract_detail(cfg, r, perfil, mercado)
+                if parsed:
+                    apply_ia_result(conn, cfg, r, parsed, ctx_version=ctx_version,
+                                    model=cfg.ia.local_model if local else None)
+        elif N > 1:
             arr, err = ia_extract_lote(cfg, recargadas, perfil, mercado)
             if arr is None:
                 if err == "rate":
@@ -772,12 +985,15 @@ def ia_queue_count(conn) -> int:
 
 
 def apply_ia_result(conn, cfg: Config, r: dict, parsed: dict | None,
-                    ctx_version: str = "") -> bool:
+                    ctx_version: str = "", model: str | None = None) -> bool:
     """Escribe los campos IA de UNA oferta en la DB. Solo el MAIN la llama
     (patrón conexión única). Retorna True si escribió algo. parsed=None → no-op.
 
     ctx_version: hash8 del contexto de mercado usado (spec salarios-robustos §7.4)
     — trazabilidad para regenerar opinions de eras obsoletas.
+    model: etiqueta ia_model a escribir (spec-ia-local P1-2) — default cfg.ia.model
+    (cloud); en modo local el dispatch pasa cfg.ia.local_model para que la
+    trazabilidad diga la verdad.
     Guard A3: SOLO escribe salary si salary_source='' — nunca pisa procedencia
     (feed/text) ni rellena un salary='' que el árbitro vació."""
     if not parsed:
@@ -846,7 +1062,7 @@ def apply_ia_result(conn, cfg: Config, r: dict, parsed: dict | None,
             ia_fields.append(field)
     if not sets:
         return False
-    sets.append("ia_model=?"); params.append(cfg.ia.model)
+    sets.append("ia_model=?"); params.append(model or cfg.ia.model)
     sets.append("ia_fields=?"); params.append(",".join(ia_fields))
     if ctx_version:
         sets.append("ctx_version=?"); params.append(ctx_version)
@@ -894,7 +1110,8 @@ def run_ia_batch(conn, cfg: Config, profile_desc: str, max_n: int | None = None,
     total = len(pending)
     done = 0
     rate_racha = 0   # OPS-4: circuito nocturno ante tormenta 429/5xx (backoff + corte)
-    N = cfg.ia.batch_prompt if cfg.ia.batch_prompt > 1 else 1
+    local = cfg.ia.local_enabled
+    N = 1 if local else (cfg.ia.batch_prompt if cfg.ia.batch_prompt > 1 else 1)
     for i in range(0, total, N):
         # /stop: corte limpio ENTRE grupos — lo procesado ya está commiteado
         if stop_event is not None and stop_event.is_set():
@@ -947,7 +1164,13 @@ def run_ia_batch(conn, cfg: Config, profile_desc: str, max_n: int | None = None,
         else:
             for r in grupo:
                 t0 = time.time()
-                parsed, err_kind = ia_extract_detail(cfg, r, profile_desc, mercado)
+                if local:
+                    # spec-ia-local: 2 tareas con fallback cloud por oferta
+                    parsed, err_kind = ia_extract_local(cfg, r, profile_desc, mercado)
+                    if parsed is None and cfg.ia.local_fallback_cloud:
+                        parsed, err_kind = ia_extract_detail(cfg, r, profile_desc, mercado)
+                else:
+                    parsed, err_kind = ia_extract_detail(cfg, r, profile_desc, mercado)
                 log.info("IA %d/%d %s — %s (%.1fs)", i + 1, total, r["group_id"][:20],
                          (r.get("title") or "")[:40], time.time() - t0)
                 if err_kind == "rate":
@@ -964,7 +1187,8 @@ def run_ia_batch(conn, cfg: Config, profile_desc: str, max_n: int | None = None,
                         progress(i + 1, total, r.get("title") or "")
                     except Exception:
                         pass
-                if apply_ia_result(conn, cfg, r, parsed, ctx_version=ctx_version):
+                if apply_ia_result(conn, cfg, r, parsed, ctx_version=ctx_version,
+                                   model=cfg.ia.local_model if local else None):
                     conn.commit()
                     done += 1
                 time.sleep(0.5)

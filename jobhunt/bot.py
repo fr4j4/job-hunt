@@ -603,6 +603,7 @@ def _help_text() -> str:
         "/report — análisis completo del mercado con gráficos → PDF",
         "/report status · /report list — avance del reporte · historial de PDFs",
         "/stats — cobertura del pool (procesadas IA, datos faltantes)",
+        "/config — configuración actual (tokens enmascarados)",
         "",
         "📢 <b>Canal (broadcast)</b>",
         "/channel — estado del canal (umbral, cola, distribución market score)",
@@ -632,6 +633,44 @@ def _help_text() -> str:
         "",
         "/help — esta ayuda",
     ])
+
+
+def _config_text(cfg: Config) -> str:
+    """Config actual (comando /config) — enmascara tokens/keys (nunca mostrar secretos)."""
+    from .notify import esc
+    def mask(v: str) -> str:
+        v = v or ""
+        if len(v) <= 8:
+            return "***"
+        return v[:4] + "…" + v[-4:]
+
+    ia = cfg.ia
+    ch = cfg.channel
+    tg = cfg.telegram
+    lines = [
+        "⚙️ <b>Configuración</b>",
+        f"🤖 <b>IA</b>",
+        f"  enabled: {ia.enabled} · modelo: <code>{esc(ia.model)}</code>",
+        f"  base_url: <code>{esc(ia.base_url)}</code> · api_key: <code>{mask(ia.api_key)}</code>",
+        f"  timeout: {ia.timeout}s · retries: {ia.retries} · concurrency: {ia.concurrency}",
+        f"  batch_prompt: {ia.batch_prompt} · batch_size: {ia.batch_size}",
+        f"  reasoning_effort: {ia.reasoning_effort or 'off'}",
+        f"  <b>local</b>: {'ON' if ia.local_enabled else 'OFF'} · modelo: <code>{esc(ia.local_model)}</code>",
+        f"  local_url: <code>{esc(ia.local_base_url)}</code> · timeout: {ia.local_timeout}s",
+        f"  fallback_cloud: {ia.local_fallback_cloud} · concurrency: {ia.local_concurrency}",
+        f"📢 <b>Canal</b>",
+        f"  enabled: {ch.enabled} · umbral: {ch.min_score} · ventana: {ch.max_age_days}d",
+        f"  dev-gate: {'ON' if ch.require_dev else 'OFF'} · max_posts: {ch.max_posts}",
+        f"  digest_min: {ch.digest_min_score} · max_posts_sweep: {ch.max_posts_per_sweep}",
+        f"📡 <b>Telegram</b>",
+        f"  chat: <code>{esc(str(tg.chat_id))}</code> · allowed: {len(tg.allowed_chats)} chats",
+        f"  token: <code>{mask(tg.bot_token)}</code>",
+        f"🔎 <b>Búsqueda</b>",
+        f"  horas premium: {cfg.premium_hours} · jooble_key: <code>{mask(cfg.jooble_api_key)}</code>",
+        f"  fuentes: {', '.join(k for k, v in cfg.sources.items() if v) or 'ninguna'}",
+        f"📊 <b>Alertas</b>: min {cfg.alerts.min_score} · worth_it {cfg.alerts.worth_it_score}",
+    ]
+    return "\n".join(lines)
 
 
 def _stats_text(cfg: Config) -> str:
@@ -727,6 +766,9 @@ def _handle_command(cfg: Config, message: dict, state: dict) -> None:
                     return
                 else:
                     threading.Thread(target=_report_async, args=(cfg, chat_id), daemon=True).start()
+        elif cmd == "/config":
+            _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
+                                         "text": _config_text(cfg)})
         elif cmd == "/stats":
             _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
                                          "text": _stats_text(cfg)})
@@ -1491,7 +1533,8 @@ def _register_commands(cfg: Config) -> None:
         {"command": "stop", "description": "Detiene la operación en curso (corte limpio)"},
         {"command": "report", "description": "Análisis de mercado completo con PDF"},
         {"command": "latest", "description": "Últimas ofertas registradas"},
-        {"command": "stats",  "description": "Cobertura IA y datos del pool"},
+        {"command": "stats", "description": "Cobertura del pool"},
+        {"command": "config", "description": "Configuración actual (tokens enmascarados)"},
         {"command": "channel", "description": "Estado del canal"},
         {"command": "channel_publish", "description": "Publicar candidatas al canal ahora"},
         {"command": "channel_publish_ia", "description": "Publicar solo ofertas revisadas por IA"},

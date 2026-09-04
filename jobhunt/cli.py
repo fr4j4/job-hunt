@@ -63,6 +63,7 @@ def worker_ia(cfg, work_q, out_q, lote_id: int, stop_event, mercado: str,
     (job, parsed, err_kind, lote_id) en out_q (try/finally — A2: 1 resultado
     garantizado por oferta). Respeta stop_event (breaker B5: los workers extra
     salen antes de tomar un nuevo job). Sale sola cuando la cola se agota.
+    extract_fn: override (spec-ia-local — ia_extract_local con fallback cloud).
     """
     from queue import Empty
     from .enrich import ia_extract_detail
@@ -80,6 +81,15 @@ def worker_ia(cfg, work_q, out_q, lote_id: int, stop_event, mercado: str,
         finally:
             out_q.put((job, parsed, err_kind, lote_id))
             work_q.task_done()
+
+
+def _extract_local_con_fallback(cfg, job, profile_desc, mercado):
+    """Wrapper spec-ia-local: 2 tareas locales; si fallan → cloud individual."""
+    from .enrich import ia_extract_local, ia_extract_detail
+    parsed, err = ia_extract_local(cfg, job, profile_desc, mercado)
+    if parsed is None and cfg.ia.local_fallback_cloud:
+        parsed, err = ia_extract_detail(cfg, job, profile_desc, mercado)
+    return parsed, err
 
 
 def consume_lote(conn, cfg, out_q, lote, lote_id: int, deadline: float,
@@ -350,7 +360,9 @@ def cmd_run(cfg, notify: bool = True, on_phase=None, stop_event: threading.Event
                 from queue import Queue
                 work_q, out_q = Queue(), Queue()
                 stop_event = threading.Event()
-                n_workers = max(1, min(cfg.ia.concurrency, len(lote)))
+                local = cfg.ia.local_enabled
+                n_workers = max(1, min(cfg.ia.local_concurrency if local else cfg.ia.concurrency,
+                                      len(lote)))
                 # H3: precargar ANTES de arrancar threads — si un worker llegara a
                 # Empty antes de los put, saldría y dejaría jobs huérfanos (deadline muerto)
                 for j in lote:
@@ -359,16 +371,27 @@ def cmd_run(cfg, notify: bool = True, on_phase=None, stop_event: threading.Event
                 for _ in range(n_workers):
                     t = threading.Thread(target=worker_ia,
                                          args=(cfg, work_q, out_q, n_lote,
-                                               stop_event, mercado, p_desc),
+                                               stop_event, mercado, p_desc,
+                                               _extract_local_con_fallback if local else None),
                                          daemon=True)
                     t.start()
                     threads.append(t)
 
                 # 3. main: consume resultados y escribe (ÚNICO escritor)
-                #    deadline anti-cuelgue: len/CONCURRENCY × 242s peor caso × 1.5, mín 300s
-                deadline = time.time() + max(300, (len(lote) / cfg.ia.concurrency) * 242 * 1.5)
-                st = consume_lote(conn, cfg, out_q, lote, n_lote, deadline,
-                                  stop_event=stop_event)
+                #    deadline anti-cuelgue: len/CONCURRENCY × peor caso × 1.5, mín 300s
+                #    (spec-ia-local P1-4: en modo local el peor caso es local_timeout)
+                peor_caso = cfg.ia.local_timeout if local else 242
+                deadline = time.time() + max(300, (len(lote) / n_workers) * peor_caso * 1.5)
+                if local:
+                    def _apply_local(conn, cfg, r, parsed, ctx_version=""):
+                        from .enrich import apply_ia_result
+                        return apply_ia_result(conn, cfg, r, parsed, ctx_version=ctx_version,
+                                               model=cfg.ia.local_model)
+                    st = consume_lote(conn, cfg, out_q, lote, n_lote, deadline,
+                                      apply_fn=_apply_local, stop_event=stop_event)
+                else:
+                    st = consume_lote(conn, cfg, out_q, lote, n_lote, deadline,
+                                      stop_event=stop_event)
                 lots_done += 1 if st["recibidos"] else 0
                 ia_failures += st["ia_failures"]
                 breaker_trips += st["breaker_trips"]

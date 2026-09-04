@@ -127,6 +127,14 @@ class IaConfig:
     concurrency: int = 2             # threads IA paralelos por lote (1 = secuencial)
     reasoning_effort: str = ""       # "" | low | medium | high (OpenAI-compat; "" = off)
     batch_prompt: int = 5            # ofertas por llamada IA (1 = individual; spec-enrich-lotes)
+    # --- IA local (spec-ia-local v2.1) — opt-in, cero regresión si apagado ---
+    local_enabled: bool = False      # true → pipeline local (2 tareas) con fallback cloud
+    local_base_url: str = "http://localhost:8080/v1"
+    local_model: str = "qwen-2.5-7b-instruct"
+    local_timeout: int = 600         # el local es lento; margen amplio
+    local_retries: int = 1
+    local_fallback_cloud: bool = True  # si local falla → cloud (nunca se pierde oferta)
+    local_concurrency: int = 2       # threads IA locales (patrón worker_ia/consume_lote)
 
 
 @dataclass
@@ -316,6 +324,14 @@ def load_config(env_file: Path | None = None) -> Config:
         concurrency=max(1, min(6, _env_int("IA_CONCURRENCY", 2))),
         batch_prompt=max(1, min(10, _env_int("IA_BATCH_PROMPT", 5))),
         reasoning_effort=_env("IA_REASONING_EFFORT", "").strip().lower(),
+        # --- IA local (spec-ia-local v2.1) ---
+        local_enabled=_env_bool("IA_LOCAL_ENABLED", False),
+        local_base_url=_env("IA_LOCAL_BASE_URL", "http://localhost:8080/v1"),
+        local_model=_env("IA_LOCAL_MODEL", "qwen-2.5-7b-instruct"),
+        local_timeout=_env_int("IA_LOCAL_TIMEOUT", 600),
+        local_retries=_env_int("IA_LOCAL_RETRIES", 1),
+        local_fallback_cloud=_env_bool("IA_LOCAL_FALLBACK_CLOUD", True),
+        local_concurrency=max(1, min(6, _env_int("IA_LOCAL_CONCURRENCY", 2))),
     )
     tg = Telegram(
         enabled=_env_bool("TELEGRAM_ENABLED", True),
