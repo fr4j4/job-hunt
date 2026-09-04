@@ -630,7 +630,9 @@ def _help_text() -> str:
 
 
 def _stats_text(cfg: Config) -> str:
-    """Cobertura del pool: procesadas IA, pendientes, qué datos faltan."""
+    """Cobertura del pool: procesadas IA, pendientes, qué datos faltan.
+    'En cola IA' usa el criterio C9 real (procesables por el enrich) + separa
+    las que requieren scan (sin ficha) — feedback honesto (fix feedback engañoso)."""
     conn = database.connect(cfg)
     try:
         q = lambda s: conn.execute(s).fetchone()[0]
@@ -638,8 +640,14 @@ def _stats_text(cfg: Config) -> str:
         ia = q("SELECT COUNT(*) FROM ofertas WHERE active=1 AND ia_model != ''")
         con_mod = q("SELECT COUNT(*) FROM ofertas WHERE active=1 AND modality != ''")
         con_sal = q("SELECT COUNT(*) FROM ofertas WHERE active=1 AND salary != ''")
-        en_cola = q("SELECT COUNT(*) FROM ofertas WHERE active=1 AND ia_model='' "
-                    "AND (modality='' OR salary='' OR ai_fit_reason='')")
+        # C9 ampliado (mismo criterio que el ACK del enrich): procesables AHORA
+        en_cola = q("""SELECT COUNT(*) FROM ofertas WHERE active=1 AND ia_model=''
+                       AND (length(description)>200 OR description_source!='')
+                       AND (modality='' OR salary='' OR description IS NULL OR
+                            salary_status IN ('implausible','suspect'))""")
+        # sin IA + sin descripción suficiente → requieren scan (no enrich)
+        sin_ficha = q("""SELECT COUNT(*) FROM ofertas WHERE active=1 AND ia_model=''
+                         AND NOT (length(description)>200 OR description_source!='')""")
         model = conn.execute("SELECT ia_model FROM ofertas WHERE ia_model != '' "
                              "ORDER BY last_seen DESC LIMIT 1").fetchone()
         lines = [
@@ -648,7 +656,8 @@ def _stats_text(cfg: Config) -> str:
             f"Activas: <code>{total}</code>",
             f"🧠 Procesadas por IA: <code>{ia}</code> ({ia * 100 // max(total, 1)}%)",
             f"   Modelo: <code>{model[0] if model else '—'}</code>",
-            f"   En cola IA: <code>{en_cola}</code> (batch nocturno 03:00 UTC o /enrich)",
+            f"   En cola IA: <code>{en_cola}</code> (procesables con /enrich)",
+            f"   Sin ficha: <code>{sin_ficha}</code> (requieren /search para bajar descripción)",
             "",
             f"Con modalidad: <code>{con_mod}</code> · Con sueldo: <code>{con_sal}</code>",
         ]
