@@ -91,12 +91,13 @@ def test_market_score_guardia_bajo():
 
 
 def test_market_score_tinet_medio():
-    # TINET: sin salario, híbrido, buen stack, 7 días → ~45-55 (calibración real: 48)
+    # TINET: sin salario (6), híbrido (10), empresa (10), ubicación genérica (3),
+    # frescura 7d (7), sin beneficios (2) → 38 — v9 ya no puntúa el stack
     job = _mk(modality="híbrido", company="TINET S.A.", techs="React;Java;TS;SQL",
               title="Desarrollador Fullstack React con Java o Python semi sr",
               date_posted="2026-08-27")
     s, _ = compute_market_score(job, NOW)
-    assert 45 <= s <= 55
+    assert 30 <= s <= 48
 
 
 def test_market_score_staffing_descuenta():
@@ -126,10 +127,12 @@ def test_market_score_techs_por_abreviatura():
 
 
 def test_market_score_go_word_boundary():
-    # 'go' NO debe matchear 'investigación' ni 'java' a 'javascript'
+    # v9: el stack ya NO puntúa — 'go' en el título no puede inflar el score
     job = _mk(techs="", title="Investigador de mercados, javascript")
     s, b = compute_market_score(job, NOW)
-    assert b["stack_hits"] == 1  # solo javascript matchea
+    assert "stack_hits" not in b          # componente eliminado en v9
+    assert b["salario_pts"] == 6          # sin salario → piso neutro
+    assert s >= 0
 
 
 # ---------- 4. is_dev (gate H4) ----------
