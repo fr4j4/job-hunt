@@ -58,6 +58,8 @@ def fetch_page(url: str) -> tuple[str, str]:
     except Exception:
         return "", "error"
     html = req.text or ""
+    if req.status_code >= 500:            # F1-fetch: 5xx es transitorio, no "ok"
+        return html, "error"
     # not_found: 404/410 o patrones de oferta expirada
     if req.status_code in (404, 410):
         return html, "not_found"
@@ -521,19 +523,38 @@ def _llm_local(cfg: Config, prompt: str) -> tuple[dict | None, str]:
     return None, "other"
 
 
+def ia_extract_local_con_fallback(cfg: Config, job: dict, profile_desc: str,
+                                  mercado: str = "") -> tuple[dict | None, str, str]:
+    """Local (2 tareas) y, si falla y local_fallback_cloud, cloud individual.
+    Retorna (parsed, err_kind, modelo_real) — IA-1: ia_model etiqueta SIEMPRE
+    el modelo que produjo el resultado, nunca local_model para un fallback cloud."""
+    parsed, err = ia_extract_local(cfg, job, profile_desc, mercado)
+    if parsed is not None:
+        return parsed, err, cfg.ia.local_model
+    if cfg.ia.local_fallback_cloud:
+        parsed, err = ia_extract_detail(cfg, job, profile_desc, mercado)
+    return parsed, err, cfg.ia.model
+
+
+def _coerce_salario(v) -> int:
+    """salario_clp_mensual → int (F4/IA-4): float 2500000.0 → 2500000 (stats
+    parseaba 'CLP 2500000.0' como 25000000); '2.500.000' → 2500000; bool/basura → 0."""
+    if isinstance(v, bool) or v is None:
+        return 0
+    if isinstance(v, (int, float)):
+        return int(v) if v > 0 else 0
+    try:
+        return max(0, int(float(str(v).replace(".", "").replace(",", "").strip())))
+    except ValueError:
+        return 0
+
+
 def _normalizar_extract_local(d: dict) -> dict:
     """Coerción de tipos post-respuesta (P2-6): un 7B puede emitir strings
     donde el schema pide listas/ints. Defensa de segundo nivel."""
     out = dict(d)
     # salario: string → int/0
-    sal = out.get("salario_clp_mensual")
-    if isinstance(sal, str):
-        try:
-            out["salario_clp_mensual"] = int(float(sal.replace(".", "").replace(",", "")))
-        except ValueError:
-            out["salario_clp_mensual"] = 0
-    elif not isinstance(sal, int):
-        out["salario_clp_mensual"] = 0
+    out["salario_clp_mensual"] = _coerce_salario(out.get("salario_clp_mensual"))
     # listas: string → []
     for campo in ("techs", "red_flags", "green_flags", "benefits"):
         v = out.get(campo)
@@ -725,6 +746,7 @@ def ia_extract_lote(cfg: Config, rows: list[dict], profile_desc: str,
             arr = data.get("ofertas") if isinstance(data, dict) else data
             if not isinstance(arr, list):
                 return None, "other"
+            arr = [i for i in arr if isinstance(i, dict)]   # IA-3: item basura no aborta el lote
             # normalizar idiomas: el modelo puede devolver strings o dicts (spike verificado)
             for item in arr:
                 if isinstance(item, dict) and isinstance(item.get("idiomas"), list):
@@ -974,12 +996,9 @@ def enrich_pending(conn, cfg: Config | None, max_n: int | None = None,
         if local:
             # spec-ia-local: IA individual (2 tareas) con fallback cloud por oferta
             for r in recargadas:
-                parsed, _ = ia_extract_local(cfg, r, perfil, mercado)
-                if parsed is None and cfg.ia.local_fallback_cloud:
-                    parsed, _ = ia_extract_detail(cfg, r, perfil, mercado)
+                parsed, _, modelo = ia_extract_local_con_fallback(cfg, r, perfil, mercado)
                 if parsed:
-                    apply_ia_result(conn, cfg, r, parsed, ctx_version=ctx_version,
-                                    model=cfg.ia.local_model if local else None)
+                    apply_ia_result(conn, cfg, r, parsed, ctx_version=ctx_version, model=modelo)
         elif N > 1:
             arr, err = ia_extract_lote(cfg, recargadas, perfil, mercado)
             if arr is None:
@@ -1056,6 +1075,17 @@ def apply_ia_result(conn, cfg: Config, r: dict, parsed: dict | None,
     if not parsed:
         return False
     from .channel import _NONDEV_CATEGORIES   # sin ciclo (P2-7) — guard §2.2
+    # F1/F3: el dict r viene de SELECTs que no traen salary_source/ia_model/ai_*
+    # (guard A3 y sanitización de fósiles eran no-op). Se lee la fila fresca UNA
+    # vez aquí — todos los callers quedan cubiertos sin tocar la firma.
+    fila = conn.execute(
+        "SELECT salary, salary_source, modality, ia_model, ai_opinion, ai_resumen, "
+        "ai_fit_reason FROM ofertas WHERE group_id=?", (r["group_id"],)).fetchone()
+    if fila is not None:
+        cols = ("salary", "salary_source", "modality", "ia_model", "ai_opinion",
+                "ai_resumen", "ai_fit_reason")
+        r = {**dict(r), **dict(zip(cols, tuple(fila)))}
+    model = model or parsed.get("_ia_model") or None
     mod = {"R": "remoto", "H": "híbrido", "P": "presencial"}.get(parsed.get("modalidad"), "")
     ia_fields = []
     sets, params = [], []
@@ -1068,8 +1098,9 @@ def apply_ia_result(conn, cfg: Config, r: dict, parsed: dict | None,
     if not r.get("modality") and mod:
         sets.append("modality=?"); params.append(mod); ia_fields.append("modality")
     # guard A3: la IA propone salary SOLO si no hay procedencia ya establecida
-    if not r.get("salary") and not r.get("salary_source") and parsed.get("salario_clp_mensual"):
-        sets.append("salary=?"); params.append(f"CLP {parsed['salario_clp_mensual']}")
+    sal_ia = _coerce_salario(parsed.get("salario_clp_mensual"))
+    if not r.get("salary") and not r.get("salary_source") and sal_ia:
+        sets.append("salary=?"); params.append(f"CLP {sal_ia}")
         sets.append("salary_source=?"); params.append("ia")
         ia_fields.append("salary")
     if parsed.get("seniority_real") or parsed.get("seniority"):
@@ -1246,11 +1277,11 @@ def run_ia_batch(conn, cfg: Config, profile_desc: str, max_n: int | None = None,
         else:
             for r in grupo:
                 t0 = time.time()
+                modelo = None
                 if local:
                     # spec-ia-local: 2 tareas con fallback cloud por oferta
-                    parsed, err_kind = ia_extract_local(cfg, r, profile_desc, mercado)
-                    if parsed is None and cfg.ia.local_fallback_cloud:
-                        parsed, err_kind = ia_extract_detail(cfg, r, profile_desc, mercado)
+                    parsed, err_kind, modelo = ia_extract_local_con_fallback(
+                        cfg, r, profile_desc, mercado)
                 else:
                     parsed, err_kind = ia_extract_detail(cfg, r, profile_desc, mercado)
                 log.info("IA %d/%d %s — %s (%.1fs)", i + 1, total, r["group_id"][:20],
@@ -1269,8 +1300,7 @@ def run_ia_batch(conn, cfg: Config, profile_desc: str, max_n: int | None = None,
                         progress(i + 1, total, r.get("title") or "")
                     except Exception:
                         pass
-                if apply_ia_result(conn, cfg, r, parsed, ctx_version=ctx_version,
-                                   model=cfg.ia.local_model if local else None):
+                if apply_ia_result(conn, cfg, r, parsed, ctx_version=ctx_version, model=modelo):
                     conn.commit()
                     done += 1
                 time.sleep(0.5)

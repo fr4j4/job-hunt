@@ -261,7 +261,8 @@ def test_local_breaker_cloud_no_tripula(mem_db, monkeypatch):
     monkeypatch.setattr(en, "ia_extract_detail", fake_detail)
     en.enrich_pending(mem_db, cfg, max_n=1)
     row = mem_db.execute("SELECT ia_model FROM ofertas WHERE group_id='g1'").fetchone()
-    assert row["ia_model"] == cfg.ia.local_model   # procesada por fallback, sin tripular breaker
+    # IA-1 (auditoría): el fallback cloud etiqueta el modelo REAL (cloud), no local_model
+    assert row["ia_model"] == cfg.ia.model
 
 
 # ---------- 10. spec-techs-dev-gate: _extract_techs + guard + regla salario ----------

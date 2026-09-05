@@ -46,6 +46,26 @@ def _english_level(desc: str, title: str) -> str:
     return "menciona"
 
 
+def _english_from_ia(job: dict) -> str:
+    """Inglés desde la IA (autoridad, spec-techs-dev-gate): ai_idiomas JSON >
+    ai_ingles. Retorna '' si la IA no procesó → regex modo degradado."""
+    try:
+        for i in json.loads(job.get("ai_idiomas") or "[]"):
+            if isinstance(i, dict) and re.search(r"ingl|english", str(i.get("idioma", "")), re.I):
+                return "excluyente" if i.get("excluyente") else "deseable"
+    except (ValueError, TypeError):
+        pass
+    return {"requerido": "excluyente", "deseable": "deseable", "no": "no"}.get(
+        str(job.get("ai_ingles") or "").lower(), "")
+
+
+def _kw_hit(kw: str, text: str) -> bool:
+    """Match por palabra completa (S1/S2): 'intern' no mata 'internacional',
+    'java' no cuenta en 'javascript'. Espacios internos flexibles (spring boot)."""
+    pat = r"(?<!\w)" + r"\s*".join(re.escape(w) for w in _norm(kw).split()) + r"(?!\w)"
+    return bool(re.search(pat, text))
+
+
 def _us_hours(desc: str) -> bool:
     return bool(re.search(r"\bpst\b|\best\b hours|\bcst\b hours|us business|us hours", _norm(desc)))
 
@@ -79,18 +99,16 @@ def compute_score(job: dict, cfg: Config) -> tuple[int, dict]:
     breakdown["base"] = s.base
 
     # ---- hard filters (red keywords del .env) ----
-    ndesc = _norm(desc)
     for kw in p.red_keywords:
-        if kw in blob or kw in ndesc:
+        if kw and (_kw_hit(kw, blob) or _kw_hit(kw, t_desc)):
             breakdown["rejected_by"] = kw
             return 0, breakdown
 
-    # ---- techs (primarias vs secundarias) ----
-    primary = [t.replace(" ", "") for t in p.techs[: s.n_tech_primary]]
+    # ---- techs (primarias vs secundarias) — solo título, palabra completa (S2:
+    # 'Java, Indonesia' en location y 'javascript' ya no suman Java) ----
     techs_hit = []
     for i, tech in enumerate(p.techs):
-        pat = _norm(tech).replace(" ", "")
-        if pat and pat in blob.replace(" ", ""):
+        if tech and _kw_hit(tech, t_title):
             pts = s.tech_primary if i < s.n_tech_primary else s.tech_secondary
             score += pts
             techs_hit.append((tech, pts))
@@ -117,7 +135,7 @@ def compute_score(job: dict, cfg: Config) -> tuple[int, dict]:
             breakdown["exp"] = f"{years}y soft {s.exp_mismatch_soft}"
 
     # ---- inglés ----
-    lvl = _english_level(desc, job.get("title", ""))
+    lvl = _english_from_ia(job) or _english_level(desc, job.get("title", ""))
     if lvl == "excluyente":
         score += s.english_excluyente
         breakdown["english"] = f"excluyente {s.english_excluyente}"
@@ -221,6 +239,8 @@ def _salary_to_clp_monthly(sal_raw: str, desc: str) -> int | None:
     is_usd = "usd" in lower or (re.fullmatch(r"[\d,]{3,4}", num_s) and "clp" not in lower)
     if num < 1000:
         return None
+    if re.search(r"a[ñn]o|anual|year|annual", lower):   # F2/S4: cifra anual → mensual
+        num = num / 12
     if is_usd:
         clp = int(num * 950)
         return clp if 300_000 <= clp <= 20_000_000 else None   # banda mensual plausible

@@ -84,11 +84,13 @@ def worker_ia(cfg, work_q, out_q, lote_id: int, stop_event, mercado: str,
 
 
 def _extract_local_con_fallback(cfg, job, profile_desc, mercado):
-    """Wrapper spec-ia-local: 2 tareas locales; si fallan → cloud individual."""
-    from .enrich import ia_extract_local, ia_extract_detail
-    parsed, err = ia_extract_local(cfg, job, profile_desc, mercado)
-    if parsed is None and cfg.ia.local_fallback_cloud:
-        parsed, err = ia_extract_detail(cfg, job, profile_desc, mercado)
+    """Wrapper spec-ia-local: 2 tareas locales; si fallan → cloud individual.
+    Etiqueta parsed["_ia_model"] con el modelo REAL (IA-1: el fallback cloud
+    no debe quedar como local_model en ia_model)."""
+    from .enrich import ia_extract_local_con_fallback
+    parsed, err, model = ia_extract_local_con_fallback(cfg, job, profile_desc, mercado)
+    if parsed is not None:
+        parsed["_ia_model"] = model
     return parsed, err
 
 
@@ -359,7 +361,8 @@ def cmd_run(cfg, notify: bool = True, on_phase=None, stop_event: threading.Event
                 # 3. workers IA paralelos (solo HTTP, módulo-level = testeable)
                 from queue import Queue
                 work_q, out_q = Queue(), Queue()
-                stop_event = threading.Event()
+                # evento POR LOTE: no rebindear stop_event (el de /stop) — bug CONC-1
+                lote_stop = threading.Event()
                 local = cfg.ia.local_enabled
                 n_workers = max(1, min(cfg.ia.local_concurrency if local else cfg.ia.concurrency,
                                       len(lote)))
@@ -371,7 +374,7 @@ def cmd_run(cfg, notify: bool = True, on_phase=None, stop_event: threading.Event
                 for _ in range(n_workers):
                     t = threading.Thread(target=worker_ia,
                                          args=(cfg, work_q, out_q, n_lote,
-                                               stop_event, mercado, p_desc,
+                                               lote_stop, mercado, p_desc,
                                                _extract_local_con_fallback if local else None),
                                          daemon=True)
                     t.start()
@@ -382,22 +385,16 @@ def cmd_run(cfg, notify: bool = True, on_phase=None, stop_event: threading.Event
                 #    (spec-ia-local P1-4: en modo local el peor caso es local_timeout)
                 peor_caso = cfg.ia.local_timeout if local else 242
                 deadline = time.time() + max(300, (len(lote) / n_workers) * peor_caso * 1.5)
-                if local:
-                    def _apply_local(conn, cfg, r, parsed, ctx_version=""):
-                        from .enrich import apply_ia_result
-                        return apply_ia_result(conn, cfg, r, parsed, ctx_version=ctx_version,
-                                               model=cfg.ia.local_model)
-                    st = consume_lote(conn, cfg, out_q, lote, n_lote, deadline,
-                                      apply_fn=_apply_local, stop_event=stop_event)
-                else:
-                    st = consume_lote(conn, cfg, out_q, lote, n_lote, deadline,
-                                      stop_event=stop_event)
+                # modelo real: apply_ia_result lee parsed["_ia_model"] (lo pone
+                # _extract_local_con_fallback) — cloud de fallback NO se etiqueta local
+                st = consume_lote(conn, cfg, out_q, lote, n_lote, deadline,
+                                  stop_event=lote_stop)
                 lots_done += 1 if st["recibidos"] else 0
                 ia_failures += st["ia_failures"]
                 breaker_trips += st["breaker_trips"]
                 hechas_acum += st["recibidos"]
                 conn.commit()
-                stop_event.set()
+                lote_stop.set()
 
                 # 4. (enrich ya corrió PRE-IA — FIX B) rescore SOLO del lote
                 phase("rescore lote", detail=f"{n_lote + 1}/{n_lotes}")

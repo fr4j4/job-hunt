@@ -122,45 +122,29 @@ def age_days(row: dict, now: datetime | None = None) -> int:
 _DEV_CATEGORIES = {"Full Stack", "Backend", "Frontend", "Data", "Mobile", "AI/ML",
                    "Tech Lead", "DevOps/Cloud", "QA", "Software", "Seguridad"}
 
-# stems que delatan roles dev en texto libre (modo lote puede escribir
-# "Backend Developer", "Fullstack Developer", "Desarrollo Móvil", "Cloud"…)
-_DEV_STEMS = ("dev", "backend", "frontend", "full", "stack", "data", "mobile", "móvil",
-              "movil", "ai", "ml", "lead", "cloud", "qa", "software", "seguridad",
-              "secops", "infra", "sistemas", "informátic", "informatic", "python",
-              "java", "node", "react", "devops")
+_CAT_RULES = (   # CH-1: word boundaries — 'Retail'≠AI, 'Full Time'≠Full Stack, 'Data Entry'≠Data
+    ("Backend", r"\bback.?end\b"),
+    ("Frontend", r"\bfront.?end\b|\bfront\b"),
+    ("Full Stack", r"\bfull.?stack\b|\bstack\b"),
+    ("Mobile", r"\bm[oó]vil\b|\bmobile\b"),
+    ("Data", r"\bdata\b(?!\s*entry)|\bdatos\b"),
+    ("AI/ML", r"\bai\b|\bml\b|\bia\b|\bmachine learning\b"),
+    ("Tech Lead", r"\btech\s*lead\b|\blead\b(?!\s+(?:de\s+)?(?:ventas|comercial|retail|tienda))"),
+    ("DevOps/Cloud", r"\bdev.?ops\b|\bcloud\b|\binfra\w*\b|\bsre\b"),
+    ("QA", r"\bqa\b|\btesting\b"),
+    ("Software", r"\bsoftware\b|\bdesarroll\w*\b"),
+    ("Seguridad", r"\bseguridad\b|\bsecops\b|\bsecurity\b"),
+)
 
 
 def _categorias_dev(rc: str) -> set[str]:
     """Normaliza rol_categoria libre → categorías dev canónicas:
-    'Backend Developer' → {Backend} · 'Fullstack Developer' → {Full Stack, Backend, Frontend}
-    'DevOps' → {DevOps/Cloud} · 'Desarrollo Móvil' → {Mobile} · 'Cloud / Infra' → {DevOps/Cloud}."""
+    'Backend Developer' → {Backend} · 'Fullstack Developer' → {Full Stack, Software}
+    'DevOps' → {DevOps/Cloud} · 'Desarrollo Móvil' → {Mobile, Software}.
+    Match por palabra completa (CH-1): 'Retail', 'Full Time', 'Data Entry',
+    'Team Lead Ventas' → set() (antes: AI/ML, Full Stack, Data, Tech Lead)."""
     r = rc.lower()
-    out: set[str] = set()
-    if "backend" in r:
-        out.add("Backend")
-    if "frontend" in r or "front" in r:
-        out.add("Frontend")
-    if "full" in r or "stack" in r:
-        out.add("Full Stack")
-    if "móvil" in r or "movil" in r or "mobile" in r:
-        out.add("Mobile")
-    if "data" in r or "datos" in r:
-        out.add("Data")
-    if "ai" in r or "ml" in r:
-        out.add("AI/ML")
-    if "tech lead" in r or "lead" in r:
-        out.add("Tech Lead")
-    if "devops" in r:
-        out.add("DevOps/Cloud")
-    if "cloud" in r or "infra" in r:
-        out.add("DevOps/Cloud")
-    if "qa" in r or "testing" in r:
-        out.add("QA")
-    if "software" in r or "desarroll" in r:
-        out.add("Software")
-    if "seguridad" in r or "secops" in r or "security" in r:
-        out.add("Seguridad")
-    return out
+    return {cat for cat, pat in _CAT_RULES if re.search(pat, r)}
 
 
 _NONDEV_CATEGORIES = {"Ingeniería no-software", "Analista/Empresa", "Profesor/Formación",
