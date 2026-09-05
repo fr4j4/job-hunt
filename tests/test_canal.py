@@ -190,6 +190,7 @@ def _insert(conn, gid, title="Dev Python", ms=80, rol="Backend", company="X Corp
 
 def test_publish_orden_tope_dedup(conn_mem):
     cfg = load_config()
+    cfg.channel.enabled = True
     cfg.channel.chat_id = "-1004495706494"
     for i in range(15):
         _insert(conn_mem, f"g{i}", ms=90 - i)
@@ -225,6 +226,7 @@ def test_publish_noop_sin_chat_id(conn_mem):
 
 def test_publish_notified_solo_si_ok(conn_mem):
     cfg = load_config()
+    cfg.channel.enabled = True
     cfg.channel.chat_id = "-1004495706494"
     _insert(conn_mem, "g_fail")
 
@@ -240,6 +242,7 @@ def test_publish_notified_solo_si_ok(conn_mem):
 
 def test_publish_dry_run_no_api(conn_mem):
     cfg = load_config()
+    cfg.channel.enabled = True
     cfg.channel.chat_id = "-1004495706494"
     _insert(conn_mem, "g_dry", ms=95)
     called = []
@@ -258,6 +261,7 @@ def test_publish_dry_run_no_api(conn_mem):
 
 def test_gate_dev_bloquea_cobol(conn_mem):
     cfg = load_config()
+    cfg.channel.enabled = True
     cfg.channel.chat_id = "-1004495706494"
     _insert(conn_mem, "g_cobol", title="Analista Programador Mainframe COBOL $2.5M",
             ms=90, rol="Backend")

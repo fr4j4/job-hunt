@@ -15,7 +15,9 @@ from jobhunt.scoring import compute_market_score
 
 @pytest.fixture
 def cfg():
-    return load_config()
+    c = load_config()
+    c.channel.enabled = True   # los tests de publish no dependen del .env (T-P2-1)
+    return c
 
 
 @pytest.fixture
