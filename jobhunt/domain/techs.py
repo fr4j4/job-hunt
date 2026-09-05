@@ -95,3 +95,41 @@ TITLE_RE = re.compile(
     r"\bdocker\b|\bnifi\b|\breact\b|\bangular\b|\bspring\b|\b\.net\b|\baws\b|\bgcp\b|"
     r"\bazure\b|\bgolang\b|\bgo\b(?=\s*(?:lang|developer|dev\b|engineer))|\bnode\b|"
     r"\bpostgres\b|\bgraphql\b", re.I)
+
+
+# ============ techs: modo degradado (IA apagada) — spec-techs-dev-gate §2.1 ============
+
+# Patrones con word boundaries + grafías concatenadas (P1-3) + go con lookahead (P1-4).
+# SOLO se ejecutan si cfg.ia.enabled=false — nunca compiten con la IA (principio §0.2).
+_TECH_PATTERNS = [
+    (r"\bpython3?\b", "Py"), (r"\bjava\b", "Java"), (r"\baws\b", "AWS"),
+    (r"\bangular(?:js)?\b", "Angular"), (r"\breact(?:js|native)?\b", "React"),
+    (r"\bkubernetes\b|\bk8s\b", "K8s"), (r"\bdocker\b", "Docker"),
+    (r"\bgolang\b|\bgo\b(?=\s*(?:lang|developer|dev\b|engineer))", "Go"),
+    (r"\bnode(?:js|\.js)?\b", "Node"), (r"\btypescript\b|\bts\b", "TS"),
+    (r"\bvue(?:js)?\b", "Vue"), (r"\.net\b|\bdotnet\b", ".NET"),
+    (r"\bsql\b|\bmysql\b|\bsqlserver\b", "SQL"), (r"\bfastapi\b", "FastAPI"),
+    (r"\bdjango\b", "Django"), (r"\bkafka\b", "Kafka"), (r"\bgcp\b", "GCP"),
+    (r"\bazure\b", "Azure"), (r"\bscala\b", "Scala"),
+    (r"\bspring(?: ?boot)?\b", "Spring"), (r"\bnifi\b", "NiFi"),
+    (r"\bterraform\b", "TF"), (r"\bjenkins\b", "Jenkins"),
+    (r"\bci[-/]?cd\b", "CI/CD"), (r"\bredis\b", "Redis"),
+    (r"\bpostgres(?:ql)?\b", "Postgres"), (r"\bmongo(?:db)?\b", "Mongo"),
+    (r"\bjavascript\b|\bjs\b", "JS"),
+]
+
+
+def _extract_techs(title: str, desc: str) -> list[str]:
+    """Extrae techs de título+descripción con word boundaries (modo degradado).
+
+    Título primero (más señal por carácter), dedupe, máx 10. Nunca compite con
+    la IA — solo se llama con cfg.ia.enabled=false (spec-techs-dev-gate §2.1)."""
+    texto = f"{title or ''} {desc or ''}".lower()
+    found: list[str] = []
+    for pat, ab in _TECH_PATTERNS:
+        if re.search(pat, texto):
+            if ab not in found:
+                found.append(ab)
+        if len(found) >= 10:
+            break
+    return found
