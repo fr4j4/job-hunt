@@ -41,8 +41,31 @@ def _fuente(row: dict) -> str:
     return _ABBR_FUENTE.get(src, src[:10] or "?")
 
 
+def _json_list(raw) -> list[str]:
+    """Parsea un campo JSON-list (ai_red_flags, ai_green_flags, ai_benefits)."""
+    if not raw:
+        return []
+    try:
+        import json
+        v = json.loads(raw)
+        if isinstance(v, list):
+            return [str(x) for x in v if str(x).strip()]
+    except Exception:
+        pass
+    return []
+
+
+_SEP_THIN = "─────────────────────"
+_SEP_THICK = "━━━━━━━━━━━━━━━━━━━━━"
+
+
 def render_offer_post(row: dict) -> tuple[str, dict | None]:
     """Post individual de oferta al canal (spec v3 §5-A) con botón URL.
+
+    Estructura V3 (2026-09-05): canal GLOBAL — sin encaje personal.
+    3 bloques separados: 1) Hechos (techs+salario)  2) Análisis IA global
+    (resumen+opinión)  3) Señales (red/green/benefits) — con divisores
+    gruesos entre bloques y finos dentro. La descripción NO va en el canal.
 
     Retorna (texto, reply_markup | None). Líneas sin dato se omiten.
     """
@@ -51,37 +74,96 @@ def render_offer_post(row: dict) -> tuple[str, dict | None]:
 
     lines: list[str] = []
     ms = row.get("market_score") or 0
-    lines.append(f"🎯 [<b>{ms}</b>] {esc((row.get('title') or 'Sin título')[:110])}")
+    lines.append(f"🎯 [<b>{ms}</b>] {esc(row.get('title') or 'Sin título')}")
     meta: list[str] = []
     if row.get("company"):
-        meta.append(f"🏢 {esc(row['company'][:40])}")
+        meta.append(f"🏢 {esc(row['company'])}")
+    # rol + seniority (solo si no es vacío/"No especificado")
+    rol = (row.get("rol_categoria") or "").strip()
+    sen = (row.get("seniority_real") or "").strip()
+    if rol and rol.lower() != "no especificado":
+        rs = esc(rol)
+        if sen and sen.lower() not in ("", "no especificado", "no", "desconocido"):
+            rs += f" · {esc(sen)}"
+        meta.append(f"💼 {rs}")
+    elif sen and sen.lower() not in ("", "no especificado", "no", "desconocido"):
+        meta.append(f"💼 {esc(sen)}")
     mod = (row.get("modality") or "").strip()
-    loc = esc((row.get("location") or "").strip()[:40])
+    loc = esc((row.get("location") or "").strip())
     if mod:
-        meta.append(f"📍 {esc(mod)}" + (f" · {loc}" if loc else ""))
+        meta.append(f"🧭 {esc(mod)}" + (f" · 📍 {loc}" if loc else ""))
     elif loc:
         meta.append(f"📍 {loc}")
+    # inglés como chip en meta (si hay)
+    ing_raw = (row.get("ai_idiomas") or "").strip()
+    if ing_raw and "inglés" in ing_raw.lower():
+        excl = '"excluyente": true' in ing_raw
+        meta.append("🗣 EN!" if excl else "🗣 EN")
     if meta:
         lines.append(" · ".join(meta))
-    sal = _salary_to_clp_monthly(row.get("salary") or "", row.get("description") or "")
-    if sal:
-        lines.append(f"💰 ${sal:,}".replace(",", "."))
-    techs = [t.strip() for t in (row.get("techs") or "").split(";") if t.strip()][:6]
+
+    # ── Bloque 1: Hechos ──
+    lines.append(_SEP_THIN)
+    techs = [t.strip() for t in (row.get("techs") or "").split(";") if t.strip()][:8]
     if techs:
         lines.append("🧰 " + esc(" · ".join(techs)))
+    sal = _salary_to_clp_monthly(row.get("salary") or "", row.get("description") or "")
+    raw_sal = (row.get("salary") or "").strip()
+    if sal:
+        sal_note = ""
+        st = (row.get("salary_status") or "").strip().lower()
+        note = (row.get("salary_note") or "").strip()
+        if st == "implausible":
+            sal_note = " · ⚠️ Anómalo"
+            if note:
+                sal_note += f" ({esc(note)})"
+        elif st == "trusted" and note:
+            sal_note = f" · {esc(note)}"
+        lines.append(f"💰 ${sal:,}".replace(",", ".") + sal_note)
+    elif raw_sal:
+        # salario existe pero parser lo rechazó (implausible > techo) → mostrar crudo con alerta
+        st = (row.get("salary_status") or "").strip().lower()
+        note = (row.get("salary_note") or "").strip()
+        sal_note = " · ⚠️ Anómalo" if st == "implausible" else ""
+        if note:
+            sal_note += f" ({esc(note)})" if st == "implausible" else f" · {esc(note)}"
+        lines.append(f"💰 {esc(raw_sal)}{sal_note}")
+    else:
+        lines.append("💰 Sin sueldo declarado")
+
+    # ── Bloque 2: Análisis IA global (sin encaje personal) ──
+    resumen = (row.get("ai_resumen") or "").strip()
     opinion = (row.get("ai_opinion") or "").strip()
-    if opinion:
-        lines.append(f"💬 {esc(opinion[:200])}")
+    if resumen or opinion:
+        lines.append(_SEP_THICK)
+        if resumen:
+            lines.append(f"📝 {esc(resumen)}")
+        if opinion:
+            # separación fina entre resumen y opinión si ambos existen
+            if resumen:
+                lines.append("")  # aire extra
+            lines.append(f"💬 {esc(opinion)}")
+
+    # ── Bloque 3: Señales ──
+    red = _json_list(row.get("ai_red_flags"))
+    green = _json_list(row.get("ai_green_flags"))
+    ben = _json_list(row.get("ai_benefits"))
+    if red or green or ben:
+        lines.append(_SEP_THIN)
+        if red:
+            lines.append("⚠️ " + esc(" · ".join(red)))
+        if green:
+            lines.append("✅ " + esc(" · ".join(green)))
+        if ben:
+            lines.append("🎁 " + esc(" · ".join(ben)))
+
     tail: list[str] = []
-    ing = (row.get("ai_idiomas") or "").strip()
-    if ing and "inglés" in ing.lower():
-        excl = '"excluyente": true' in ing
-        tail.append("🗣 EN!" if excl else "🗣 EN")
     edad = age_days(row)
     if edad or row.get("date_canonical"):
         tail.append(f"📅 {edad}d" if edad < 14 else "📅 >2 sem")
     tail.append(f"🌐 {_fuente(row)}")
     if tail:
+        lines.append(_SEP_THIN)
         lines.append(" · ".join(tail))
     text = "\n".join(lines)
     url = (row.get("url") or "").strip()

@@ -286,7 +286,9 @@ def test_render_omite_lineas_sin_dato():
          "first_seen": hace2, "date_posted": hace2, "source": "test:x"}
     post, kb = render_offer_post(r)
     assert "&lt;b&gt;" in post          # HTML escapado
-    assert "💰" not in post             # sin salario → línea omitida
+    # V3: sin salario → línea explícita "💰 Sin sueldo declarado" (decisión #6:
+    # el dato salarial SIEMPRE se muestra, aunque sea ausencia)
+    assert "💰 Sin sueldo declarado" in post
     assert "🧰" not in post
     assert kb is None                   # sin url → sin botón
     assert "📅 2d" in post
