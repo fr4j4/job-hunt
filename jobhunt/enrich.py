@@ -853,7 +853,12 @@ def _aplicar_ficha(conn, r: dict, info: dict, pool: list[int], cfg: Config | Non
     sal_texto_val = _st.parse_salary_clp(sal_texto_crudo) if sal_texto_crudo else 0
     arb_salary, arb_source, arb_status, arb_note = None, None, None, None
     if sal_texto_val > 0:
-        if re.search(r"/año|/year|anual", sal_texto_crudo, re.I) and sal_texto_val > _st.CEILING:
+        # F2/S4: JSON-LD con unit YEAR ("/año") viene en anual — dividir por 12
+        # si el resultado mensual es plausible (>=FLOOR), no solo cuando el
+        # valor anual crudo supera CEILING (ej: 18M/año no superaba CEILING y
+        # quedaba mal clasificado como mensual). salary_raw (texto crudo) no
+        # se toca — solo el valor numérico usado para el árbitro/clasificación.
+        if re.search(r"/año|/year|anual", sal_texto_crudo, re.I) and sal_texto_val // 12 >= _st.FLOOR:
             sal_texto_val = sal_texto_val // 12
             arb_note = "annual_likely"
         sal_feed_val = _st.parse_salary_clp(sal_actual)
@@ -872,7 +877,9 @@ def _aplicar_ficha(conn, r: dict, info: dict, pool: list[int], cfg: Config | Non
     # clasificación estadística con pool cacheado + leave-one-out (spec-enrich-lotes §4)
     if arb_salary is not None and arb_salary:
         v = _st.parse_salary_clp(arb_salary)
-        pool_loo = [x for x in pool if x != v]
+        pool_loo = list(pool)
+        if v in pool_loo:
+            pool_loo.remove(v)
         stat_status, stat_note = _st.classify_salary(v, pool_loo)
         arb_status, arb_note = stat_status, stat_note or arb_note
     # ---- techs: modo degradado (IA apagada) — spec-techs-dev-gate §2.1 ----

@@ -1,18 +1,16 @@
 """Tests v4.1 — lotes, IA paralela (productor-consumidor), presupuesto por barrido."""
 import sqlite3
-import sys
 import threading
 import time
 from datetime import datetime, timezone
 
 import pytest
+import requests
 
-sys.path.insert(0, "/mnt/data2/projects/jobhunt")
-
-from jobhunt import db as database                      # noqa: E402
-from jobhunt.channel import publish_channel             # noqa: E402
-from jobhunt.config import load_config                  # noqa: E402
-from jobhunt.scoring import compute_market_score        # noqa: E402
+from jobhunt import db as database
+from jobhunt.channel import publish_channel
+from jobhunt.config import load_config
+from jobhunt.scoring import compute_market_score
 
 
 @pytest.fixture
@@ -244,6 +242,7 @@ def test_rescore_ids_aislamiento_ambos(conn_mem, cfg):
 
 # ---------- terminación por conteo / resultado tardío (A2) ----------
 
+@pytest.mark.real_sleep
 def test_resultado_tardio_cross_lote():
     """TE-P1-2 (A2 real): un worker lento del lote 0 sigue vivo cuando el main
     ya consume el lote 1 → su resultado tardío llega con lote_id viejo y es
@@ -357,6 +356,7 @@ def test_breaker_ventana():
     assert st3["breaker_trips"] == 0 and st3["ia_failures"] == 6
 
 
+@pytest.mark.real_sleep
 def test_lot_deadline_drain():
     """Deadline vencido → drain acotado recoge lo en vuelo; resto queda sin IA (§3.2)."""
     from jobhunt.cli import worker_ia, consume_lote
@@ -411,7 +411,13 @@ def test_worker_http_puro(monkeypatch, cfg):
         work_q.put(j)
     stop_ev = threading.Event()
     cfg.ia.api_key = "fake"
-    cfg.ia.base_url = "https://ia-fake.invalid/v1"   # HTTP falla rápido → err_kind
+
+    # T-P1-3: sin red — antes dependía de que el DNS de un host inválido
+    # fallara rápido. requests.post lanza ConnectionError → mismo err_kind.
+    def fake_post(*a, **k):
+        raise requests.exceptions.ConnectionError("sin red (test)")
+    monkeypatch.setattr("jobhunt.enrich.requests.post", fake_post)
+
     threads = [threading.Thread(target=worker_ia,
                                 args=(cfg, work_q, out_q, 0, stop_ev, "", ""),
                                 daemon=True) for _ in range(2)]

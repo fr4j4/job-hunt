@@ -243,35 +243,51 @@ def cmd_run(cfg, notify: bool = True, on_phase=None, stop_event: threading.Event
                 jobs += jooble.jobs(s.queries_jooble, "perfil:", on_query=qcb("jooble"))
             except Exception as e:
                 log.warning("jooble falló (continúa el barrido): %s", e)
+        def _fuente_segura(nombre, fn):
+            """F3: una fuente rota no aborta el barrido (spec-audit)."""
+            try:
+                return fn()
+            except Exception as e:
+                log.warning("fuente %s falló (continúa): %s", nombre, e)
+                return []
+
         if cfg.sources.get("accenture", True):
             phase("accenture")
-            jobs += accenture.jobs(s.queries_accenture, "perfil:", on_query=qcb("accenture"))
+            jobs += _fuente_segura("accenture",
+                lambda: accenture.jobs(s.queries_accenture, "perfil:", on_query=qcb("accenture")))
         if cfg.sources.get("laborum", True):
             phase("laborum")
-            jobs += laborum.jobs(s.queries_laborum, "perfil:", on_query=qcb("laborum"))
+            jobs += _fuente_segura("laborum",
+                lambda: laborum.jobs(s.queries_laborum, "perfil:", on_query=qcb("laborum")))
         if cfg.sources.get("linkedin"):
             phase("linkedin")
-            jobs += linkedin.fetch_jobs(s.queries_linkedin, "perfil:", on_query=qcb("linkedin"))
+            jobs += _fuente_segura("linkedin",
+                lambda: linkedin.fetch_jobs(s.queries_linkedin, "perfil:", on_query=qcb("linkedin")))
         if cfg.sources.get("computrabajo"):
             phase("computrabajo")
-            jobs += computrabajo.jobs(s.queries_computrabajo, "perfil:", on_query=qcb("computrabajo"))
+            jobs += _fuente_segura("computrabajo",
+                lambda: computrabajo.jobs(s.queries_computrabajo, "perfil:", on_query=qcb("computrabajo")))
         if cfg.search.mode in ("both", "sample"):
             # muestreo amplio: rotación para diversificar sin inflar requests
             phase("linkedin/computrabajo (muestreo)")
             n = max(1, int(len(s.sample_linkedin) * s.sample_rotation))
-            jobs += linkedin.fetch_jobs(s.sample_linkedin[:n], "sample:")
-            jobs += computrabajo.jobs(s.sample_computrabajo[:n], "sample:")
+            jobs += _fuente_segura("linkedin", lambda: linkedin.fetch_jobs(s.sample_linkedin[:n], "sample:"))
+            jobs += _fuente_segura("computrabajo", lambda: computrabajo.jobs(s.sample_computrabajo[:n], "sample:"))
             if cfg.sources.get("indeed"):
                 phase("indeed")
-                jobs += indeed.jobs(s.sample_indeed[:n], "muestra:", on_query=qcb("indeed"))
+                jobs += _fuente_segura("indeed",
+                    lambda: indeed.jobs(s.sample_indeed[:n], "muestra:", on_query=qcb("indeed")))
             if cfg.sources.get("glassdoor") and _is_premium_tick(cfg):
-                jobs += glassdoor.jobs(s.sample_glassdoor[:2], "muestra:", on_query=qcb("glassdoor"))
+                jobs += _fuente_segura("glassdoor",
+                    lambda: glassdoor.jobs(s.sample_glassdoor[:2], "muestra:", on_query=qcb("glassdoor")))
         if cfg.sources.get("indeed") and _is_premium_tick(cfg):
             phase("indeed")
-            jobs += indeed.jobs(s.queries_indeed, "perfil:", on_query=qcb("indeed"))
+            jobs += _fuente_segura("indeed",
+                lambda: indeed.jobs(s.queries_indeed, "perfil:", on_query=qcb("indeed")))
         if cfg.sources.get("glassdoor") and _is_premium_tick(cfg):
             phase("glassdoor (perfil)")
-            jobs += glassdoor.jobs(s.queries_glassdoor, "perfil:", on_query=qcb("glassdoor"))
+            jobs += _fuente_segura("glassdoor",
+                lambda: glassdoor.jobs(s.queries_glassdoor, "perfil:", on_query=qcb("glassdoor")))
 
         log.info("barrido iniciado: %d ofertas crudas (mode=%s)", len(jobs), s.mode)
 

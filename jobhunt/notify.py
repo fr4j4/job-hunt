@@ -307,7 +307,7 @@ def table_block(offers: list[dict], links: bool = True) -> str:
         techs = joined.ljust(12) if joined else " " * 12
         raw_age = _age_short(j.get("date_posted") or "")
         age = "   " if "?" in raw_age else raw_age.replace("ahora", "0h")[:3].rjust(3)
-        co = (j.get("company") or "").strip()[:8].ljust(8)
+        co = esc((j.get("company") or "").strip()[:8]).ljust(8)
         rol = _role_short(j)[:12].ljust(12)
         exp = {"lead": "Lead", "senior": "Sr", "semi": "sSr", "junior": "Jr"}.get(
             (j.get("seniority_real") or "").strip().lower(), "   ")[:4].ljust(4)

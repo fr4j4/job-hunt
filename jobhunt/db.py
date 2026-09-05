@@ -25,6 +25,16 @@ def connect(cfg: Config) -> sqlite3.Connection:
     return conn
 
 
+def backup_db(conn: sqlite3.Connection, dest_path) -> None:
+    """Backup consistente vía sqlite3 online backup API (incluye datos en WAL,
+    a diferencia de un shutil.copy2 del .sqlite mientras hay conexiones abiertas)."""
+    dest_conn = sqlite3.connect(str(dest_path))
+    try:
+        conn.backup(dest_conn)
+    finally:
+        dest_conn.close()
+
+
 def init_db(conn: sqlite3.Connection) -> None:
     conn.execute("""CREATE TABLE IF NOT EXISTS ofertas (
         group_id    TEXT PRIMARY KEY,

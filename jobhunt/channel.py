@@ -70,12 +70,12 @@ def normalize_date(raw: str | int | float | None, now: datetime | None = None) -
                 return date(int(m.group(3)), mes, int(m.group(1))).isoformat()
             except ValueError:
                 return ""
-    # 'Hace X horas/días' / 'Hoy' / 'Ayer' (Computrabajo)
-    m = re.search(r"[Hh]ace\s+([\d\s]+)\s*(minuto|hora|día|dia|semana)", s)
+    # 'Hace X horas/días/semanas/meses' / 'Hoy' / 'Ayer' (Computrabajo)
+    m = re.search(r"[Hh]ace\s+([\d\s]+)\s*(minuto|hora|día|dia|semana|mes)", s)
     if m:
         n = int(re.sub(r"\D", "", m.group(1)) or 1)
         unit = m.group(2).lower()
-        delta = {"minuto": 0, "hora": 0, "día": n, "dia": n, "semana": n * 7}[unit]
+        delta = {"minuto": 0, "hora": 0, "día": n, "dia": n, "semana": n * 7, "mes": n * 30}[unit]
         return (now - timedelta(days=delta)).date().isoformat()
     if re.search(r"\bhoy\b", s, re.I):
         return now.date().isoformat()
@@ -376,7 +376,7 @@ def publish_channel(cfg: Config, conn, tg_api, dry_run: bool = False,
 def _bucket(kind: str, now: datetime) -> str:
     if kind == "daily":
         return now.date().isoformat()
-    if kind in ("weekly-remote", "weekly-salary"):
+    if kind.startswith("weekly-"):
         iso = now.date().isocalendar()
         return f"{iso[0]}-W{iso[1]:02d}"
     if kind == "trends":
@@ -405,6 +405,9 @@ def _send_digest(cfg: Config, tg_api, kind: str, text: str, conn, now: datetime,
         except Exception as e:
             log.warning("canal: digest %s (manual/DM) falló: %s", kind, e)
             return False
+    if len(text) > 4096:
+        cut = text.rfind("\n\n", 0, 4000)
+        text = (text[:cut] if cut > 0 else text[:4000]) + "\n…"
     bucket = _bucket(kind, now)
     body_hash = hashlib.sha1(text.encode()).hexdigest()
     try:
@@ -415,17 +418,16 @@ def _send_digest(cfg: Config, tg_api, kind: str, text: str, conn, now: datetime,
     prev = conn.execute(
         "SELECT body_hash FROM channel_posts WHERE kind=? AND bucket<>? ORDER BY id DESC LIMIT 1",
         (kind, bucket)).fetchone()
-    if prev and prev["body_hash"] == body_hash and cfg.channel.digest_daily:
+    if prev and prev["body_hash"] == body_hash:
         # pool quieto → digest idéntico al anterior → skip (el INSERT de arriba se revierte abajo)
         conn.rollback()
         return False
-    if dry_ok := True:
-        pass
     try:
         resp = tg_api("sendMessage", {
             "chat_id": int(cfg.channel.chat_id), "text": text,
             "parse_mode": "HTML", "disable_web_page_preview": True})
         if not resp.get("ok"):
+            log.warning("canal: digest %s sin ok → %s", kind, str(resp)[:120])
             conn.rollback()
             return False
     except Exception as e:
@@ -890,7 +892,8 @@ def channel_status(conn, cfg: Config) -> str:
     if not ch.enabled or not ch.chat_id:
         return "📢 Canal: DESACTIVADO (sin TELEGRAM_CHANNEL_ID)"
     last = conn.execute("""SELECT posted_at, kind FROM channel_posts ORDER BY id DESC LIMIT 1""").fetchone()
-    cola = conn.execute(_GATE_SQL, {"min_score": ch.min_score, "max_age": ch.max_age_days}).fetchall()
+    cola = [dict(r) for r in conn.execute(
+        _GATE_SQL, {"min_score": ch.min_score, "max_age": ch.max_age_days}).fetchall()]
     dev_ok = [r for r in cola if is_dev(r["rol_categoria"], r["title"], cfg, r.get("description") or "")]
     dist = Counter()
     for (ms,) in conn.execute("SELECT market_score FROM ofertas WHERE active=1"):

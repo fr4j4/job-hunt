@@ -1,7 +1,4 @@
 """Tests spec-ia-local v2.1 §7 — pipeline local (2 tareas), fallback cloud, knobs."""
-import sys
-sys.path.insert(0, "/mnt/data2/projects/jobhunt")
-
 import sqlite3
 import pytest
 from jobhunt import enrich as en

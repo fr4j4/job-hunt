@@ -274,8 +274,9 @@ def test_gate_dev_bloquea_cobol(conn_mem):
 # ---------- 6. render ----------
 
 def test_render_omite_lineas_sin_dato():
-    from datetime import date, timedelta
-    hace2 = (date.today() - timedelta(days=2)).isoformat()
+    from datetime import timedelta
+    # UTC, no date.today(): age_days() usa datetime.now(timezone.utc) (T-P1-1)
+    hace2 = (datetime.now(timezone.utc).date() - timedelta(days=2)).isoformat()
     r = {"market_score": 70, "title": "Dev <b>Python</b>", "company": "", "modality": "",
          "location": "", "salary": "", "techs": "", "ai_idiomas": "", "url": "",
          "first_seen": hace2, "date_posted": hace2, "source": "test:x"}

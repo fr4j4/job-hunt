@@ -98,12 +98,32 @@ def _kb_json(rows: list[list[dict]]) -> str:
     return json.dumps({"inline_keyboard": kb})
 
 
+_chat_allowed_empty_warned = False
+
+
 def _chat_allowed(cfg: Config, chat_id) -> bool:
-    """True si el chat está en TELEGRAM_ALLOWED_CHATS (vacío = sin restricción)."""
-    if not cfg.telegram.allowed_chats:
+    """True si el chat está en la allowlist efectiva (SEC-1/SEC-8).
+
+    allowlist efectiva = TELEGRAM_ALLOWED_CHATS UNION {telegram.chat_id, channel.chat_id}
+    (los no vacíos). Si queda vacía -> True (modo dev sin nada configurado), con
+    warning una sola vez. Así el canal siempre puede recibir posts aunque no
+    esté explícitamente en TELEGRAM_ALLOWED_CHATS.
+    """
+    global _chat_allowed_empty_warned
+    allowed = set(cfg.telegram.allowed_chats)
+    for extra in (cfg.telegram.chat_id, cfg.channel.chat_id):
+        if extra:
+            try:
+                allowed.add(int(extra))
+            except (TypeError, ValueError):
+                pass
+    if not allowed:
+        if not _chat_allowed_empty_warned:
+            log.warning("allowlist de chats vacía — modo dev, todos los chats permitidos")
+            _chat_allowed_empty_warned = True
         return True
     try:
-        return int(chat_id) in cfg.telegram.allowed_chats
+        return int(chat_id) in allowed
     except (TypeError, ValueError):
         return False
 
@@ -147,13 +167,26 @@ def _tg_api(cfg: Config, method: str, payload: dict, retries: int = 2) -> dict:
                 return json.loads(resp.read().decode())
         except urllib.error.HTTPError as exc:
             # 403/429 transitorios (membership lag / rate limit) → backoff corto y retry
+            body_raw = b""
+            try:
+                body_raw = exc.read()
+            except Exception:
+                pass
             if exc.code in (403, 429) and attempt < retries:
-                time.sleep(1.5 * (attempt + 1))
+                wait = 1.5 * (attempt + 1)
+                if exc.code == 429:
+                    try:
+                        retry_after = json.loads(body_raw.decode()).get("parameters", {}).get("retry_after")
+                        if retry_after:
+                            wait = min(float(retry_after), 30)
+                    except Exception:
+                        pass
+                time.sleep(wait)
                 continue
             # incluir el body de Telegram en el error: la causa real vive ahí
             # ("message is not modified", "message ... not found", etc.)
             try:
-                detail = exc.read().decode()[:200]
+                detail = body_raw.decode()[:200]
             except Exception:
                 detail = ""
             raise RuntimeError(f"{exc} {detail}".strip()) from None
@@ -840,7 +873,7 @@ def _handle_command(cfg: Config, message: dict, state: dict) -> None:
                             if action == "dry":
                                 for p in stats.get("dry_run_preview", []):
                                     _tg_api(cfg, "sendMessage", {
-                                        "chat_id": chat_id, "text": "👁 preview:\n" + p,
+                                        "chat_id": chat_id, "text": "👁 preview:\n" + p["text"],
                                         "parse_mode": "HTML", "disable_web_page_preview": True})
                                     _t.sleep(0.5)
                             else:
@@ -937,6 +970,7 @@ def _handle_command(cfg: Config, message: dict, state: dict) -> None:
                     if confirm:
                         n = conn.execute("""UPDATE ofertas SET notified_channel_at=''
                             WHERE active=1 AND notified_channel_at != ''""").rowcount
+                        conn.execute("DELETE FROM channel_posts WHERE kind='offer'")
                         conn.commit()
                         _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
                                                      "text": f"🧹 {n} marcas limpiadas — "
@@ -1055,11 +1089,11 @@ def _handle_command(cfg: Config, message: dict, state: dict) -> None:
                     def _purge():
                         conn = database.connect(cfg)
                         try:
-                            import shutil, pathlib
+                            import pathlib
                             bak = pathlib.Path(cfg.data_dir) / "backups"
                             bak.mkdir(exist_ok=True)
-                            shutil.copy2(cfg.data_dir / "ofertas.sqlite",
-                                         bak / f"ofertas-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M')}.sqlite")
+                            database.backup_db(conn,
+                                bak / f"ofertas-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M')}.sqlite")
                             if action == "old":
                                 n = conn.execute("""DELETE FROM ofertas WHERE active=0
                                     AND last_seen < datetime('now', '-30 days')""").rowcount
@@ -1773,24 +1807,30 @@ def run_daemon(cfg: Config) -> None:
         # 2. barrido por horas agendadas (una vez por hora agendada)
         # FIX: si hay enrich/search manual en curso, el agendado NO consume su marcador
         # → cuando la operación termine DENTRO de la misma hora, el próximo tick lo corre
-        if _sweep_hours_due(cfg, state) and not _op_busy():
-            state["last_sweep_key"] = datetime.now(timezone.utc).strftime("%Y-%m-%d-%H")
-            try:
-                _cs = database.connect(cfg)
+        try:
+            if _sweep_hours_due(cfg, state) and not _op_busy():
+                state["last_sweep_key"] = datetime.now(timezone.utc).strftime("%Y-%m-%d-%H")
                 try:
-                    _save_state_flag(_cs, "last_sweep_key", state["last_sweep_key"])
-                finally:
-                    _cs.close()
-            except Exception as exc:
-                log.warning("no pude persistir last_sweep_key: %s", exc)
-            log.info("barrido agendado (%s UTC)", datetime.now(timezone.utc).hour)
-            threading.Thread(target=lambda: sweep(cfg, state), daemon=True).start()
+                    _cs = database.connect(cfg)
+                    try:
+                        _save_state_flag(_cs, "last_sweep_key", state["last_sweep_key"])
+                    finally:
+                        _cs.close()
+                except Exception as exc:
+                    log.warning("no pude persistir last_sweep_key: %s", exc)
+                log.info("barrido agendado (%s UTC)", datetime.now(timezone.utc).hour)
+                threading.Thread(target=lambda: sweep(cfg, state), daemon=True).start()
+        except Exception:
+            log.exception("barrido agendado (paso 2) falló — daemon sigue vivo")
 
         # 3. batch IA nocturno (hora agendada en IA_RUN_HOURS_UTC, default 03)
-        _ia_sweep_maybe(cfg, state)
+        try:
+            _ia_sweep_maybe(cfg, state)
+        except Exception:
+            log.exception("batch IA (paso 3) falló — daemon sigue vivo")
 
         # 4. digests del canal (diario/semanal/mensual según hora agendada)
         try:
             _digests_maybe(cfg, state)
-        except Exception as exc:
-            log.warning("digests error: %s", str(exc)[:120])
+        except Exception:
+            log.exception("digests (paso 4) falló — daemon sigue vivo")

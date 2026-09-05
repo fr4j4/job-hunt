@@ -1,7 +1,4 @@
 """Tests spec-enrich-lotes v2 §8 — modo lote IA, fetch paralelo, pool cacheado, rescate/fallback."""
-import sys
-sys.path.insert(0, "/mnt/data2/projects/jobhunt")
-
 import sqlite3
 import pytest
 from jobhunt import enrich as en

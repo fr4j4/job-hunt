@@ -1,7 +1,4 @@
 """Tests spec salarios-robustos v2 §6 — stats.py + árbitro + parser + acceso."""
-import sys
-sys.path.insert(0, "/mnt/data2/projects/jobhunt")
-
 import pytest
 from jobhunt import stats as st
 from jobhunt.stats import classify_salary, cv_health, parse_salary_clp, annual_likely
