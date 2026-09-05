@@ -30,6 +30,7 @@ def _cfg():
     from jobhunt.config import load_config
     c = load_config()
     c.ia.batch_prompt = 5
+    c.ia.local_enabled = False   # tests del modo lote cloud — independientes del .env
     return c
 
 

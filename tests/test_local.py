@@ -205,7 +205,7 @@ def test_local_concurrency_knob():
 def test_local_timeout_knob():
     from jobhunt.config import load_config
     cfg = load_config()
-    assert cfg.ia.local_timeout >= 300   # default 600
+    assert cfg.ia.local_timeout >= 60   # 120 en .env (fallback cloud actúa rápido)
 
 
 # ---------- 6. etiqueta + ctx_version ----------
@@ -264,7 +264,165 @@ def test_local_breaker_cloud_no_tripula(mem_db, monkeypatch):
     assert row["ia_model"] == cfg.ia.local_model   # procesada por fallback, sin tripular breaker
 
 
-# ---------- 8. cmd_run dispatch ----------
+# ---------- 10. spec-techs-dev-gate: _extract_techs + guard + regla salario ----------
+
+def test_techs_planificacion_no_nifi():
+    """'planificación' NO produce NiFi (word boundaries — bug raíz)."""
+    assert en._extract_techs("ingeniero especialista", "planificación y control minero") == []
+
+
+def test_techs_cargo_no_go():
+    """'cargo/gobierno/gestionar' NO producen Go."""
+    assert en._extract_techs("ingeniero", "cargo de jefe, gobierno corporativo, gestionar") == []
+
+
+def test_techs_go_live_no_go():
+    """'go live'/'go to market' NO producen Go (lookahead — P1-4)."""
+    assert en._extract_techs("PM", "plan de go live y go to market") == []
+
+
+def test_techs_javascript_js():
+    """'JavaScript Developer'/'JS' → JS (P1-3)."""
+    assert "JS" in en._extract_techs("JavaScript Developer", "")
+    assert "JS" in en._extract_techs("", "experiencia con JS")
+
+
+def test_techs_concatenadas():
+    """Grafías concatenadas detectadas (P1-3): nodejs, reactjs, mongodb, dotnet, python3, ci-cd."""
+    t = en._extract_techs("", "nodejs reactjs mongodb springboot dotnet python3 ci-cd")
+    for ab in ("Node", "React", "Mongo", "Spring", ".NET", "Py", "CI/CD"):
+        assert ab in t, f"falta {ab}"
+
+
+def test_techs_titulo_java():
+    """Título primero: 'Senior Java Developer' → Java."""
+    assert "Java" in en._extract_techs("Senior Java Developer", "sin stack en desc")
+
+
+def test_techs_feed_preservado(mem_db, monkeypatch):
+    """Feed con techs + IA devuelve [] → feed intacto (REFRESCA preserva)."""
+    cfg = _cfg()
+    _insert(mem_db, "g1", desc="x" * 50)
+    mem_db.execute("UPDATE ofertas SET techs='Py;AWS' WHERE group_id='g1'")
+    mem_db.commit()
+    monkeypatch.setattr(en, "extract_structured",
+                        lambda url: {"description": "x" * 500, "_access": "ok"})
+    monkeypatch.setattr(en, "_llm_local",
+                        lambda *a, **k: ({**_resp_extract(), **_resp_opinion(), "techs": []}, ""))
+    en.enrich_pending(mem_db, cfg, max_n=1)
+    row = mem_db.execute("SELECT techs FROM ofertas WHERE group_id='g1'").fetchone()
+    assert row["techs"] == "Py;AWS"   # IA devolvió [] → preserva feed
+
+
+def test_guard_rol_no_software_limpia_techs(mem_db, monkeypatch):
+    """IA devuelve techs + rol no-software → techs='' (guard DESPUÉS del REFRESCA — P1-1)."""
+    cfg = _cfg()
+    _insert(mem_db, "g1", desc="x" * 50)
+    monkeypatch.setattr(en, "extract_structured",
+                        lambda url: {"description": "x" * 500, "_access": "ok"})
+    def fake_local(cfg, job, perfil, mercado):
+        d = {**_resp_extract(), **_resp_opinion()}
+        d["techs"] = ["NiFi", "Go"]          # alucinación
+        d["rol_categoria"] = "Ingeniería no-software"
+        return d, ""
+    monkeypatch.setattr(en, "ia_extract_local", fake_local)
+    en.enrich_pending(mem_db, cfg, max_n=1)
+    row = mem_db.execute("SELECT techs FROM ofertas WHERE group_id='g1'").fetchone()
+    assert row["techs"] == ""   # el guard pisó la lista alucinada
+
+
+def test_salario_llega_desmarca_ia_model(mem_db, monkeypatch):
+    """Regla §2.5: salary ''→valor + opinion 'sin salario' → se desmarca y el
+    enrich la regenera con el dato nuevo (la opinion ya no dice 'sin salario')."""
+    cfg = _cfg()
+    _insert(mem_db, "g1", desc="x" * 50)
+    mem_db.execute("UPDATE ofertas SET ia_model='deepseek-v4-flash:0731-cloud', "
+                   "ai_opinion='Sin sueldo declarado; no hay con qué comparar' WHERE group_id='g1'")
+    mem_db.commit()
+    monkeypatch.setattr(en, "extract_structured",
+                        lambda url: {"description": "x" * 500, "_access": "ok",
+                                     "salary": "CLP 2400000"})
+    monkeypatch.setattr(en, "_llm_local",
+                        lambda *a, **k: ({**_resp_extract(), **_resp_opinion()}, ""))
+    en.enrich_pending(mem_db, cfg, max_n=1)
+    row = mem_db.execute("SELECT ia_model, salary, ai_opinion FROM ofertas WHERE group_id='g1'").fetchone()
+    assert row["salary"] != ""          # el árbitro escribió el salario
+    assert row["ia_model"] != ""        # re-enriquecida (la regla la desmarcó y el enrich la regeneró)
+    assert "sin sueldo" not in (row["ai_opinion"] or "").lower()   # opinion nueva con el dato
+
+
+def test_salario_sin_cambio_no_desmarca(mem_db):
+    """Regla §2.5: salary ya presente → NO desmarca (sin loop — P1-7).
+    Prueba directa de _aplicar_ficha: r con salary ya escrito + opinion 'sin
+    salario' → la regla NO dispara (no hubo transición ''→valor)."""
+    cfg = _cfg()
+    _insert(mem_db, "g1", salary="CLP 2400000", desc="x" * 50)
+    mem_db.execute("UPDATE ofertas SET ia_model='qwen2.5:7b', "
+                   "ai_opinion='Sin sueldo declarado' WHERE group_id='g1'")
+    mem_db.commit()
+    r = {"group_id": "g1", "title": "Dev", "salary": "CLP 2400000",   # salary YA presente
+         "ai_opinion": "Sin sueldo declarado", "ia_model": "qwen2.5:7b"}
+    info = {"_access": "ok", "description": "x" * 500, "salary": "CLP 2400000",
+            "techs_desc": [], "company": "", "modality_badge": "", "date_posted": "",
+            "valid_through": "", "years_official": None, "remote_official": None,
+            "employment_type": ""}
+    pool = [2_000_000, 2_100_000, 2_200_000]
+    en._aplicar_ficha(mem_db, r, info, pool, cfg)
+    row = mem_db.execute("SELECT ia_model FROM ofertas WHERE group_id='g1'").fetchone()
+    assert row["ia_model"] == "qwen2.5:7b"   # no se desmarcó (no hubo transición ''→valor)
+
+
+def test_c9_extendido_incluye_opinion_sin_salario(mem_db):
+    """C9 extendido (P1-6): salary presente + opinion 'sin salario' → califica."""
+    cfg = _cfg()
+    _insert(mem_db, "g1", salary="CLP 2400000", desc="x" * 500)
+    mem_db.execute("UPDATE ofertas SET modality='remoto', "
+                   "ai_opinion='Sin salario declarado' WHERE group_id='g1'")
+    mem_db.commit()
+    assert en.ia_queue_count(mem_db) == 1   # C9 extendido la recoge
+
+
+def test_c9_normal_excluye_completa(mem_db):
+    """C9 normal: oferta completa (salary+modality+opinion con salario) NO califica."""
+    cfg = _cfg()
+    _insert(mem_db, "g1", salary="CLP 2400000", desc="x" * 500)
+    mem_db.execute("UPDATE ofertas SET modality='remoto', "
+                   "ai_opinion='Sueldo alineado con la mediana' WHERE group_id='g1'")
+    mem_db.commit()
+    assert en.ia_queue_count(mem_db) == 0
+
+def test_enrich_all_incluye_completas(mem_db, monkeypatch):
+    """all_pending=True → incluye ofertas COMPLETAS (modality+salary llenos)
+    que la cola C9 normal NO procesaría, y NO limita a batch_size (40)."""
+    cfg = _cfg()
+    cfg.ia.local_enabled = False
+    # oferta completa (no califica a C9: modality y salary llenos)
+    _insert(mem_db, "g_completa", salary="CLP 2500000", desc="x" * 500)
+    mem_db.execute("UPDATE ofertas SET modality='remoto' WHERE group_id='g_completa'")
+    # oferta incompleta (sí califica a C9)
+    _insert(mem_db, "g_incompleta", desc="x" * 500)
+    mem_db.commit()
+    monkeypatch.setattr(en, "extract_structured",
+                        lambda url: {"description": "x" * 500, "_access": "ok"})
+    vistos = []
+    def fake_lote(cfg, rows, perfil, mercado):
+        vistos.extend(r["group_id"] for r in rows)
+        return [{"idx": i + 1, "opinion": "o", "resumen": "r", "fit_reason": "f",
+                 "seniority_real": "s", "rol_categoria": "Backend", "ingles": "B2",
+                 "idiomas": [], "modalidad": "R", "salario_clp_mensual": 0,
+                 "red_flags": [], "green_flags": [], "benefits": []}
+                for i in range(len(rows))], ""
+    monkeypatch.setattr(en, "ia_extract_lote", fake_lote)
+    # C9 normal: solo la incompleta
+    en.run_ia_batch(mem_db, cfg, "perfil", max_n=10)
+    assert vistos == ["g_incompleta"]
+    vistos.clear()
+    # reset: ambas vuelven a estar sin IA (la 1ª pasada las marcó)
+    mem_db.execute("UPDATE ofertas SET ia_model=''")
+    mem_db.commit()
+    # all_pending: ambas (la completa también) — sin tope de batch_size
+    en.run_ia_batch(mem_db, cfg, "perfil", all_pending=True)
+    assert sorted(vistos) == ["g_completa", "g_incompleta"]
 
 def test_local_cmd_run_dispatch(monkeypatch):
     """cmd_run con local_enabled usa extract_fn=ia_extract_local (P1-3)."""

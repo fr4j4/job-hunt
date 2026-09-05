@@ -208,22 +208,50 @@ def extract_structured(url: str) -> dict:
         m = re.search(r'<(?:p|div) class="mbB">([a-zA-ZÁÉÍÓÚáéíóúÑñ¡¿][\s\S]{100,6000}?)</(?:p|div)>', html)
         if m:
             info["description"] = re.sub(r"\s+", " ", _u(re.sub(r"<[^>]+>", " ", m.group(1)))).strip()[:4000]
-    # techs de la desc
-    dl = info["description"].lower()
-    found = []
-    for pat, ab in [("python", "Py"), ("java", "Java"), ("aws", "AWS"), ("angular", "Angular"),
-                    ("react", "React"), ("kubernetes", "K8s"), ("k8s", "K8s"), ("docker", "Docker"),
-                    ("golang", "Go"), ("node", "Node"), ("typescript", "TS"), ("vue", "Vue"),
-                    (".net", ".NET"), ("sql", "SQL"), ("fastapi", "FastAPI"), ("django", "Django"),
-                    ("kafka", "Kafka"), ("gcp", "GCP"), ("azure", "Azure"), ("scala", "Scala"),
-                    ("spring", "Spring"), ("nifi", "NiFi"), ("terraform", "TF"), ("jenkins", "Jenkins"),
-                    ("ci/cd", "CI/CD"), ("redis", "Redis"), ("postgres", "Postgres"), ("mongo", "Mongo")]:
-        if pat in dl:
-            found.append(ab)
+    # techs de la desc — ELIMINADO (spec-techs-dev-gate v2): la regex de la ficha
+    # ya no se ejecuta aquí. La IA es la única fuente de techs con IA activa;
+    # en modo degradado (IA apagada) se usa _extract_techs(title, desc) desde
+    # enrich_pending (donde r["title"] existe — P1-2 de auditoría).
+    info["techs_desc"] = []
+    return info
+
+
+# ============ techs: modo degradado (IA apagada) — spec-techs-dev-gate §2.1 ============
+
+# Patrones con word boundaries + grafías concatenadas (P1-3) + go con lookahead (P1-4).
+# SOLO se ejecutan si cfg.ia.enabled=false — nunca compiten con la IA (principio §0.2).
+_TECH_PATTERNS = [
+    (r"\bpython3?\b", "Py"), (r"\bjava\b", "Java"), (r"\baws\b", "AWS"),
+    (r"\bangular(?:js)?\b", "Angular"), (r"\breact(?:js|native)?\b", "React"),
+    (r"\bkubernetes\b|\bk8s\b", "K8s"), (r"\bdocker\b", "Docker"),
+    (r"\bgolang\b|\bgo\b(?=\s*(?:lang|developer|dev\b|engineer))", "Go"),
+    (r"\bnode(?:js|\.js)?\b", "Node"), (r"\btypescript\b|\bts\b", "TS"),
+    (r"\bvue(?:js)?\b", "Vue"), (r"\.net\b|\bdotnet\b", ".NET"),
+    (r"\bsql\b|\bmysql\b|\bsqlserver\b", "SQL"), (r"\bfastapi\b", "FastAPI"),
+    (r"\bdjango\b", "Django"), (r"\bkafka\b", "Kafka"), (r"\bgcp\b", "GCP"),
+    (r"\bazure\b", "Azure"), (r"\bscala\b", "Scala"),
+    (r"\bspring(?: ?boot)?\b", "Spring"), (r"\bnifi\b", "NiFi"),
+    (r"\bterraform\b", "TF"), (r"\bjenkins\b", "Jenkins"),
+    (r"\bci[-/]?cd\b", "CI/CD"), (r"\bredis\b", "Redis"),
+    (r"\bpostgres(?:ql)?\b", "Postgres"), (r"\bmongo(?:db)?\b", "Mongo"),
+    (r"\bjavascript\b|\bjs\b", "JS"),
+]
+
+
+def _extract_techs(title: str, desc: str) -> list[str]:
+    """Extrae techs de título+descripción con word boundaries (modo degradado).
+
+    Título primero (más señal por carácter), dedupe, máx 10. Nunca compite con
+    la IA — solo se llama con cfg.ia.enabled=false (spec-techs-dev-gate §2.1)."""
+    texto = f"{title or ''} {desc or ''}".lower()
+    found: list[str] = []
+    for pat, ab in _TECH_PATTERNS:
+        if re.search(pat, texto):
+            if ab not in found:
+                found.append(ab)
         if len(found) >= 10:
             break
-    info["techs_desc"] = found
-    return info
+    return found
 
 
 # ============ Anillo C: batch IA (deepseek-v4-flash) ============
@@ -766,8 +794,12 @@ def _fetch_ficha(r: dict) -> dict:
         return {"_access": "error"}
 
 
-def _aplicar_ficha(conn, r: dict, info: dict, pool: list[int]) -> str:
-    """Aplica la ficha en el MAIN (árbitro + UPDATE + commit). Retorna 'ok' | 'expired' | 'blocked'."""
+def _aplicar_ficha(conn, r: dict, info: dict, pool: list[int], cfg: Config | None = None) -> str:
+    """Aplica la ficha en el MAIN (árbitro + UPDATE + commit). Retorna 'ok' | 'expired' | 'blocked'.
+
+    cfg: opcional — si cfg.ia.enabled=false (modo degradado), extrae techs con
+    _extract_techs(title, desc) (spec-techs-dev-gate §2.1). Con IA activa, la
+    regex NO se ejecuta (la IA es la única fuente de techs)."""
     from . import stats as _st
     access = info.get("_access", "ok")
     if info.get("_cb_expired") or access == "not_found":
@@ -821,6 +853,23 @@ def _aplicar_ficha(conn, r: dict, info: dict, pool: list[int]) -> str:
         pool_loo = [x for x in pool if x != v]
         stat_status, stat_note = _st.classify_salary(v, pool_loo)
         arb_status, arb_note = stat_status, stat_note or arb_note
+    # ---- techs: modo degradado (IA apagada) — spec-techs-dev-gate §2.1 ----
+    # Con IA activa, techs_desc viene vacío (la regex de la ficha se eliminó) y
+    # el COALESCE preserva el feed; la IA escribe techs vía apply_ia_result.
+    techs_join = ";".join(info.get("techs_desc", []))
+    if cfg and not cfg.ia.enabled:
+        techs_join = ";".join(_extract_techs(r.get("title") or "", info.get("description") or ""))
+    # ---- regla §2.5: salario llegó después de la IA → desmarcar (auto-curativo) ----
+    # Solo en el árbitro (único lugar donde salary pasa de '' a valor real — P1-7).
+    # Condición de cambio real: oferta tenía salary='' y ahora tiene valor, con
+    # opinion que dice "sin salario" → re-encola para regenerar la opinion.
+    if (not r.get("salary") and arb_salary and r.get("ia_model")
+            and re.search(r"sin sueldo|sin salario|no declara|no se declara|carece de datos monetarios|"
+                          r"no informa salario|sin información salarial|no menciona el sueldo",
+                          r.get("ai_opinion") or "", re.I)):
+        conn.execute("UPDATE ofertas SET ia_model='' WHERE group_id=?", (r["group_id"],))
+        log.info("salario llegó después de la IA (%s) — desmarcada para re-enriquecer",
+                 (r.get("title") or "")[:40])
     conn.execute("""UPDATE ofertas SET
         description=?,
         company=CASE WHEN company='' OR company IS NULL THEN ? ELSE company END,
@@ -840,7 +889,7 @@ def _aplicar_ficha(conn, r: dict, info: dict, pool: list[int]) -> str:
         WHERE group_id=?""",
         (desc, info.get("company") or "", info.get("modality_badge") or "", arb_salary,
          arb_source, arb_status, arb_note,
-         ";".join(info.get("techs_desc", [])), info.get("date_posted") or "",
+         techs_join, info.get("date_posted") or "",
          info.get("valid_through") or "", info.get("years_official"),
          info.get("remote_official"), info.get("employment_type") or "",
          "jsonld" if info.get("description") else "section",
@@ -863,7 +912,7 @@ def enrich_pending(conn, cfg: Config | None, max_n: int | None = None,
     from concurrent.futures import ThreadPoolExecutor
     from . import stats as _st
     cols = ("group_id, title, company, location, url, description, salary, modality, "
-            "salary_raw, salary_status, salary_note")
+            "salary_raw, salary_status, salary_note, ai_opinion, ia_model")
     if groups:
         qs = ",".join("?" for _ in groups)
         rows = conn.execute(
@@ -907,7 +956,7 @@ def enrich_pending(conn, cfg: Config | None, max_n: int | None = None,
         # el MAIN aplica árbitro + UPDATE por ficha (los threads no tocan la DB)
         vivas = []
         for r, info in zip(grupo, infos):
-            estado = _aplicar_ficha(conn, r, info, pool)
+            estado = _aplicar_ficha(conn, r, info, pool, cfg)
             done += 1
             if estado == "ok":
                 vivas.append(r["group_id"])
@@ -976,18 +1025,26 @@ def profile_description(cfg: Config) -> str:
 
 def ia_queue_count(conn) -> int:
     """Ofertas en cola para el batch IA (con descripción, faltan datos, sin IA).
-    C9 ampliado: salarios implausible/suspect SIEMPRE califican (auto-curativo)."""
+    C9 ampliado: salarios implausible/suspect SIEMPRE califican (auto-curativo).
+    C9 extendido (spec-techs-dev-gate §2.5, P1-6): opinions que dicen "sin salario"
+    con salary presente también califican (salario llegó después de la IA)."""
     return conn.execute(
         "SELECT COUNT(*) FROM ofertas WHERE active=1 AND ia_model='' AND "
         "(length(description)>200 OR description_source!='') AND "
         "(modality='' OR salary='' OR description IS NULL OR "
-        "salary_status IN ('implausible','suspect'))").fetchone()[0]
+        "salary_status IN ('implausible','suspect') OR "
+        "(salary != '' AND (ai_opinion LIKE '%sin salario%' OR ai_opinion LIKE '%sin sueldo%' "
+        "OR ai_opinion LIKE '%no declara%' OR ai_opinion LIKE '%carece de datos monetarios%')))"
+    ).fetchone()[0]
 
 
 def apply_ia_result(conn, cfg: Config, r: dict, parsed: dict | None,
                     ctx_version: str = "", model: str | None = None) -> bool:
     """Escribe los campos IA de UNA oferta en la DB. Solo el MAIN la llama
     (patrón conexión única). Retorna True si escribió algo. parsed=None → no-op.
+
+    Guard anti-alucinación (spec-techs-dev-gate §2.2): rol no-software → techs=''
+    (la IA no puede contradecirse). Import local de channel — sin ciclo (P2-7).
 
     ctx_version: hash8 del contexto de mercado usado (spec salarios-robustos §7.4)
     — trazabilidad para regenerar opinions de eras obsoletas.
@@ -998,6 +1055,7 @@ def apply_ia_result(conn, cfg: Config, r: dict, parsed: dict | None,
     (feed/text) ni rellena un salary='' que el árbitro vació."""
     if not parsed:
         return False
+    from .channel import _NONDEV_CATEGORIES   # sin ciclo (P2-7) — guard §2.2
     mod = {"R": "remoto", "H": "híbrido", "P": "presencial"}.get(parsed.get("modalidad"), "")
     ia_fields = []
     sets, params = [], []
@@ -1044,6 +1102,14 @@ def apply_ia_result(conn, cfg: Config, r: dict, parsed: dict | None,
             sets.append("techs=?")
             params.append(";".join(techs_limpio))
             ia_fields.append("techs")
+    # Guard anti-alucinación (spec-techs-dev-gate §2.2, P1-1): DESPUÉS del REFRESCA
+    # — si la IA clasifica el rol como no-software, NO puede haber techs (contradicción).
+    # En SQLite gana la ÚLTIMA asignación del SET, así que este append pisa la lista
+    # alucinada. No agrega techs a ia_fields (la IA no escribió un valor válido).
+    rol_ia = str(parsed.get("rol_categoria") or "").strip()
+    if rol_ia in _NONDEV_CATEGORIES:
+        sets.append("techs=?")
+        params.append("")
     if parsed.get("idiomas") and isinstance(parsed["idiomas"], list) and parsed["idiomas"]:
         idiomas_limpio = [
             {"idioma": str(i.get("idioma", ""))[:20].lower(),
@@ -1072,9 +1138,12 @@ def apply_ia_result(conn, cfg: Config, r: dict, parsed: dict | None,
 
 
 def run_ia_batch(conn, cfg: Config, profile_desc: str, max_n: int | None = None,
-                 groups: set[str] | None = None, progress=None,
-                 stop_event=None) -> int:
+                 groups: list[str] | None = None, progress=None,
+                 stop_event=None, all_pending: bool = False) -> int:
     """Anillo C: IA para los que A+B no resolvieron. 1x/día (o grupos específicos).
+
+    all_pending=True → TODAS las activas sin IA con descripción (enrich_all —
+    incluye las completas, no solo la cola C9).
 
     groups: si se pasa, procesa SOLO esos group_id (ofertas recién indexadas),
     sin exigir descripción larga — la IA trabaja con lo que haya.
@@ -1086,26 +1155,39 @@ def run_ia_batch(conn, cfg: Config, profile_desc: str, max_n: int | None = None,
     import hashlib
     ctx_version = "ctx-" + hashlib.sha256(mercado.encode()).hexdigest()[:8]
     if groups:
-        qs = ",".join("?" for _ in groups)
+        qs = ",".join("?" * len(groups))
         rows = conn.execute(
             f"SELECT group_id, title, company, location, description, modality, salary, "
-            f"salary_raw, salary_status, salary_note, techs FROM ofertas WHERE active=1 AND group_id IN ({qs})",
-            tuple(groups)).fetchall()
+            f"salary_raw, salary_status, salary_note, techs FROM ofertas "
+            f"WHERE active=1 AND group_id IN ({qs})", list(groups)).fetchall()
+    elif all_pending:
+        # enrich_all: TODAS las activas sin IA con descripción (incluye completas)
+        rows = conn.execute(
+            "SELECT group_id, title, company, location, description, modality, salary, "
+            "salary_raw, salary_status, salary_note, techs FROM ofertas "
+            "WHERE active=1 AND ia_model='' AND "
+            "(length(description)>200 OR description_source!='') "
+            "ORDER BY score DESC").fetchall()
     else:
         # C9 (v4.1) ampliado: cola relajada — la IA puede trabajar con lo que haya
         # (desc corta OK si la fuente ya dejó algo); solo excluye desc vacía total.
         # Salarios implausible/suspect SIEMPRE califican (auto-curativo — el árbitro
         # intenta corregir con la ficha y la IA comenta la anomalía).
+        # C9 extendido (spec-techs-dev-gate §2.5, P1-6): opinions "sin salario" con
+        # salary presente también califican (salario llegó después de la IA).
         rows = conn.execute(
             "SELECT group_id, title, company, location, description, modality, salary, "
             "salary_raw, salary_status, salary_note, techs FROM ofertas "
             "WHERE active=1 AND ia_model='' AND (length(description)>200 OR description_source!='') AND "
             "(modality='' OR salary='' OR description IS NULL OR "
-            "salary_status IN ('implausible','suspect')) "
+            "salary_status IN ('implausible','suspect') OR "
+            "(salary != '' AND (ai_opinion LIKE '%sin salario%' OR ai_opinion LIKE '%sin sueldo%' "
+            "OR ai_opinion LIKE '%no declara%' OR ai_opinion LIKE '%carece de datos monetarios%'))) "
             "ORDER BY score DESC").fetchall()   # primero las de mejor score (las visibles)
     # max_n=None con groups = TODAS las ofertas del grupo (sin tope de batch);
-    # sin groups, el default sigue siendo cfg.ia.batch_size (batch nocturno controlado)
-    limit = max_n if (max_n is not None or groups) else cfg.ia.batch_size
+    # all_pending=True = TODAS las pendientes (enrich_all procesa todo, no 40);
+    # sin groups/all_pending, el default sigue siendo cfg.ia.batch_size (batch nocturno controlado)
+    limit = max_n if (max_n is not None or groups or all_pending) else cfg.ia.batch_size
     pending = [dict(r) for r in rows][:limit] if limit else [dict(r) for r in rows]
     total = len(pending)
     done = 0

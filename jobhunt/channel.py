@@ -167,10 +167,12 @@ _NONDEV_CATEGORIES = {"Ingeniería no-software", "Analista/Empresa", "Profesor/F
                       "Soporte/TI", "No-tech", "Otro"}
 
 
-def is_dev(rol_categoria: str | None, title: str, cfg: Config) -> bool:
-    """Gate dev: rol_categoria IA primero; fallback regex nontech_titles (H4).
-    Capa 2 (fix modo lote): si el rol es texto libre que no matchea el enum exacto,
-    normaliza por stems — tolera 'Backend Developer', 'Fullstack Developer', 'Móvil'.
+def is_dev(rol_categoria: str | None, title: str, cfg: Config, description: str = "") -> bool:
+    """Gate dev: rol_categoria IA primero; regex SOLO en modo degradado (IA apagada).
+
+    spec-techs-dev-gate §2.3: con IA activa (cfg.ia.enabled=true), rol_categoria es
+    la ÚNICA fuente — sin rol → no dev (espera a que la IA procese). Con IA apagada,
+    la regex corregida (word boundaries + lookahead) se ejecuta sobre título+descripción.
     La IA es la autoridad: categoría no-dev explícita → False siempre."""
     rc = (rol_categoria or "").strip()
     if rc:
@@ -180,12 +182,18 @@ def is_dev(rol_categoria: str | None, title: str, cfg: Config) -> bool:
             return True
         if _categorias_dev(rc) & _DEV_CATEGORIES:
             return True
+    if cfg.ia.enabled:
+        # IA activa: sin rol_categoria → no dev (la regex NO se ejecuta — §2.3)
+        return False
+    # modo degradado (IA apagada): regex corregida sobre título + descripción
     t = (title or "").lower()
+    d = (description or "").lower()
     if re.search(cfg.relevance.nontech_titles, t, re.I):
         return False
-    # sin rol ni match negativo → conservador pero no excluyente con títulos tech obvios
-    return bool(re.search(r"dev|desarroll|software|backend|frontend|full.?stack|data|"
-                          r"python|java|qa|devops|sistemas|informátic|informatic", t, re.I))
+    return bool(re.search(
+        r"\bdev(?:eloper|ops)?\b|\bdesarroll\w*\b(?=\s+(?:de\s+)?(?:software|aplicaciones|web|backend|frontend|api|sistemas|app))|"
+        r"\bsoftware\b|\bbackend\b|\bfrontend\b|\bfull.?stack\b|\bdata\b|\bpython\b|\bjava\b|\bqa\b|\bdevops\b|\bsistemas\b|"
+        r"\binformátic\w*\b|\binformatic\w*\b", t + " " + d, re.I))
 
 
 # ---------------- render de posts ----------------
@@ -275,7 +283,8 @@ def select_channel_offers(conn, cfg: Config, require_ia: bool = False) -> list[d
     out = []
     for r in rows:
         d = dict(r)
-        if cfg.channel.require_dev and not is_dev(d.get("rol_categoria"), d.get("title") or "", cfg):
+        if cfg.channel.require_dev and not is_dev(d.get("rol_categoria"), d.get("title") or "", cfg,
+                                                  d.get("description") or ""):
             continue
         if cfg.channel.max_first_seen_hours:
             fs = str(d.get("first_seen") or "")
@@ -330,7 +339,8 @@ def publish_channel(cfg: Config, conn, tg_api, dry_run: bool = False,
 
     posteadas = []
     for r in rows:
-        if cfg.channel.require_dev and not is_dev(r.get("rol_categoria"), r.get("title") or "", cfg):
+        if cfg.channel.require_dev and not is_dev(r.get("rol_categoria"), r.get("title") or "", cfg,
+                                                  r.get("description") or ""):
             stats["skipped_dev"] += 1
             continue
         if len(posteadas) >= tope:
@@ -503,7 +513,8 @@ def publish_daily_digest(cfg: Config, conn, tg_api, dry_run: bool = False,
     # 1 por rol_categoria (mejor score de cada uno), excluye no-dev y posteadas 24h
     por_rol: dict[str, dict] = {}
     for r in rows:
-        if cfg.channel.require_dev and not is_dev(r.get("rol_categoria"), r.get("title") or "", cfg):
+        if cfg.channel.require_dev and not is_dev(r.get("rol_categoria"), r.get("title") or "", cfg,
+                                                  r.get("description") or ""):
             continue
         rol = (r.get("rol_categoria") or "Otro").strip() or "Otro"
         cur = por_rol.get(rol)
@@ -608,7 +619,8 @@ def publish_weekly_rol(cfg: Config, conn, tg_api, dry_run: bool = False,
         {"min_score": cfg.channel.min_score - 5, "max_age": cfg.channel.max_age_days}).fetchall()]
     por_rol: dict[str, dict] = {}
     for r in rows:
-        if cfg.channel.require_dev and not is_dev(r.get("rol_categoria"), r.get("title") or "", cfg):
+        if cfg.channel.require_dev and not is_dev(r.get("rol_categoria"), r.get("title") or "", cfg,
+                                                  r.get("description") or ""):
             continue
         rol = (r.get("rol_categoria") or "Otro").strip() or "Otro"
         cur = por_rol.get(rol)
@@ -895,7 +907,7 @@ def channel_status(conn, cfg: Config) -> str:
         return "📢 Canal: DESACTIVADO (sin TELEGRAM_CHANNEL_ID)"
     last = conn.execute("""SELECT posted_at, kind FROM channel_posts ORDER BY id DESC LIMIT 1""").fetchone()
     cola = conn.execute(_GATE_SQL, {"min_score": ch.min_score, "max_age": ch.max_age_days}).fetchall()
-    dev_ok = [r for r in cola if is_dev(r["rol_categoria"], r["title"], cfg)]
+    dev_ok = [r for r in cola if is_dev(r["rol_categoria"], r["title"], cfg, r.get("description") or "")]
     dist = Counter()
     for (ms,) in conn.execute("SELECT market_score FROM ofertas WHERE active=1"):
         dist[(ms or 0) // 10 * 10] += 1

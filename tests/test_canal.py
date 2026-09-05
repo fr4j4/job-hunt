@@ -146,8 +146,19 @@ def test_is_dev_por_rol_categoria():
 
 def test_is_dev_fallback_guardia():
     cfg = load_config()
+    # IA activa (default): sin rol_categoria → no dev (la regex NO se ejecuta — §2.3)
+    assert is_dev("", "desarrollador python senior", cfg) is False
+    # IA apagada (modo degradado): la regex corregida sí clasifica
+    cfg.ia.enabled = False
     assert is_dev("", "Guardia de Seguridad Full Time Colina", cfg) is False
     assert is_dev("", "desarrollador python senior", cfg) is True
+    # "sueldo devengado" no matchea dev (word boundaries — P2-1)
+    assert is_dev("", "ingeniero de proyectos", cfg, "sueldo devengado y vacaciones") is False
+    # "desarrollo de proyectos mineros" no matchea (lookahead — P1-2)
+    assert is_dev("", "ingeniero de proyectos", cfg,
+                  "desarrollo de proyectos de infraestructura minera") is False
+    # título ambiguo + descripción tech → dev
+    assert is_dev("", "ingeniero de proyectos", cfg, "desarrollar software de control") is True
 
 
 # ---------- 5. publish_channel con mock ----------
@@ -263,9 +274,11 @@ def test_gate_dev_bloquea_cobol(conn_mem):
 # ---------- 6. render ----------
 
 def test_render_omite_lineas_sin_dato():
+    from datetime import date, timedelta
+    hace2 = (date.today() - timedelta(days=2)).isoformat()
     r = {"market_score": 70, "title": "Dev <b>Python</b>", "company": "", "modality": "",
          "location": "", "salary": "", "techs": "", "ai_idiomas": "", "url": "",
-         "first_seen": "2026-09-02", "date_posted": "2026-09-02", "source": "test:x"}
+         "first_seen": hace2, "date_posted": hace2, "source": "test:x"}
     post, kb = render_offer_post(r)
     assert "&lt;b&gt;" in post          # HTML escapado
     assert "💰" not in post             # sin salario → línea omitida

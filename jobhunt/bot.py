@@ -596,6 +596,7 @@ def _help_text() -> str:
         "",
         "🧠 <b>Enriquecimiento IA</b>",
         "/enrich — corre el batch IA ahora (modalidad, sueldo, inglés, techs…)",
+        "/enrich_all — TODAS las activas sin IA con descripción (incluye completas)",
         "/enrich status — avance del batch IA (o tamaño de la cola)",
         "/stop — detiene la operación en curso (search/enrich/report) con corte limpio",
         "",
@@ -746,6 +747,18 @@ def _handle_command(cfg: Config, message: dict, state: dict) -> None:
                 else:
                     # ack inmediato — el batch corre en background y reporta por sí solo
                     threading.Thread(target=_ia_batch_async, args=(cfg, chat_id), daemon=True).start()
+        elif cmd == "/enrich_all":
+            busy = _op_busy()
+            if busy:
+                _tg_api(cfg, "sendMessage", {
+                    "chat_id": chat_id, "parse_mode": "HTML",
+                    "text": f"⏳ Hay una operación en curso ({busy}, {_op_minutes(busy)}m) — "
+                            f"espera que termine antes de lanzar el batch IA"})
+            else:
+                # /enrich_all: TODAS las activas sin IA con descripción (incluye completas)
+                threading.Thread(target=_ia_batch_async,
+                                 args=(cfg, chat_id), kwargs={"all_pending": True},
+                                 daemon=True).start()
         elif cmd == "/report":
             if arg.lower() == "status":
                 _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
@@ -1178,9 +1191,12 @@ def _handle_command(cfg: Config, message: dict, state: dict) -> None:
 _IA_STATE: dict = {"running": False, "done": 0, "total": 0, "current": "", "t0": 0.0}
 
 
-def _ia_batch_async(cfg: Config, chat_id: int | None, scheduled: bool = False, state: dict | None = None):
+def _ia_batch_async(cfg: Config, chat_id: int | None, scheduled: bool = False,
+                    state: dict | None = None, all_pending: bool = False):
     """Batch IA con ACK inicial, progreso por oferta y resumen final.
-    Nunca tumba el daemon. scheduled=True → consume el marcador diario SOLO si parte de verdad."""
+    Nunca tumba el daemon. scheduled=True → consume el marcador diario SOLO si parte de verdad.
+    all_pending=True → /enrich_all: TODAS las activas sin IA con descripción
+    (incluye las completas, no solo la cola C9)."""
     if _IA_STATE["running"]:
         if chat_id:
             _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
@@ -1232,7 +1248,7 @@ def _ia_batch_async(cfg: Config, chat_id: int | None, scheduled: bool = False, s
                 log.warning("enrich_pending global falló (continúa con la cola): %s", e)
             done = run_ia_batch(conn, cfg, profile_description(cfg),
                                 progress=(_mk_progress_cb(cfg, chat_id) if chat_id else None),
-                                stop_event=_STOP_EVENT)
+                                stop_event=_STOP_EVENT, all_pending=all_pending)
         finally:
             conn.close()
         dur = int(time.time() - t0)
@@ -1530,6 +1546,7 @@ def _register_commands(cfg: Config) -> None:
     commands = [
         {"command": "search", "description": "Gatilla una búsqueda ahora"},
         {"command": "enrich", "description": "Corre el batch IA ahora (rellena datos faltantes)"},
+        {"command": "enrich_all", "description": "TODAS las activas sin IA con descripción"},
         {"command": "stop", "description": "Detiene la operación en curso (corte limpio)"},
         {"command": "report", "description": "Análisis de mercado completo con PDF"},
         {"command": "latest", "description": "Últimas ofertas registradas"},
