@@ -727,14 +727,15 @@ def _stats_text(cfg: Config) -> str:
         # sin IA + sin descripción suficiente → requieren scan (no enrich)
         sin_ficha = q("""SELECT COUNT(*) FROM ofertas WHERE active=1 AND ia_model=''
                          AND NOT (length(description)>200 OR description_source!='')""")
-        model = conn.execute("SELECT ia_model FROM ofertas WHERE ia_model != '' "
-                             "ORDER BY last_seen DESC LIMIT 1").fetchone()
+        # modelo ACTIVO (config) — no el de la última oferta por last_seen
+        # (last_seen refleja el search, no cuándo se procesó con IA — engañoso)
+        modelo_activo = cfg.ia.local_model if cfg.ia.local_enabled else cfg.ia.model
         lines = [
             "📊 <b>Estado del pool</b>",
             "",
             f"Activas: <code>{total}</code>",
             f"🧠 Procesadas por IA: <code>{ia}</code> ({ia * 100 // max(total, 1)}%)",
-            f"   Modelo: <code>{model[0] if model else '—'}</code>",
+            f"   Modelo: <code>{modelo_activo}</code>",
             f"   En cola IA: <code>{en_cola}</code> (procesables con /enrich)",
             f"   Sin ficha: <code>{sin_ficha}</code> (requieren /search para bajar descripción)",
             "",
