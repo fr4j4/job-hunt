@@ -27,6 +27,7 @@ from . import db as database
 from .cli import cmd_run
 from .notify import (esc, score_emoji, score_style, modality_tag, role_tag, techs_tag,
                      age_tag, salary_tag, compact_label, abbr_loc, table_block, _age_short)
+# compat: re-export — eliminar en v6 cuando los imports apunten al paquete nuevo
 from .telegram.api import TelegramClient
 from .app.state import IAState, SearchState, StopEvent
 
