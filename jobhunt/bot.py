@@ -27,6 +27,7 @@ from . import db as database
 from .cli import cmd_run
 from .notify import (esc, score_emoji, score_style, modality_tag, role_tag, techs_tag,
                      age_tag, salary_tag, compact_label, abbr_loc, table_block, _age_short)
+from .telegram.api import TelegramClient
 
 log = logging.getLogger("jobhunt.bot")
 
@@ -98,18 +99,11 @@ def _kb_json(rows: list[list[dict]]) -> str:
     return json.dumps({"inline_keyboard": kb})
 
 
-_chat_allowed_empty_warned = False
-
-
-def _chat_allowed(cfg: Config, chat_id) -> bool:
-    """True si el chat está en la allowlist efectiva (SEC-1/SEC-8).
-
-    allowlist efectiva = TELEGRAM_ALLOWED_CHATS UNION {telegram.chat_id, channel.chat_id}
-    (los no vacíos). Si queda vacía -> True (modo dev sin nada configurado), con
-    warning una sola vez. Así el canal siempre puede recibir posts aunque no
-    esté explícitamente en TELEGRAM_ALLOWED_CHATS.
+def _tg_client(cfg: Config) -> TelegramClient:
+    """Instancia módulo-level derivada de cfg: allowlist efectiva (SEC-1/SEC-8) =
+    TELEGRAM_ALLOWED_CHATS UNION {telegram.chat_id, channel.chat_id} (los no vacíos).
+    Así el canal siempre puede recibir posts aunque no esté en TELEGRAM_ALLOWED_CHATS.
     """
-    global _chat_allowed_empty_warned
     allowed = set(cfg.telegram.allowed_chats)
     for extra in (cfg.telegram.chat_id, cfg.channel.chat_id):
         if extra:
@@ -117,15 +111,16 @@ def _chat_allowed(cfg: Config, chat_id) -> bool:
                 allowed.add(int(extra))
             except (TypeError, ValueError):
                 pass
-    if not allowed:
-        if not _chat_allowed_empty_warned:
-            log.warning("allowlist de chats vacía — modo dev, todos los chats permitidos")
-            _chat_allowed_empty_warned = True
-        return True
-    try:
-        return int(chat_id) in allowed
-    except (TypeError, ValueError):
-        return False
+    return TelegramClient(cfg.telegram.bot_token, allowed)
+
+
+def _chat_allowed(cfg: Config, chat_id) -> bool:
+    """True si el chat está en la allowlist efectiva (SEC-1/SEC-8).
+
+    Vacía -> True (modo dev sin nada configurado), con warning una sola vez
+    (TelegramClient._empty_allowlist_warned, proceso-global).
+    """
+    return _tg_client(cfg).chat_allowed(chat_id)
 
 
 def _tg_edit_or_send(cfg: Config, chat_id: int, message_id: int | None,
@@ -152,45 +147,7 @@ def _tg_edit_or_send(cfg: Config, chat_id: int, message_id: int | None,
 
 
 def _tg_api(cfg: Config, method: str, payload: dict, retries: int = 2) -> dict:
-    cid = payload.get("chat_id")
-    if cid is not None and not _chat_allowed(cfg, cid):
-        raise PermissionError(f"chat {cid} no está en TELEGRAM_ALLOWED_CHATS")
-    req = urllib.request.Request(
-        f"https://api.telegram.org/bot{cfg.telegram.bot_token}/{method}",
-        data=json.dumps(payload).encode(),
-        headers={"Content-Type": "application/json"},
-    )
-    last_exc: Exception | None = None
-    for attempt in range(retries + 1):
-        try:
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                return json.loads(resp.read().decode())
-        except urllib.error.HTTPError as exc:
-            # 403/429 transitorios (membership lag / rate limit) → backoff corto y retry
-            body_raw = b""
-            try:
-                body_raw = exc.read()
-            except Exception:
-                pass
-            if exc.code in (403, 429) and attempt < retries:
-                wait = 1.5 * (attempt + 1)
-                if exc.code == 429:
-                    try:
-                        retry_after = json.loads(body_raw.decode()).get("parameters", {}).get("retry_after")
-                        if retry_after:
-                            wait = min(float(retry_after), 30)
-                    except Exception:
-                        pass
-                time.sleep(wait)
-                continue
-            # incluir el body de Telegram en el error: la causa real vive ahí
-            # ("message is not modified", "message ... not found", etc.)
-            try:
-                detail = body_raw.decode()[:200]
-            except Exception:
-                detail = ""
-            raise RuntimeError(f"{exc} {detail}".strip()) from None
-    raise last_exc or RuntimeError("unreachable")
+    return _tg_client(cfg).call(method, retries=retries, **payload)
 
 
 def _tg_send_document(cfg: Config, chat_id: int, path: str, caption: str = "") -> bool:
