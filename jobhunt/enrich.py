@@ -583,7 +583,7 @@ def apply_ia_result(conn, cfg: Config, r: dict, parsed: dict | None,
             ia_fields.append(field)
     if parsed.get("opinion"):
         sets.append("ai_opinion=?")
-        params.append(str(parsed["opinion"])[:200])
+        params.append(str(parsed["opinion"])[:300])
         ia_fields.append("opinion")
     if parsed.get("rol_categoria"):
         sets.append("rol_categoria=?")

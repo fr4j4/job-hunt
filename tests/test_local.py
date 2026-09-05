@@ -179,9 +179,12 @@ def test_local_fallback_disabled_queda_cola(mem_db, monkeypatch):
 # ---------- 4. prompts ----------
 
 def test_local_schema_plano():
-    """El prompt EXTRACT pide schema plano (sin anidar)."""
-    assert "EXACTAMENTE estas claves" in en._PROMPT_EXTRACT_LOCAL
-    assert "ofertas" not in en._PROMPT_EXTRACT_LOCAL.split("Responde SOLO JSON")[1][:200]
+    """El prompt EXTRACT pide schema plano (sin anidar) y NO lista tecnologías (anti-halluc)."""
+    assert "FORMATO EXACTO DE SALIDA" in en._PROMPT_EXTRACT_LOCAL
+    assert "salario_clp_mensual" in en._PROMPT_EXTRACT_LOCAL
+    # V2: sin lista de 30 tecnologías (la lista del V1 era fuente de alucinaciones)
+    assert "Py, Java, TS, JS" not in en._PROMPT_EXTRACT_LOCAL
+    assert "NUNCA agregues otras" in en._PROMPT_EXTRACT_LOCAL
 
 
 def test_local_opinion_anti_alucinacion():

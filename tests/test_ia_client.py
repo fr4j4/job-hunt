@@ -123,6 +123,7 @@ def test_enrich_viejo_sigue_reexportando():
     assert en._LOTE_SCHEMA["properties"]["ofertas"]["type"] == "array"
     assert en._coerce_salario("2.500.000") == 2_500_000
     assert en._normalizar_extract_local({"modalidad": "remoto"})["modalidad"] == "R"
-    assert "EXACTAMENTE estas claves" in en._PROMPT_EXTRACT_LOCAL
+    assert "FORMATO EXACTO DE SALIDA" in en._PROMPT_EXTRACT_LOCAL
+    assert "NUNCA agregues otras" in en._PROMPT_EXTRACT_LOCAL
     assert "ANTI-ALUCINACIÓN" in en._PROMPT_OPINION_LOCAL
     assert "--- OFERTA 1 ---" in en._lote_prompt([{"title": "A"}], "p", "m")
