@@ -28,6 +28,7 @@ from .cli import cmd_run
 from .notify import (esc, score_emoji, score_style, modality_tag, role_tag, techs_tag,
                      age_tag, salary_tag, compact_label, abbr_loc, table_block, _age_short)
 from .telegram.api import TelegramClient
+from .app.state import IAState, SearchState, StopEvent
 
 log = logging.getLogger("jobhunt.bot")
 
@@ -480,8 +481,8 @@ def _latest_offers(cfg: Config, n: int = 10) -> list[dict]:
         conn.close()
 
 
-_SEARCH_STATE: dict = {"running": False, "t0": 0.0}
-_STOP_EVENT = threading.Event()   # /stop: termina search/IA/report en su próximo punto seguro
+_SEARCH_STATE = SearchState()
+_STOP_EVENT = StopEvent()   # /stop: termina search/IA/report en su próximo punto seguro
 _REPORT_STATE: dict = {"running": False, "phase": 0, "phase_msg": "", "t0": 0.0,
                        "pdf": ""}
 
@@ -1179,7 +1180,7 @@ def _handle_command(cfg: Config, message: dict, state: dict) -> None:
             pass
 
 
-_IA_STATE: dict = {"running": False, "done": 0, "total": 0, "current": "", "t0": 0.0}
+_IA_STATE = IAState()
 
 
 def _ia_batch_async(cfg: Config, chat_id: int | None, scheduled: bool = False,
@@ -1243,7 +1244,7 @@ def _ia_batch_async(cfg: Config, chat_id: int | None, scheduled: bool = False,
         finally:
             conn.close()
         dur = int(time.time() - t0)
-        _IA_STATE.update(running=False, done=0, total=0, current="")   # reset completo — evita "0/0 lote 8" fantasma
+        _IA_STATE.reset()   # reset completo (incluye t0) — evita "0/0 lote 8" fantasma
         # recalcular cola real tras el batch (la variable `cola` era previa al inicio)
         try:
             conn2 = database.connect(cfg)
@@ -1275,7 +1276,7 @@ def _ia_batch_async(cfg: Config, chat_id: int | None, scheduled: bool = False,
                 "text": f"🧠 <b>Batch IA terminado</b> — {done} ofertas enriquecidas{cola_txt} · rescore: {rescored} · {dur // 60}m{dur % 60:02d}s"})
         log.info("batch IA OK: %d ofertas, rescore %d (%ds)", done, rescored, dur)
     except Exception as exc:
-        _IA_STATE.update(running=False, done=0, total=0, current="")   # reset completo también en fallo
+        _IA_STATE.reset()   # reset completo también en fallo
         log.error("batch IA falló: %s", exc)
         if chat_id:
             try:

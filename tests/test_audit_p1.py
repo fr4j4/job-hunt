@@ -255,6 +255,11 @@ def test_categorias_dev_positivos(rc, expected):
 # ---------------- 7. cli.cmd_run: lote_stop (CONC-1) ----------------
 
 def test_cmd_run_no_rebindea_stop_event_global():
+    """El loop de lotes vive en app.batch.BatchRunner.run (paso 6): la guarda
+    CONC-1 se verifica ahí y en cmd_run (que delega)."""
     src = inspect.getsource(cli.cmd_run)
     assert "stop_event = threading.Event()" not in src
-    assert "lote_stop" in src
+    from jobhunt.app.batch import BatchRunner
+    src_batch = inspect.getsource(BatchRunner.run)
+    assert "stop_event = threading.Event()" not in src_batch
+    assert "lote_stop" in src_batch
