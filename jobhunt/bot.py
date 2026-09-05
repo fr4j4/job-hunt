@@ -599,6 +599,8 @@ def _help_text() -> str:
         "/report status · /report list — avance del reporte · historial de PDFs",
         "/stats — cobertura del pool (procesadas IA, datos faltantes)",
         "/config — configuración actual (tokens enmascarados)",
+        "/preview — oferta aleatoria como se vería en el canal (sin marcar publicada)",
+        "/preview 80 — aleatoria con market_score >= 80 · /preview java — filtra por texto",
         "",
         "📢 <b>Canal (broadcast)</b>",
         "/channel — estado del canal (umbral, cola, distribución market score)",
@@ -666,6 +668,44 @@ def _config_text(cfg: Config) -> str:
         f"📊 <b>Alertas</b>: min {cfg.alerts.min_score} · worth_it {cfg.alerts.worth_it_score}",
     ]
     return "\n".join(lines)
+
+
+def _preview_offer(cfg: Config, chat_id, arg: str = ""):
+    """Comando /preview: oferta aleatoria renderizada como en el canal (DM).
+
+    NO marca notified_channel_at — es solo previsualización.
+    /preview → aleatoria con IA · /preview N → market_score >= N
+    /preview <texto> → aleatoria que matchee título/empresa
+    """
+    from .channel import render_offer_post
+    conn = database.connect(cfg)
+    try:
+        where = "active=1 AND ia_model != ''"
+        params: list = []
+        if arg.isdigit():
+            where += " AND market_score >= ?"
+            params.append(int(arg))
+        elif arg.strip():
+            where += " AND (title LIKE ? OR company LIKE ?)"
+            like = f"%{arg.strip()}%"
+            params.extend([like, like])
+        rows = conn.execute(
+            f"SELECT * FROM ofertas WHERE {where} ORDER BY RANDOM() LIMIT 1",
+            params).fetchall()
+        if not rows:
+            _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
+                                         "text": "🔍 No encontré ofertas con ese filtro"})
+            return
+        r = dict(rows[0])
+        text, kb = render_offer_post(r)
+        payload: dict = {"chat_id": chat_id, "parse_mode": "HTML",
+                         "text": text, "disable_web_page_preview": True}
+        if kb:
+            payload["reply_markup"] = kb
+        _tg_api(cfg, "sendMessage", payload)
+        log.info("preview enviado: %s (chat %s)", r.get("group_id", "?"), chat_id)
+    finally:
+        conn.close()
 
 
 def _stats_text(cfg: Config) -> str:
@@ -776,6 +816,8 @@ def _handle_command(cfg: Config, message: dict, state: dict) -> None:
         elif cmd == "/config":
             _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
                                          "text": _config_text(cfg)})
+        elif cmd == "/preview":
+            _preview_offer(cfg, chat_id, arg)
         elif cmd == "/stats":
             _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
                                          "text": _stats_text(cfg)})
@@ -1547,6 +1589,7 @@ def _register_commands(cfg: Config) -> None:
         {"command": "latest", "description": "Últimas ofertas registradas"},
         {"command": "stats", "description": "Cobertura del pool"},
         {"command": "config", "description": "Configuración actual (tokens enmascarados)"},
+        {"command": "preview", "description": "Oferta aleatoria como se vería en el canal"},
         {"command": "channel", "description": "Estado del canal"},
         {"command": "channel_publish", "description": "Publicar candidatas al canal ahora"},
         {"command": "channel_publish_ia", "description": "Publicar solo ofertas revisadas por IA"},
