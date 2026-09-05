@@ -194,6 +194,14 @@ def test_local_opinion_anti_alucinacion():
     assert "NUNCA corrijas ni omitas" in en._PROMPT_OPINION_LOCAL
 
 
+def test_local_opinion_anti_relleno():
+    """El prompt OPINION prohíbe frases genéricas y pide inferir de lo disponible."""
+    assert "frases genéricas de relleno" in en._PROMPT_OPINION_LOCAL
+    assert "oferta fuera de rango" in en._PROMPT_OPINION_LOCAL
+    assert "descripción es corta o ausente" in en._PROMPT_OPINION_LOCAL
+    assert "max 300 chars" in en._PROMPT_OPINION_LOCAL
+
+
 # ---------- 5. knobs ----------
 
 def test_local_concurrency_knob():

@@ -306,6 +306,37 @@ def test_render_con_boton_url():
     assert "💬 Salario sobre el P75" in post
 
 
+def test_render_info_ia_completa():
+    """El post muestra resumen, opinion completa, red/green flags y benefits."""
+    r = {"market_score": 80, "title": "Senior Backend Java", "company": "X",
+         "modality": "remoto", "salary": "CLP 3050000", "techs": "Java;Spring;AWS",
+         "ai_resumen": "Backend Java/Spring remoto.",
+         "ai_opinion": "Sueldo sobre la mediana del mercado (1,4M) y el P75 (2,4M).",
+         "ai_red_flags": '["Proyecto hasta fin de año", "Prueba técnica anti-LLM"]',
+         "ai_green_flags": '["Contrato indefinido", "Clientes grandes"]',
+         "ai_benefits": '["Remoto", "Seguro"]',
+         "url": "https://x.cl/1", "first_seen": "2026-09-02",
+         "date_posted": "2026-09-02", "source": "test:x"}
+    post, kb = render_offer_post(r)
+    assert "📝 Backend Java/Spring remoto." in post
+    assert "💬 Sueldo sobre la mediana del mercado (1,4M) y el P75 (2,4M)." in post
+    assert "⚠️ Proyecto hasta fin de año · Prueba técnica anti-LLM" in post
+    assert "✅ Contrato indefinido · Clientes grandes" in post
+    assert "🎁 Remoto · Seguro" in post
+    assert "🧰 Java · Spring · AWS" in post
+
+
+def test_render_opinion_no_truncada():
+    """La opinion NO se trunca a 320 chars (antes sí)."""
+    opinion = "X" * 500
+    r = {"market_score": 70, "title": "Dev", "company": "", "modality": "",
+         "location": "", "salary": "", "techs": "", "ai_opinion": opinion,
+         "url": "", "first_seen": "2026-09-02", "date_posted": "2026-09-02",
+         "source": "test:x"}
+    post, kb = render_offer_post(r)
+    assert opinion in post
+
+
 # ---------- 7. rescore dual-write + aislamiento ----------
 
 def test_rescore_dual_write_aislado(tmp_path):
