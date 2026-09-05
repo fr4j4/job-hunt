@@ -383,8 +383,8 @@ def _aplicar_ficha(conn, r: dict, info: dict, pool: list[int], cfg: Config | Non
         (desc, info.get("company") or "", info.get("modality_badge") or "", arb_salary,
          arb_source, arb_status, arb_note,
          techs_join, info.get("date_posted") or "",
-         info.get("valid_through") or "", info.get("years_official"),
-         info.get("remote_official"), info.get("employment_type") or "",
+         info.get("valid_through") or "", info.get("employment_type") or "",
+         info.get("years_official"), info.get("remote_official"),
          "jsonld" if info.get("description") else "section",
          r["group_id"]))
     conn.commit()

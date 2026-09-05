@@ -59,8 +59,19 @@ def _english_from_ia(job: dict) -> str:
 
 def _kw_hit(kw: str, text: str) -> bool:
     """Match por palabra completa (S1/S2): 'intern' no mata 'internacional',
-    'java' no cuenta en 'javascript'. Espacios internos flexibles (spring boot)."""
-    pat = r"(?<!\w)" + r"\s*".join(re.escape(w) for w in _norm(kw).split()) + r"(?!\w)"
+    'java' no cuenta en 'javascript'. Espacios internos flexibles (spring boot).
+
+    Admite las grafías pegadas del mercado: sufijo js/.js/dígito ('reactjs',
+    'nodejs', 'python3') y kw que empieza en no-palabra ('.net' en 'asp.net').
+    """
+    k = _norm(kw)
+    if not k.strip():
+        return False
+    pat = r"\s*".join(re.escape(w) for w in k.split())
+    if k[0].isalnum():
+        pat = r"(?<!\w)" + pat
+    if k[-1].isalnum():
+        pat += r"(?:js|\.js|[0-9])?(?!\w)"
     return bool(re.search(pat, text))
 
 

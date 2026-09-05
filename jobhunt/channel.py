@@ -244,6 +244,9 @@ def _send_digest(cfg: Config, tg_api, kind: str, text: str, conn, now: datetime,
     ni registro — el operador pidió explícitamente el envío. El daemon
     automático (force=False, sin chat_id) conserva la idempotencia por bucket.
     """
+    if len(text) > 4096:
+        cut = text.rfind("\n\n", 0, 4000)
+        text = (text[:cut] if cut > 0 else text[:4000]) + "\n…"
     if chat_id is not None or force:
         cid = int(chat_id) if chat_id is not None else int(cfg.channel.chat_id)
         try:
@@ -254,9 +257,6 @@ def _send_digest(cfg: Config, tg_api, kind: str, text: str, conn, now: datetime,
         except Exception as e:
             log.warning("canal: digest %s (manual/DM) falló: %s", kind, e)
             return False
-    if len(text) > 4096:
-        cut = text.rfind("\n\n", 0, 4000)
-        text = (text[:cut] if cut > 0 else text[:4000]) + "\n…"
     bucket = _bucket(kind, now)
     body_hash = hashlib.sha1(text.encode()).hexdigest()
     try:

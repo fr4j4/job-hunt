@@ -119,8 +119,10 @@ def _tg_client(cfg: Config) -> TelegramClient:
 def _chat_allowed(cfg: Config, chat_id) -> bool:
     """True si el chat está en la allowlist efectiva (SEC-1/SEC-8).
 
-    Vacía -> True (modo dev sin nada configurado), con warning una sola vez
-    (TelegramClient._empty_allowlist_warned, proceso-global).
+    La allowlist efectiva casi nunca está vacía (_tg_client une chat_id y
+    channel.chat_id), así que el modo dev "vacía -> True" es residual: si
+    TELEGRAM_ALLOWED_CHATS no lista un chat secundario, queda rechazado y
+    TelegramClient.chat_allowed lo loguea a WARNING con su chat_id.
     """
     return _tg_client(cfg).chat_allowed(chat_id)
 

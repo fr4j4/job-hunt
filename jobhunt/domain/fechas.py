@@ -62,8 +62,10 @@ def normalize_date(raw: str | int | float | None, now: datetime | None = None) -
     if m:
         n = int(re.sub(r"\D", "", m.group(1)) or 1)
         unit = m.group(2).lower()
-        delta = {"minuto": 0, "hora": 0, "día": n, "dia": n, "semana": n * 7, "mes": n * 30}[unit]
-        return (now - timedelta(days=delta)).date().isoformat()
+        delta = {"minuto": timedelta(minutes=n), "hora": timedelta(hours=n),
+                 "día": timedelta(days=n), "dia": timedelta(days=n),
+                 "semana": timedelta(days=n * 7), "mes": timedelta(days=n * 30)}[unit]
+        return (now - delta).date().isoformat()
     if re.search(r"\bhoy\b", s, re.I):
         return now.date().isoformat()
     if re.search(r"\bayer\b", s, re.I):

@@ -28,9 +28,16 @@ class TelegramClient:
                 _empty_allowlist_warned = True
             return True
         try:
-            return int(chat_id) in self.allowed
+            ok = int(chat_id) in self.allowed
         except (TypeError, ValueError):
-            return False
+            ok = False
+        if not ok:
+            # El rechazo era silencioso (PermissionError sin rastro): con la
+            # allowlist efectiva (unión con chat_id/channel.chat_id) un chat que
+            # antes pasaba puede quedar fuera, y el operador necesita verlo.
+            log.warning("chat %s fuera de la allowlist efectiva %s — rechazado",
+                        chat_id, sorted(self.allowed))
+        return ok
 
     def call(self, method: str, retries: int = 2, **params) -> dict:
         cid = params.get("chat_id")
