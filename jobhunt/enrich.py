@@ -589,20 +589,19 @@ def apply_ia_result(conn, cfg: Config, r: dict, parsed: dict | None,
         sets.append("rol_categoria=?")
         params.append(str(parsed["rol_categoria"])[:40])
         ia_fields.append("rol_categoria")
-    # techs de la IA: REFRESCA la columna siempre que detecte (lista no vacía) —
-    # una run anterior pudo no detectarlas (desc corta, modelo viejo). Solo
-    # preserva lo existente si la IA no detecta nada ([] → no toca).
-    if parsed.get("techs") and isinstance(parsed["techs"], list):
+    # techs de la IA: SIEMPRE se regeneran (decisión usuario 2026-09-05) — si la
+    # IA detecta [] limpia la columna, no preserva lo existente (una run anterior
+    # pudo detectar techs que ya no aplican o alucinadas).
+    if "techs" in parsed and isinstance(parsed["techs"], list):
         techs_limpio = []
         for t in parsed["techs"][:8]:
             t = str(t).strip()
             if not t:
                 continue
             techs_limpio.append(_TECH_ABBR.get(_norm(t), t[:20]))
-        if techs_limpio:
-            sets.append("techs=?")
-            params.append(";".join(techs_limpio))
-            ia_fields.append("techs")
+        sets.append("techs=?")
+        params.append(";".join(techs_limpio))
+        ia_fields.append("techs")
     # Guard anti-alucinación (spec-techs-dev-gate §2.2, P1-1): DESPUÉS del REFRESCA
     # — si la IA clasifica el rol como no-software, NO puede haber techs (contradicción).
     # En SQLite gana la ÚLTIMA asignación del SET, así que este append pisa la lista

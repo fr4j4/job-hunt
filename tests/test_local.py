@@ -301,7 +301,8 @@ def test_techs_titulo_java():
 
 
 def test_techs_feed_preservado(mem_db, monkeypatch):
-    """Feed con techs + IA devuelve [] → feed intacto (REFRESCA preserva)."""
+    """Feed con techs + IA devuelve [] → columna LIMPIA (decisión usuario: techs
+    SIEMPRE se regeneran con IA — [] limpia, no preserva)."""
     cfg = _cfg()
     _insert(mem_db, "g1", desc="x" * 50)
     mem_db.execute("UPDATE ofertas SET techs='Py;AWS' WHERE group_id='g1'")
@@ -312,7 +313,7 @@ def test_techs_feed_preservado(mem_db, monkeypatch):
                         lambda *a, **k: ({**_resp_extract(), **_resp_opinion(), "techs": []}, ""))
     en.enrich_pending(mem_db, cfg, max_n=1)
     row = mem_db.execute("SELECT techs FROM ofertas WHERE group_id='g1'").fetchone()
-    assert row["techs"] == "Py;AWS"   # IA devolvió [] → preserva feed
+    assert row["techs"] == ""   # IA devolvió [] → limpia (no preserva)
 
 
 def test_guard_rol_no_software_limpia_techs(mem_db, monkeypatch):

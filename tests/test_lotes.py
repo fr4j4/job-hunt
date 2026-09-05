@@ -444,7 +444,8 @@ def test_lote_techs_ia_refresca_existente(mem_db, monkeypatch):
 
 
 def test_lote_techs_ia_vacia_no_toca(mem_db, monkeypatch):
-    """Si la IA no detecta techs ([]), la columna existente se preserva."""
+    """Si la IA no detecta techs ([]), la columna se LIMPIA (decisión usuario:
+    techs SIEMPRE se regeneran con IA — [] limpia, no preserva)."""
     cfg = _cfg()
     _insert(mem_db, "g1", salary="")
     mem_db.execute("UPDATE ofertas SET techs='Java;Spring' WHERE group_id='g1'")
@@ -462,4 +463,4 @@ def test_lote_techs_ia_vacia_no_toca(mem_db, monkeypatch):
                                            "benefits": []}], ""))
     en.enrich_pending(mem_db, cfg, max_n=1)
     techs = mem_db.execute("SELECT techs FROM ofertas WHERE group_id='g1'").fetchone()[0]
-    assert techs == "Java;Spring"   # intacto
+    assert techs == ""   # IA devolvió [] → limpia
