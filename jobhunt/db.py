@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .config import Config
+from .domain.fechas import canonical_date
 from .logging_setup import get_logger
 
 log = get_logger("jobhunt.db")
@@ -188,7 +189,6 @@ def rescore_all(conn: sqlite3.Connection, score_fn, version_id: str, cfg: Config
     (try/except por fila, market queda en 0 con log).
     También refresca date_canonical (min(date_posted, first_seen)).
     """
-    from .channel import canonical_date  # import local evita ciclo
 
     rows = conn.execute("SELECT * FROM ofertas WHERE active=1").fetchall()
     updated = 0
@@ -221,7 +221,6 @@ def rescore_ids(conn: sqlite3.Connection, group_ids: list[str], version_id: str,
     O de market_score deja la fila con sus scores anteriores y no aborta el lote.
     Refresca date_canonical igual que rescore_all.
     """
-    from .channel import canonical_date
     if not group_ids:
         return 0
     qs = ",".join("?" for _ in group_ids)
@@ -321,14 +320,9 @@ def re_norm_uid(title: str, company: str) -> str:
 
 # ---- dedup helpers (migrados de buscador_v2) ----
 import re as _re
-import unicodedata as _unicodedata
 from difflib import SequenceMatcher
 
-
-def _norm_text(s: str) -> str:
-    s = _unicodedata.normalize("NFKD", s or "")
-    s = "".join(c for c in s if not _unicodedata.combining(c)).lower()
-    return s
+from .domain.texto import _norm as _norm_text  # compat: re-export, idéntico a scoring._norm
 
 
 _FILLER = _re.compile(

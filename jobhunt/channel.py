@@ -5,179 +5,28 @@ Decisiones de producto implementadas (spec-canal-v3-final.md):
 - Ventana de antigüedad: date_canonical = min(date_posted, first_seen), 14d default
 - Canal = broadcast puro: posts individuales + digests, sin paginación
 """
+# compat: re-export — eliminar en v6 cuando los imports apunten al paquete nuevo
 from __future__ import annotations
 
 import hashlib
 import re
 import time
 from collections import Counter
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from .config import Config
+from .domain.fechas import age_days, canonical_date, normalize_date  # noqa: F401
+from .domain.roles import (  # noqa: F401
+    _CAT_RULES,
+    _DEV_CATEGORIES,
+    _NONDEV_CATEGORIES,
+    _categorias_dev,
+    is_dev,
+)
 from .logging_setup import get_logger
 
 log = get_logger(__name__)
-
-# ---------------- fechas ----------------
-
-_MESES = {"enero": 1, "febrero": 2, "marzo": 3, "abril": 4, "mayo": 5, "junio": 6,
-          "julio": 7, "agosto": 8, "septiembre": 9, "octubre": 10, "noviembre": 11,
-          "diciembre": 12, "ene": 1, "feb": 2, "mar": 3, "abr": 4, "may": 5, "jun": 6,
-          "jul": 7, "ago": 8, "sep": 9, "oct": 10, "nov": 11, "dic": 12}
-
-
-def normalize_date(raw: str | int | float | None, now: datetime | None = None) -> str:
-    """Convierte los formatos de fecha de las 8 fuentes a YYYY-MM-DD ('' si no parseable).
-
-    LinkedIn: ISO datetime · Laborum: DD-MM-YYYY · Jooble: 'Publicado el 21 de Jul, 2026'
-    Computrabajo: 'Hace X horas/días' (relativo) · AIRA: publication_days (int) · epoch.
-    """
-    if raw is None:
-        return ""
-    now = now or datetime.now(timezone.utc)
-    if isinstance(raw, (int, float)):
-        # publication_days (días desde publicación) o epoch
-        n = int(raw)
-        if 0 <= n < 400:            # publication_days
-            return (now - timedelta(days=n)).date().isoformat()
-        if n > 10**12:              # epoch ms
-            return datetime.fromtimestamp(n / 1000, timezone.utc).date().isoformat()
-        if n > 10**9:               # epoch s
-            return datetime.fromtimestamp(n, timezone.utc).date().isoformat()
-        return ""
-    s = str(raw).strip()
-    if not s:
-        return ""
-    # ISO completo o YYYY-MM-DD
-    m = re.match(r"(\d{4})-(\d{2})-(\d{2})", s)
-    if m:
-        return s[:10]
-    # DD-MM-YYYY (Laborum)
-    m = re.match(r"(\d{1,2})-(\d{1,2})-(\d{4})", s)
-    if m:
-        d, mo, y = int(m.group(1)), int(m.group(2)), int(m.group(3))
-        try:
-            return date(y, mo, d).isoformat()
-        except ValueError:
-            return ""
-    # 'Publicado el 21 de Jul, 2026' (Jooble)
-    m = re.search(r"(\d{1,2})\s+de\s+([A-Za-zÁÉÍÓÚáéíóúñ]+),?\s+(\d{4})", s, re.I)
-    if m:
-        mes = _MESES.get(m.group(2).lower()[:3])
-        if mes:
-            try:
-                return date(int(m.group(3)), mes, int(m.group(1))).isoformat()
-            except ValueError:
-                return ""
-    # 'Hace X horas/días/semanas/meses' / 'Hoy' / 'Ayer' (Computrabajo)
-    m = re.search(r"[Hh]ace\s+([\d\s]+)\s*(minuto|hora|día|dia|semana|mes)", s)
-    if m:
-        n = int(re.sub(r"\D", "", m.group(1)) or 1)
-        unit = m.group(2).lower()
-        delta = {"minuto": 0, "hora": 0, "día": n, "dia": n, "semana": n * 7, "mes": n * 30}[unit]
-        return (now - timedelta(days=delta)).date().isoformat()
-    if re.search(r"\bhoy\b", s, re.I):
-        return now.date().isoformat()
-    if re.search(r"\bayer\b", s, re.I):
-        return (now - timedelta(days=1)).date().isoformat()
-    # epoch string
-    if s.isdigit():
-        return normalize_date(int(s), now)
-    return ""
-
-
-def canonical_date(row: dict, now: datetime | None = None) -> str:
-    """Fecha canónica de la oferta: min(date_posted, first_seen) con clamp.
-
-    - sin date_posted → first_seen (cota honesta: Indeed filtro 168h)
-    - date_posted más fresca que first_seen → clamp a first_seen (anti repost-fresh)
-    """
-    now = now or datetime.now(timezone.utc)
-    d = normalize_date(row.get("date_posted") or "", now)
-    fs = str(row.get("first_seen") or "")[:10]
-    if not re.match(r"\d{4}-\d{2}-\d{2}", fs):
-        return d
-    if not d:
-        return fs
-    return d if d <= fs else fs
-
-
-def age_days(row: dict, now: datetime | None = None) -> int:
-    """Días de antigüedad según date_canonical. Negativa → 0."""
-    now = now or datetime.now(timezone.utc)
-    c = canonical_date(row, now)
-    if not re.match(r"\d{4}-\d{2}-\d{2}", c):
-        return 0
-    try:
-        dd = (datetime.now(timezone.utc).date() if now is None
-              else now.date()) - date.fromisoformat(c)
-        return max(0, dd.days)
-    except ValueError:
-        return 0
-
-
-# ---------------- gate dev ----------------
-
-_DEV_CATEGORIES = {"Full Stack", "Backend", "Frontend", "Data", "Mobile", "AI/ML",
-                   "Tech Lead", "DevOps/Cloud", "QA", "Software", "Seguridad"}
-
-_CAT_RULES = (   # CH-1: word boundaries — 'Retail'≠AI, 'Full Time'≠Full Stack, 'Data Entry'≠Data
-    ("Backend", r"\bback.?end\b"),
-    ("Frontend", r"\bfront.?end\b|\bfront\b"),
-    ("Full Stack", r"\bfull.?stack\b|\bstack\b"),
-    ("Mobile", r"\bm[oó]vil\b|\bmobile\b"),
-    ("Data", r"\bdata\b(?!\s*entry)|\bdatos\b"),
-    ("AI/ML", r"\bai\b|\bml\b|\bia\b|\bmachine learning\b"),
-    ("Tech Lead", r"\btech\s*lead\b|\blead\b(?!\s+(?:de\s+)?(?:ventas|comercial|retail|tienda))"),
-    ("DevOps/Cloud", r"\bdev.?ops\b|\bcloud\b|\binfra\w*\b|\bsre\b"),
-    ("QA", r"\bqa\b|\btesting\b"),
-    ("Software", r"\bsoftware\b|\bdesarroll\w*\b"),
-    ("Seguridad", r"\bseguridad\b|\bsecops\b|\bsecurity\b"),
-)
-
-
-def _categorias_dev(rc: str) -> set[str]:
-    """Normaliza rol_categoria libre → categorías dev canónicas:
-    'Backend Developer' → {Backend} · 'Fullstack Developer' → {Full Stack, Software}
-    'DevOps' → {DevOps/Cloud} · 'Desarrollo Móvil' → {Mobile, Software}.
-    Match por palabra completa (CH-1): 'Retail', 'Full Time', 'Data Entry',
-    'Team Lead Ventas' → set() (antes: AI/ML, Full Stack, Data, Tech Lead)."""
-    r = rc.lower()
-    return {cat for cat, pat in _CAT_RULES if re.search(pat, r)}
-
-
-_NONDEV_CATEGORIES = {"Ingeniería no-software", "Analista/Empresa", "Profesor/Formación",
-                      "Soporte/TI", "No-tech", "Otro"}
-
-
-def is_dev(rol_categoria: str | None, title: str, cfg: Config, description: str = "") -> bool:
-    """Gate dev: rol_categoria IA primero; regex SOLO en modo degradado (IA apagada).
-
-    spec-techs-dev-gate §2.3: con IA activa (cfg.ia.enabled=true), rol_categoria es
-    la ÚNICA fuente — sin rol → no dev (espera a que la IA procese). Con IA apagada,
-    la regex corregida (word boundaries + lookahead) se ejecuta sobre título+descripción.
-    La IA es la autoridad: categoría no-dev explícita → False siempre."""
-    rc = (rol_categoria or "").strip()
-    if rc:
-        if rc in _NONDEV_CATEGORIES:
-            return False
-        if rc in _DEV_CATEGORIES:
-            return True
-        if _categorias_dev(rc) & _DEV_CATEGORIES:
-            return True
-    if cfg.ia.enabled:
-        # IA activa: sin rol_categoria → no dev (la regex NO se ejecuta — §2.3)
-        return False
-    # modo degradado (IA apagada): regex corregida sobre título + descripción
-    t = (title or "").lower()
-    d = (description or "").lower()
-    if re.search(cfg.relevance.nontech_titles, t, re.I):
-        return False
-    return bool(re.search(
-        r"\bdev(?:eloper|ops)?\b|\bdesarroll\w*\b(?=\s+(?:de\s+)?(?:software|aplicaciones|web|backend|frontend|api|sistemas|app))|"
-        r"\bsoftware\b|\bbackend\b|\bfrontend\b|\bfull.?stack\b|\bdata\b|\bpython\b|\bjava\b|\bqa\b|\bdevops\b|\bsistemas\b|"
-        r"\binformátic\w*\b|\binformatic\w*\b", t + " " + d, re.I))
 
 
 # ---------------- render de posts ----------------

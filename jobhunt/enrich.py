@@ -16,30 +16,10 @@ from html import unescape as _u
 import requests
 
 from .config import Config
+from .domain.roles import _NONDEV_CATEGORIES  # noqa: F401 (compat: monkeypatch/import viejo)
+from .domain.techs import ABBR_BY_ALIAS as _TECH_ABBR  # noqa: F401 (compat)
+from .domain.texto import _norm
 from .logging_setup import get_logger
-from .scoring import _norm
-
-# Normalización de techs IA → abreviaturas canónicas (columna techs)
-_TECH_ABBR = {
-    "python": "Py", "py": "Py",
-    "java": "Java",
-    "typescript": "TS", "ts": "TS",
-    "javascript": "JS", "js": "JS",
-    "react": "React", "angular": "Angular", "vue": "Vue",
-    "node": "Node", "node.js": "Node",
-    "kubernetes": "K8s", "k8s": "K8s",
-    "docker": "Docker",
-    "aws": "AWS", "gcp": "GCP", "azure": "Azure",
-    "terraform": "TF", "tf": "TF",
-    "scala": "Scala", "golang": "Go", "go": "Go",
-    ".net": ".NET", "c#": "C#",
-    "sql": "SQL", "postgres": "Postgres", "postgresql": "Postgres",
-    "mongo": "Mongo", "mongodb": "Mongo",
-    "redis": "Redis", "kafka": "Kafka",
-    "fastapi": "FastAPI", "django": "Django",
-    "spring": "Spring", "nifi": "NiFi",
-    "jenkins": "Jenkins", "ci/cd": "CI/CD",
-}
 
 log = get_logger(__name__)
 
@@ -1081,7 +1061,6 @@ def apply_ia_result(conn, cfg: Config, r: dict, parsed: dict | None,
     (feed/text) ni rellena un salary='' que el árbitro vació."""
     if not parsed:
         return False
-    from .channel import _NONDEV_CATEGORIES   # sin ciclo (P2-7) — guard §2.2
     # F1/F3: el dict r viene de SELECTs que no traen salary_source/ia_model/ai_*
     # (guard A3 y sanitización de fósiles eran no-op). Se lee la fila fresca UNA
     # vez aquí — todos los callers quedan cubiertos sin tocar la firma.

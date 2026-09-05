@@ -9,7 +9,11 @@ import sqlite3
 from collections import Counter
 from pathlib import Path
 
-from .scoring import _salary_to_clp_monthly, _norm, _MARKET_TECHS_TITLE_RE
+# compat: re-export — eliminar en v6 cuando los imports apunten al paquete nuevo
+from .domain.techs import NAME_BY_ABBR as _TECH_CANON  # noqa: F401
+from .domain.techs import TITLE_RE as _MARKET_TECHS_TITLE_RE
+from .domain.texto import _norm
+from .scoring import _salary_to_clp_monthly
 
 _ROL_LABELS = {
     "Full Stack": "Full Stack", "Backend": "Backend", "Frontend": "Frontend",
@@ -18,30 +22,6 @@ _ROL_LABELS = {
     "Seguridad": "Seguridad", "Otro": "Otro",
 }
 _SEN_LABELS = {"senior": "Senior", "semi": "Semi-senior", "lead": "Lead", "junior": "Junior"}
-
-# Normalización de techs (columna abreviada + títulos libres → nombre canónico)
-_TECH_CANON = {
-    "py": "Python", "python": "Python",
-    "ts": "TypeScript", "typescript": "TypeScript",
-    "js": "JavaScript", "javascript": "JavaScript",
-    "k8s": "Kubernetes", "kubernetes": "Kubernetes",
-    "tf": "Terraform", "terraform": "Terraform",
-    "golang": "Go", "go": "Go",
-    "node": "Node.js", "node.js": "Node.js",
-    "postgres": "PostgreSQL", "postgresql": "PostgreSQL",
-    "mongo": "MongoDB", "mongodb": "MongoDB",
-    "react": "React", "angular": "Angular", "spring": "Spring",
-    "aws": "AWS", "gcp": "GCP", "azure": "Azure",
-    "docker": "Docker", "scala": "Scala", "java": "Java",
-    "sql": "SQL", "nifi": "NiFi", "kafka": "Kafka",
-    "fastapi": "FastAPI", "redis": "Redis", "vue": "Vue",
-    ".net": ".NET", "c#": "C#", "c++": "C++", "php": "PHP",
-    "ci/cd": "CI/CD", "jenkins": "Jenkins", "git": "Git",
-    "linux": "Linux", "bash": "Bash", "airflow": "Airflow",
-    "spark": "Spark", "hadoop": "Hadoop", "snowflake": "Snowflake",
-    "databricks": "Databricks", "tableau": "Tableau", "power bi": "Power BI",
-    "sap": "SAP", "abap": "ABAP", "cobol": "COBOL",
-}
 
 
 def _techs_de_fila(r: dict) -> set[str]:

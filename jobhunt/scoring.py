@@ -13,16 +13,14 @@ from __future__ import annotations
 
 import re
 import json
-import unicodedata
 from difflib import SequenceMatcher
 
+# compat: re-export — eliminar en v6 cuando los imports apunten al paquete nuevo
 from .config import Config, Profile, Scoring
-
-
-def _norm(s: str) -> str:
-    s = unicodedata.normalize("NFKD", s or "")
-    s = "".join(c for c in s if not unicodedata.combining(c))
-    return s.lower()
+from .domain.fechas import age_days  # noqa: F401
+from .domain.techs import MARKET_ABBRS as MARKET_TECHS_ABBR  # noqa: F401
+from .domain.techs import TITLE_RE as _MARKET_TECHS_TITLE_RE  # noqa: F401
+from .domain.texto import _norm  # noqa: F401
 
 
 def _years_from_description(desc: str) -> int | None:
@@ -255,17 +253,6 @@ def has_thousands(s: str) -> bool:
 
 # ============ market score (objetivo, sin perfil) — spec-canal-v3 §1 ============
 
-# Abreviaturas canónicas de la columna techs (Py;TS;K8s...) + nombres para títulos
-MARKET_TECHS_ABBR = {"Py", "Java", "TS", "JS", "React", "Angular", "Node", "AWS", "GCP",
-                     "Azure", "K8s", "Docker", "NiFi", "SQL", "Postgres", "Mongo", "Go",
-                     ".NET", "Scala", "Spring", "CI/CD", "FastAPI", "Django", "Redis",
-                     "Kafka", "TF", "Terraform"}
-_MARKET_TECHS_TITLE_RE = re.compile(
-    r"\bpython\b|\bjava\b|\bscala\b|\btypescript\b|\bjavascript\b|\bkubernetes\b|\bk8s\b|"
-    r"\bdocker\b|\bnifi\b|\breact\b|\bangular\b|\bspring\b|\b\.net\b|\baws\b|\bgcp\b|"
-    r"\bazure\b|\bgolang\b|\bgo\b(?=\s*(?:lang|developer|dev\b|engineer))|\bnode\b|"
-    r"\bpostgres\b|\bgraphql\b", re.I)
-
 
 def _beneficios_reales(job: dict) -> bool:
     """True si ai_benefits tiene beneficios reales (lista no vacía)."""
@@ -290,8 +277,6 @@ def compute_market_score(job: dict, now=None) -> tuple[int, dict]:
     Regla: dato ausente = piso bajo (NUNCA 0 punitivo); bloqueo de fetch =
     mitad de transparencia (el dato no se vio, no es culpa de la oferta).
     """
-    from .channel import age_days  # import local: evita ciclo channel→scoring
-
     b: dict[str, int | str] = {}
 
     # ---- salario (36) ----
