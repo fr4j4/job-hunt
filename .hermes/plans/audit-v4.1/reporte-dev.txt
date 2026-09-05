@@ -1,0 +1,65 @@
+```json
+{
+  "rol": "DEV — revisión de implementación pipeline v4.1 (corrección contra spec §3)",
+  "veredicto": "rechazado",
+  "hallazgos": [
+    {
+      "id": "DEV-1",
+      "severidad": "P0",
+      "titulo": "KeyError 'modality' en apply_ia_result: los resultados IA de LinkedIn/Computrabajo/Indeed se pierden al 100% en el pipeline por lotes",
+      "evidencia": "enrich.py:380 `if not r[\"modality\"] and mod:` y enrich.py:382 `if not r[\"salary\"] and ...` acceden con corchetes. En v4.1 el lote se construye desde `new_jobs.append({**j, \"score\": score, \"group_id\": gid})` (cli.py:283), donde j es el dict CRUDO de la fuente: parse_cards de sources/linkedin.py produce solo {title, company, location, date, url, source} (sin 'modality' ni 'salary'); sources/computrabajo.py:42-44 y sources/indeed.py:64-69 tampoco incluyen 'modality'. consume_lote pasa ese dict a apply_ia_result (cli.py:144 `apply(conn, cfg, job, parsed)`) → KeyError('modality') REPRODUCIDO empíricamente (sqlite :memory: + job dict de fuente linkedin): el except de cli.py:145 (`apply_ia_result falló (continúa)`) descarta el resultado IA COMPLETO (salary, seniority, opinion, idiomas, techs) para las 3 fuentes principales del barrido. Lo mismo en el drain (cli.py:173-175). Es regresión nueva: en v4.0 (git HEAD) run_ia_batch leía rows con SELECT ... modality, salary FROM ofertas (enrich.py HEAD), nunca dicts de fuente. run_ia_batch v4.1 nocturno NO está afectado (su SELECT trae modality, enrich.py:440/447-448). Los 48 tests no lo detectan: tests/test_v41.py:207/281 usa on_result y nunca ejercita apply_ia_result con dict de fuente.",
+      "linea": "jobhunt/enrich.py:380,382; jobhunt/cli.py:143-146,173-175,283; jobhunt/sources/linkedin.py (parse_cards), jobhunt/sources/computrabajo.py:42-44, jobhunt/sources/indeed.py:64-69",
+      "recomendacion": "En apply_ia_result usar r.get(\"modality\", \"\") / r.get(\"salary\", \"\"), o normalizar el job en cmd_run antes de encolar: j = {\"modality\": \"\", \"salary\": \"\", **j}. Añadir un test que consuma un lote con dict de fuente linkedin y verifique que apply_ia_result escribe los campos IA."
+    },
+    {
+      "id": "DEV-2",
+      "severidad": "P1",
+      "titulo": "Tras trip del breaker, consume_lote espera el deadline COMPLETO (hasta ~2h por lote) por resultados que nunca llegarán",
+      "evidencia": "El breaker setea stop_event (cli.py:132) y worker_ia sale en el próximo while-check (cli.py:70 `while not stop_event.is_set()`) — TODOS los workers, no solo índice≥1 como dice la spec §3.1. Los jobs que quedaron en work_q nunca producirán resultado, pero consume_lote solo termina por conteo o deadline (cli.py:108 `while stats[\"recibidos\"] < n_lote_total`): no hay break tras breaker=True. Con 40 jobs / IA_CONCURRENCY=2, deadline = max(300, (40/2)*242*1.5) = 7260s ≈ 2h de espera muerta por lote tripeado + drain 120s (cli.py:337). Verificado empíricamente: simulación con deadline=8s y worker que genera 5 'rate' → consume_lote tardó 9.1s en retornar con recibidos=6/10 (esperó el deadline completo). Un 429-storm degrada el barrido de minutos a horas.",
+      "linea": "jobhunt/cli.py:108-149 (sin corte post-breaker), 132, 337",
+      "recomendacion": "Tras el primer breaker trip, saltar al drain inmediatamente (break al loop principal) o acotar la espera restante a algo pequeño (p.ej. drain_s) — los pendientes ya van a batch nocturno (C9) por diseño."
+    },
+    {
+      "id": "DEV-3",
+      "severidad": "P1",
+      "titulo": "scan_log registra SIEMPRE 0 en lots_done/ia_failures/breaker_trips/channel_posts (observabilidad C5 rota)",
+      "evidencia": "Los contadores se inicializan en cli.py:209 (`lots_done = ia_failures = breaker_trips = channel_posts = 0`), el INSERT en scan_log ocurre en cli.py:286-291 — ANTES del pipeline por lotes (loop que empieza en cli.py:311) — y se acumulan recién en cli.py:340-342 y cli.py:366. La fila escrita siempre tiene 0/0/0/0; los acumuladores reales jamás se persisten (y se pierden al terminar cmd_run). El SQL en sí es válido (7 columnas / 7 placeholders / 7 params, verificado por AST y sqlite :memory:), pero incumple §1-C5: 'scan_log gana columnas: lots_done, ia_failures, breaker_trips, channel_posts' — las columnas existen, los datos no. Ningún test cubre cmd_run.",
+      "linea": "jobhunt/cli.py:209, 286-291, 340-342, 366",
+      "recomendacion": "Mover el INSERT de scan_log al final de cmd_run (después del loop de lotes y rescore_all), o hacer UPDATE de la fila al cierre con los acumuladores finales."
+    },
+    {
+      "id": "DEV-3b",
+      "severidad": "P2",
+      "titulo": "ia_extract_detail puede retornar un parsed que no es dict → AttributeError en apply_ia_result pierde el resultado silenciosamente",
+      "evidencia": "enrich.py:241 `return json.loads(content), \"\"` — con \"format\":\"json\" Ollama garantiza JSON válido pero no objeto: `[]` o `\"texto\"` pasan json.loads. apply_ia_result hace parsed.get(...) (enrich.py:377) → AttributeError sobre list/str → atrapado por el except genérico de consume_lote (cli.py:143-146) → el resultado se pierde sin marca distinta a un fallo 'other' genérico. El None handling está bien (parsed=None → no-op, enrich.py:375-376); el caso no-dict no está cubierto.",
+      "linea": "jobhunt/enrich.py:241, 377",
+      "recomendacion": "Validar en ia_extract_detail: `data = json.loads(content); return (data, \"\") if isinstance(data, dict) else (None, \"other\")`."
+    },
+    {
+      "id": "DEV-4",
+      "severidad": "P2",
+      "titulo": "El drain de 120s corta en el PRIMER hueco de 5s sin resultados, no tras drain_s",
+      "evidencia": "cli.py:155 usa `out_q.get(timeout=max(0.1, min(5, fin_drain - time.time())))` y cli.py:156-157 `except Empty: break`. Un único intervalo >5s entre resultados (normal: una extracción en vuelo puede tardar hasta ~244s con timeout 120×2 retries) aborta el drain inmediatamente, cuando la promesa de §3.2 es 'drain acotado 120s: da chance a resultados ya en vuelo'. Mitigación: lo no recogido va a batch nocturno (C9), así que no hay pérdida de datos, pero el drain real es ~5s y no 120s.",
+      "linea": "jobhunt/cli.py:153-157",
+      "recomendacion": "Reemplazar `break` por `continue` en el Empty del drain (el while ya acota por fin_drain), o documentar el comportamiento real."
+    },
+    {
+      "id": "DEV-5",
+      "severidad": "P2",
+      "titulo": "enrich_pending: rama _cb_expired no hace commit por ficha (B4 incompleto)",
+      "evidencia": "enrich.py:322-327: si `info.get(\"_cb_expired\")` hace `conn.execute(\"UPDATE ofertas SET active=0 ...\")`, `done += 1` y `continue` SIN conn.commit(); el commit por ficha solo existe en la ruta normal (enrich.py:351). El UPDATE queda pendiente hasta el commit de la siguiente ficha, de rescore_ids (db.py:236) o del final del barrido; un crash exactamente ahí pierde la desactivación. Incumple parcialmente §3.5 'commit por ficha (B4)'.",
+      "linea": "jobhunt/enrich.py:322-327 (vs 351)",
+      "recomendacion": "Añadir conn.commit() antes del continue en la rama _cb_expired."
+    },
+    {
+      "id": "DEV-6",
+      "severidad": "P2",
+      "titulo": "Branch sin IA: publish_channel se llama sin budget → el presupuesto por barrido (A3) no aplica en barridos sin IA",
+      "evidencia": "cli.py:386 `publish_channel(cfg, conn, _tg_api_for_channel(cfg))` — sin el parámetro budget, a diferencia del pipeline por lotes (cli.py:364). El tope queda en CHANNEL_MAX_POSTS (default 10), así que hoy no hay flood (10 < 15), pero la garantía A3/§3.3 solo existe con IA activa: si se configura CHANNEL_MAX_POSTS > CHANNEL_MAX_POSTS_PER_SWEEP, un barrido sin IA publicaría más que el presupuesto del barrido.",
+      "linea": "jobhunt/cli.py:382-389 (vs 360-368)",
+      "recomendacion": "Pasar budget=presupuesto_canal también en el branch sin IA (o documentar la desviación)."
+    }
+  ],
+  "resumen": "Veredicto: RECHAZADO — 1 P0 confirmado empíricamente. (1) P0: apply_ia_result hace r[\"modality\"]/r[\"salary\"] con acceso por corchete (enrich.py:380,382) pero v4.1 le pasa el dict crudo de fuente desde los lotes (cli.py:283→consume_lote→apply, cli.py:144); LinkedIn/Computrabajo/Indeed no traen esas claves → KeyError reproducido (sqlite :memory:) → el except de cli.py:145 descarta el resultado IA COMPLETO de las 3 fuentes principales (regresión vs v4.0, que leía rows de la DB). (2) P1: tras trip del breaker (cli.py:132), consume_lote no corta su espera por conteo (cli.py:108) y agota el deadline completo — max(300, 40/2×242×1.5) ≈ 2h por lote tripeado — verificado con simulación (deadline 8s → espera 9.1s); además worker_ia detiene a TODOS los workers, no solo índice≥1 como la spec §3.1. (3) P1: el INSERT de scan_log (cli.py:286-291) se ejecuta antes del pipeline → lots_done/ia_failures/breaker_trips/channel_posts siempre 0 (C5 roto; el SQL en sí es correcto: 7/7/7 verificado por AST, el crash '8 values for 7 columns' fue hipótesis DESCARTADA). Verificado y CORRECTO (no listado): protocolo worker_ia try/finally con 1 resultado por oferta y task_done único (A2 ✓); terminación por conteo, descarte por lote_id, compat 3/4-tuple, lote vacío, deadline-vencido, aritmética min(get_timeout, restante) sin división por cero (concurrency clamp 1-6, config.py:314) (§3.2 ✓); clasificación err_kind 429/5xx='rate' vs 'timeout' vs 'other' correcta, el retry con continue NO pierde el último intento (range(retries+1)), siempre retorna con kind; wrapper ia_extract retrocompatible (enrich.py:255-257); breaker ventana 20/fails 5/reset por éxito/timeout no cuenta (✓ con tests); rescore_ids aislamiento por fila para AMBOS scores y conserva market anterior (db.py:221-229, B6 ✓, test test_rescore_ids_aislamiento_ambos); date_canonical refrescado en el camino feliz (db.py:230-234); presupuesto de canal descontado solo por posts OK (cli.py:365, channel.py:249,294; commit por post C3 ✓); stop_event.set() tras consume_lote (cli.py:345) sin doble escritor (workers HTTP-puros, out_q nueva por lote, out_q/unbounded sin deadlock); guardas C1/C2 en bot.py:1198 y bot.py:1227 ✓; drain/worker sin deadlock (out_q unbounded, daemon threads). Sin modificar ningún archivo; auditoría read-only (solo git diff/show, pytest leído, y ejecuciones en sqlite :memory: para reproducir hipótesis)."
+}
+```

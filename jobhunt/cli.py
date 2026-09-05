@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import json
 import sys
+import threading
+import time
 from datetime import datetime, timezone
 
 from .config import load_config
@@ -17,21 +19,55 @@ from .logging_setup import get_logger
 
 log = get_logger(__name__)
 from . import db as database
-from .scoring import compute_score
+from .scoring import compute_score, compute_market_score
 from .dedup import find_duplicate
 from .notify import send_digest
+import json
+import urllib.error
+import urllib.request
+
+
+def _tg_api_for_channel(cfg):
+    """Adapter: publish_channel espera tg_api(method, payload) → dict con .get('ok').
+
+    No lanza excepciones (contrato publish_channel: los fallos del canal no tumban
+    el barrido) — retorna {"ok": False, "error": ...} en fallos HTTP.
+    """
+    def call(method: str, payload: dict) -> dict:
+        req = urllib.request.Request(
+            f"https://api.telegram.org/bot{cfg.telegram.bot_token}/{method}",
+            data=json.dumps(payload).encode(),
+            headers={"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                return json.loads(resp.read().decode())
+        except urllib.error.HTTPError as exc:
+            detail = ""
+            try:
+                detail = exc.read().decode()[:200]
+            except Exception:
+                pass
+            return {"ok": False, "error": f"{exc} {detail}".strip()}
+    return call
 
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-def cmd_run(cfg, notify: bool = True, on_phase=None) -> None:
+# compat: re-export — eliminar en v6 cuando los imports apunten al paquete nuevo
+from .app.batch import (BatchRunner, consume_lote, lotes_por_fit, worker_ia,
+                        _extract_local_con_fallback)
+
+
+
+
+def cmd_run(cfg, notify: bool = True, on_phase=None, stop_event: threading.Event | None = None):
     """on_phase(fuente, query, page) — callback opcional para progreso por fuente/query/página."""
-    def phase(fuente: str, query: str = "", page: int = 0):
+    def phase(fuente: str, query: str = "", page: int = 0, detail: str = ""):
         if on_phase:
             try:
-                on_phase(fuente, query, page)
+                on_phase(fuente, query, page, detail)
             except Exception:
                 pass
 
@@ -44,6 +80,9 @@ def cmd_run(cfg, notify: bool = True, on_phase=None) -> None:
         database.init_db(conn)
         version_id = "env-" + datetime.now(timezone.utc).strftime("%Y%m%d")
         database.register_criteria_version(conn, version_id, cfg)
+        conn.commit()   # FIX: suelta el write lock YA — el fetch de fuentes tarda minutos y no escribe
+        # observabilidad v4.1 (C5): stats por barrido para scan_log
+        lots_done = ia_failures = breaker_trips = channel_posts = 0
 
         from .sources import (linkedin, computrabajo, indeed, glassdoor, laborum,
                               jooble, accenture, aira)
@@ -66,35 +105,51 @@ def cmd_run(cfg, notify: bool = True, on_phase=None) -> None:
                 jobs += jooble.jobs(s.queries_jooble, "perfil:", on_query=qcb("jooble"))
             except Exception as e:
                 log.warning("jooble falló (continúa el barrido): %s", e)
+        def _fuente_segura(nombre, fn):
+            """F3: una fuente rota no aborta el barrido (spec-audit)."""
+            try:
+                return fn()
+            except Exception as e:
+                log.warning("fuente %s falló (continúa): %s", nombre, e)
+                return []
+
         if cfg.sources.get("accenture", True):
             phase("accenture")
-            jobs += accenture.jobs(s.queries_accenture, "perfil:", on_query=qcb("accenture"))
+            jobs += _fuente_segura("accenture",
+                lambda: accenture.jobs(s.queries_accenture, "perfil:", on_query=qcb("accenture")))
         if cfg.sources.get("laborum", True):
             phase("laborum")
-            jobs += laborum.jobs(s.queries_laborum, "perfil:", on_query=qcb("laborum"))
+            jobs += _fuente_segura("laborum",
+                lambda: laborum.jobs(s.queries_laborum, "perfil:", on_query=qcb("laborum")))
         if cfg.sources.get("linkedin"):
             phase("linkedin")
-            jobs += linkedin.fetch_jobs(s.queries_linkedin, "perfil:", on_query=qcb("linkedin"))
+            jobs += _fuente_segura("linkedin",
+                lambda: linkedin.fetch_jobs(s.queries_linkedin, "perfil:", on_query=qcb("linkedin")))
         if cfg.sources.get("computrabajo"):
             phase("computrabajo")
-            jobs += computrabajo.jobs(s.queries_computrabajo, "perfil:", on_query=qcb("computrabajo"))
+            jobs += _fuente_segura("computrabajo",
+                lambda: computrabajo.jobs(s.queries_computrabajo, "perfil:", on_query=qcb("computrabajo")))
         if cfg.search.mode in ("both", "sample"):
             # muestreo amplio: rotación para diversificar sin inflar requests
             phase("linkedin/computrabajo (muestreo)")
             n = max(1, int(len(s.sample_linkedin) * s.sample_rotation))
-            jobs += linkedin.fetch_jobs(s.sample_linkedin[:n], "sample:")
-            jobs += computrabajo.jobs(s.sample_computrabajo[:n], "sample:")
+            jobs += _fuente_segura("linkedin", lambda: linkedin.fetch_jobs(s.sample_linkedin[:n], "sample:"))
+            jobs += _fuente_segura("computrabajo", lambda: computrabajo.jobs(s.sample_computrabajo[:n], "sample:"))
             if cfg.sources.get("indeed"):
                 phase("indeed")
-                jobs += indeed.jobs(s.sample_indeed[:n], "muestra:", on_query=qcb("indeed"))
+                jobs += _fuente_segura("indeed",
+                    lambda: indeed.jobs(s.sample_indeed[:n], "muestra:", on_query=qcb("indeed")))
             if cfg.sources.get("glassdoor") and _is_premium_tick(cfg):
-                jobs += glassdoor.jobs(s.sample_glassdoor[:2], "muestra:", on_query=qcb("glassdoor"))
+                jobs += _fuente_segura("glassdoor",
+                    lambda: glassdoor.jobs(s.sample_glassdoor[:2], "muestra:", on_query=qcb("glassdoor")))
         if cfg.sources.get("indeed") and _is_premium_tick(cfg):
             phase("indeed")
-            jobs += indeed.jobs(s.queries_indeed, "perfil:", on_query=qcb("indeed"))
+            jobs += _fuente_segura("indeed",
+                lambda: indeed.jobs(s.queries_indeed, "perfil:", on_query=qcb("indeed")))
         if cfg.sources.get("glassdoor") and _is_premium_tick(cfg):
             phase("glassdoor (perfil)")
-            jobs += glassdoor.jobs(s.queries_glassdoor, "perfil:", on_query=qcb("glassdoor"))
+            jobs += _fuente_segura("glassdoor",
+                lambda: glassdoor.jobs(s.queries_glassdoor, "perfil:", on_query=qcb("glassdoor")))
 
         log.info("barrido iniciado: %d ofertas crudas (mode=%s)", len(jobs), s.mode)
 
@@ -120,42 +175,59 @@ def cmd_run(cfg, notify: bool = True, on_phase=None) -> None:
                 new_jobs.append({**j, "score": score, "group_id": gid})
             if n % 25 == 0:
                 conn.commit()
-        conn.execute("""INSERT INTO scan_log (ts, total_seen, new_count) VALUES (?,?,?)""",
-                     (now, total_seen, len(new_jobs)))
+        conn.execute("""INSERT INTO scan_log (ts, total_seen, new_count,
+            lots_done, ia_failures, breaker_trips, channel_posts)
+            VALUES (?,?,?,?,?,?,?)""",
+                     (now, total_seen, len(new_jobs), lots_done, ia_failures,
+                      breaker_trips, channel_posts))
         conn.commit()
+        row_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
 
-        # IA complementaria para las NUEVAS (si IA_ENABLED) — llena modality/salary/
-        # seniority/flags al indexarse. TODAS las nuevas, sin tope: el usuario definió
-        # que si IA está activa, cada oferta indexada debe pasar por IA.
-        if new_jobs and cfg.ia.enabled and cfg.ia.api_key:
-            n_new = len(new_jobs)
-            phase("IA complementaria", f"{n_new} nuevas", 0)
-            try:
-                from .enrich import run_ia_batch, profile_description
-                n_ia = run_ia_batch(conn, cfg, profile_description(cfg),
-                                    max_n=None,
-                                    groups={j["group_id"] for j in new_jobs})
-                log.info("IA complementaria: %d/%d ofertas nuevas enriquecidas",
-                         n_ia, n_new)
-            except Exception as e:
+        # PIPELINE POR LOTES con IA paralela (spec v4.1 §2):
+        # lotes de IA_BATCH_SIZE, dentro de cada lote IA_CONCURRENCY workers HTTP
+        # (sin SQLite — conexión única en este hilo), publish incremental por lote.
+        new_sorted = sorted(new_jobs, key=lambda j: -j.get("score", 0))  # mejores primero (aprox)
+        total_new = len(new_sorted)
+        presupuesto_canal = cfg.channel.max_posts_per_sweep if (
+            cfg.channel.enabled and cfg.channel.chat_id) else 0
+        api = _tg_api_for_channel(cfg)
+        hechas_acum = 0
+
+        if new_sorted and cfg.ia.enabled and cfg.ia.api_key:
+            # worker_ia/consume_lote se resuelven en el namespace de este módulo
+            # (monkeypatch cli.worker_ia sigue funcionando)
+            runner = BatchRunner(cfg, version_id, phase=phase, worker_fn=worker_ia,
+                                 consume_fn=consume_lote,
+                                 extract_fn=_extract_local_con_fallback)
+            st_batch = runner.run(conn, new_jobs, api=api,
+                                  presupuesto_canal=presupuesto_canal,
+                                  stop_event=stop_event)
+            lots_done += st_batch["lots_done"]
+            ia_failures += st_batch["ia_failures"]
+            breaker_trips += st_batch["breaker_trips"]
+            channel_posts += st_batch["channel_posts"]
+            presupuesto_canal = st_batch["presupuesto_canal"]
+            # rescore global final: cubre enrich global y pendientes de lotes con fallo
+            phase("rescore pool")
+            database.rescore_all(conn, compute_score, version_id, cfg,
+                                  market_score_fn=compute_market_score)
+        else:
+            # sin IA: fit score al vuelo ya escrito; market/rescore global para el gate
+            phase("rescore pool")
+            database.rescore_all(conn, compute_score, version_id, cfg,
+                                  market_score_fn=compute_market_score)
+
+            # canal: publicar ofertas nuevas que pasan el gate (sin IA el gate usa fit-like)
+            if cfg.channel.enabled and cfg.channel.chat_id:
+                phase("canal: publicando nuevas")
                 try:
-                    conn.rollback()
-                except Exception:
-                    pass
-                log.warning("IA complementaria falló (barrido continúa): %s", e)
-
-        # auto-enrich de las nuevas (Anillo A, máx 8 para no frenar)
-        phase("enrich descripciones")
-        from .enrich import enrich_pending
-        try:
-            enrich_pending(conn, cfg, max_n=8)
-        except Exception as e:
-            conn.rollback()
-            log.warning("enrich falló (barrido continúa): %s", e)
-
-        # re-score de las que cambiaron (descripción nueva)
-        phase("rescore pool")
-        database.rescore_all(conn, compute_score, version_id, cfg)
+                    from .channel import publish_channel
+                    ch_stats = publish_channel(cfg, conn, _tg_api_for_channel(cfg),
+                                               budget=presupuesto_canal)   # DEV-6: A3 también sin IA
+                    channel_posts += ch_stats["posted"]
+                    log.info("canal: %s", ch_stats)
+                except Exception as e:
+                    log.warning("canal falló (barrido continúa): %s", e)
 
         # digest: solo >= ALERT_MIN_SCORE
         threshold = cfg.alerts.min_score
@@ -171,6 +243,14 @@ def cmd_run(cfg, notify: bool = True, on_phase=None) -> None:
         else:
             log.info("digest NO enviado: %d ofertas >= %d (nuevas=%d, notify=%s)",
                      len(offers), threshold, len(new_jobs), notify)
+        # C5 (H1/OPS-1): persistir los contadores REALES del barrido al final
+        try:
+            conn.execute("""UPDATE scan_log SET lots_done=?, ia_failures=?,
+                breaker_trips=?, channel_posts=? WHERE id=?""",
+                         (lots_done, ia_failures, breaker_trips, channel_posts, row_id))
+            conn.commit()
+        except Exception as e:
+            log.warning("scan_log UPDATE falló (no tumba barrido): %s", e)
     except Exception:
         try:
             conn.rollback()      # no dejar transacción abierta → DB locked para otros
@@ -191,7 +271,8 @@ def cmd_rescore(cfg) -> None:
     database.init_db(conn)
     version_id = "env-" + datetime.now(timezone.utc).strftime("%Y%m%d%H%M")
     database.register_criteria_version(conn, version_id, cfg)
-    updated = database.rescore_all(conn, compute_score, version_id, cfg)
+    updated = database.rescore_all(conn, compute_score, version_id, cfg,
+                              market_score_fn=compute_market_score)
     print(f"rescore completado: {updated} ofertas → versión {version_id} "
           f"({database.needs_rescore(conn, version_id)} pendientes)")
 
@@ -229,11 +310,12 @@ def cmd_ia(conn_unused=None) -> None:
     done = run_ia_batch(conn, cfg, profile_description(cfg))
     print(f"IA enriqueció: {done} ofertas")
     # re-score con los datos nuevos de IA (salary/modality/seniority cambian el score)
-    from .scoring import compute_score
+    from .scoring import compute_score, compute_market_score
     version_id = database.current_version(conn) or (
         "env-" + datetime.now(timezone.utc).strftime("%Y%m%d%H%M"))
     database.register_criteria_version(conn, version_id, cfg)
-    rescored = database.rescore_all(conn, compute_score, version_id, cfg)
+    rescored = database.rescore_all(conn, compute_score, version_id, cfg,
+                              market_score_fn=compute_market_score)
     print(f"rescore: {rescored} ofertas → versión {version_id}")
 
 
@@ -263,6 +345,23 @@ def main():
         cmd_enrich(cfg)
     elif cmd == "market":
         cmd_market(cfg)
+    elif cmd == "channel":
+        # python -m jobhunt channel [--dry-run] [--digest]
+        from .db import connect, init_db
+        from .channel import (publish_channel, publish_daily_digest,
+                              publish_weekly_digests, publish_trends)
+        conn = connect(cfg)
+        init_db(conn)
+        dry = "--dry-run" in sys.argv
+        only_digest = "--digest" in sys.argv
+        if not only_digest:
+            stats = publish_channel(cfg, conn, _tg_api_for_channel(cfg), dry_run=dry)
+            print(f"canal: {stats}")
+        if "--digest" in sys.argv or dry:
+            publish_daily_digest(cfg, conn, _tg_api_for_channel(cfg), dry_run=dry)
+            publish_weekly_digests(cfg, conn, _tg_api_for_channel(cfg), dry_run=dry)
+            publish_trends(cfg, conn, _tg_api_for_channel(cfg), dry_run=dry)
+        conn.close()
     elif cmd == "ia":
         conn = database.connect(cfg)
         database.init_db(conn)

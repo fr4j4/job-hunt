@@ -1,8 +1,9 @@
 """Computrabajo: listing con badges (salario, fecha) + ficha."""
 import re, time, urllib.request, urllib.parse
 from html import unescape as _u
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from .linkedin import fetch
+from ..channel import normalize_date
 
 def jobs(queries, found_by_prefix="", on_query=None):
     out = []
@@ -27,17 +28,10 @@ def jobs(queries, found_by_prefix="", on_query=None):
             if not title: continue
             sal_m = re.search(r'<span class="icon i_salary"></span>\s*([^<]+)<', card)
             salary = _u(sal_m.group(1)).strip()[:40] if sal_m else ""
-            hace = re.search(r'(?:Hace\s+([\d\s]+)\s*(minutos?|horas?|d[ií]as?)|Hoy|Ayer)', card)
-            date = ""
-            if hace:
-                if hace.group(0).startswith("Ayer"):
-                    date = (now - timedelta(days=1)).date().isoformat()
-                elif hace.group(0).startswith("Hoy") or (hace.group(1) and "minuto" in (hace.group(2) or "")):
-                    date = now.date().isoformat()
-                elif hace.group(1):
-                    n = int(re.sub(r"\D", "", hace.group(1)) or 0)
-                    days = n / 24 if "hora" in (hace.group(2) or "").lower() else n
-                    date = (now - timedelta(days=days)).date().isoformat()
+            # F6: delega el parseo relativo a channel.normalize_date (única fuente
+            # de verdad — entiende minutos/horas/días/semanas/meses/Hoy/Ayer)
+            hace = re.search(r'Hace\s+[\d\s]+\s*\w+|Hoy|Ayer', card)
+            date = normalize_date(hace.group(0), now) if hace else ""
             fb = f"{found_by_prefix}{q}"
             out.append({"title": title, "company": "", "location": location, "date": date,
                         "salary": salary, "url": "https://www.computrabajo.cl" + path,

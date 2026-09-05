@@ -1,0 +1,65 @@
+```json
+{
+  "rol": "ARQUITECTO de software — auditoría de diseño de concurrencia e invariantes, pipeline v4.1 (feature/canal-market-score)",
+  "resumen": "El núcleo del modelo v4.1 es sound: la conexión SQLite única en el hilo main se sostiene de punta a punta (worker_ia cli.py:58-82 → ia_extract_detail enrich.py:203-252 es HTTP puro con requests/json/time; apply_ia_result solo corre en main vía consume_lote cli.py:144/173; compute_market_context se llama en main por lote cli.py:317; no hay código module-level que abra conn — el import de sqlite3 en enrich.py:11 es muerto y sin efectos; el progress callback de run_ia_batch solo toca _IA_STATE + Telegram, sin DB, bot.py:1167-1183). La terminación por conteo con try/finally garantiza 1 resultado por oferta tomada, el descarte cross-lote por lote_id es correcto, y el batch nocturno es secuencial (run_ia_batch no crea threads) con conn propia del thread del bot (bot.py:1019). El flujo presupuesto→publish→descuento es seguro ante excepciones (commit por post, channel.py:293; excepción pre-loop deja budget intacto para el siguiente lote) y budget=None reproduce el comportamiento viejo (channel.py:249, testeado). El patrón de migración ALTER TABLE de scan_log (db.py:114-118) es consistente con el de ofertas (db.py:68-79) y es seguro para la DB de producción. PERO hay 1 P0 real (observabilidad scan_log siempre en 0 — el INSERT corre antes del pipeline con los contadores a cero y los acumulados nunca se persisten; ya corregido por el orquestador, reportado igual), y 2 P1 de diseño en el camino del breaker: el breaker detiene TODOS los workers (no 'reduce a 1' como dice la spec) dejando jobs huérfanos que fuerzan a consume_lote a esperar el deadline completo (~2h con lote 40/CONC 2), y worker_ia puede morir por Empty antes de que el productor ponga los jobs. El juicio final para IA_CONCURRENCY=2-3 y lotes de 40: APROBADO CON OBSERVACIONES — el camino feliz y el de timeouts aguantan producción; el camino de rate-limit (el más probable según la propia spec §7) convierte el deadline de 2h en la terminación normal del lote y debe corregirse antes de reactivar el bot. No verificado: suite completa tests/ (solo tests/test_v41.py: 12 passed en 69.5s), interacción del monkeypatch de test_worker_http_puro con el resto de la suite, y el estado post-fix del árbol (mi lectura fue READ-ONLY previa al fix del orquestador).",
+  "veredicto": "aprobado_con_observaciones",
+  "hallazgos": [
+    {
+      "id": "H1",
+      "severidad": "P0",
+      "titulo": "Observabilidad scan_log (C5) siempre en 0: el INSERT corre antes del pipeline con los contadores a cero y los acumulados nunca se persisten",
+      "evidencia": "cli.py:209 inicializa lots_done=ia_failures=breaker_trips=channel_posts=0; cli.py:286-291 hace INSERT INTO scan_log(..., lots_done, ia_failures, breaker_trips, channel_posts) VALUES(...,0,0,0,0) + commit ANTES del loop de lotes (cli.py:311); los acumulados reales se suman después en variables locales (cli.py:340-342 lots_done/ia_failures/breaker_trips, cli.py:366 channel_posts) y jamás se escriben de vuelta a scan_log. Consecuencia: las 4 columnas de observabilidad v4.1 son siempre 0 en producción — el C5 de la spec (visibilidad de duración/fallos/trips por barrido) no existe en la práctica, y ninguna métrica del breaker ni de fallos IA queda registrada. Detectado en lectura READ-ONLY del árbol; el orquestador informa que ya lo corrigió (se reporta igual por contrato).",
+      "linea": "cli.py:209, 286-291 (INSERT prematuro); 340-342, 366 (acumulados huérfanos)",
+      "recomendacion": "Quirúrgico: mover el INSERT de scan_log al final del barrido (tras el loop de lotes, antes del digest) escribiendo los acumulados finales; o conservar el INSERT temprano y hacer UPDATE scan_log SET lots_done=?, ia_failures=?, breaker_trips=?, channel_posts=? al cierre usando el rowid. La segunda opción preserva la fila aunque el barrido crashee a mitad."
+    },
+    {
+      "id": "H2",
+      "severidad": "P1",
+      "titulo": "Breaker B5 desvía de la spec: detiene TODOS los workers (no 'reduce a 1') → jobs huérfanos → el lote termina por deadline (~2h), no por drenaje",
+      "evidencia": "Spec §3.1/B5: 'workers índice ≥1 la consultan antes de cada get; si set → exit silencioso' (spec-v4.1-final.md:31,83-84) — el worker 0 sobrevive y drena la cola secuencialmente. Implementación: worker_ia no recibe índice (cli.py:58) y TODOS los workers comparten el mismo stop_event con check en el loop (cli.py:70); al trip, stop_event.set() (cli.py:132) hace salir a todos. Los jobs que quedan en work_q quedan huérfanos: nadie los toma, nadie emite resultado por ellos (el try/finally solo cubre jobs TOMADOS), consume_lote sigue esperando recibidos==len(lote) (cli.py:108) con get(timeout=30) en loop hasta el deadline. Aritmética del deadline: max(300, (40/2)*242*1.5) = 7260s ≈ 121 min por lote (cli.py:337), seguido de drain de 120s que no traerá nada (los workers ya salieron). Con rate-limit sostenido (el escenario que la propia spec §7 declara esperado para ollama-cloud) cada lote cuesta ~2h: el breaker, que debería ser la red de seguridad, convierte el fallo en un stall de 14h para 7 lotes. El breaker sí es per-lote (stop_event nuevo en cli.py:322), lo que acota el daño a lotes sucesivos re-tripeando.",
+      "linea": "cli.py:70 (check universal), 132-134 (set), 108/115 (espera hasta deadline) vs spec §3.1 líneas 83-84",
+      "recomendación": "Quirúrgico, dos opciones equivalentes: (a) en consume_lote, cortar la espera cuando el breaker esté activo y la cola esté vacía: tras cada get con Empty, `if stop_event.is_set(): break` hacia el drain — el lote termina en ~segundos y los no-procesados van al batch nocturno (C9 los recoge, enrich.py:446-450); o (b) pasar worker_index a worker_ia y que el índice 0 ignore stop_event (semántica literal de la spec). (a) es menos invasiva y no requiere tocar el contrato de worker_ia. En ambos casos agregar un contador stats['sin_procesar'] = len(lote) - recibidos para que el job huérfano sea visible (hoy es invisible: no es fallo recibido ni descarte)."
+    },
+    {
+      "id": "H3",
+      "severidad": "P1",
+      "titulo": "worker_ia muere por Empty antes de tomar un job (carrera productor-consumidor): job huérfano silencioso → mismo stall de deadline",
+      "evidencia": "cli.py:325-331 arranca los threads ANTES de encolar los jobs (cli.py:332-333). El worker hace get(timeout=5) y en Empty retorna definitivamente (cli.py:72-74). Si el scheduler demora el arranque del productor >5s tras t.start() (o cualquier pausa del main entre puts), un worker sale con la cola aún con jobs → esos jobs nunca tienen resultado → consume_lote espera el deadline completo (mismo mecanismo que H2, ~2h con lote 40/CONC 2). En cmd_run la ventana es mínima (los 40 puts son inmediatos, µs) y con IA_CONCURRENCY≤3 el riesgo real es bajo, pero el contrato es frágil: la correctitud depende de que el productor siempre gane la carrera, un invariante no declarado ni testeado. test_terminacion_por_conteo (test_v41.py:189-210) encola ANTES de arrancar el worker — no ejercita este orden.",
+      "linea": "cli.py:72-74 (Empty→return), 325-333 (start antes que puts)",
+      "recomendacion": "Quirúrgico y sin cambiar worker_ia: en cmd_run, encolar los 40 jobs ANTES de t.start() (swap de los bloques cli.py:325-331 y 332-333). Queue es infinita y thread-safe; elimina la carrera por construcción. Alternativa defensiva: en worker_ia, en Empty chequear work_q.unfinished_tasks==0 antes de retornar."
+    },
+    {
+      "id": "H4",
+      "severidad": "P2",
+      "titulo": "run_daemon no corre init_db: las migraciones scan_log llegan recién con el primer barrido; 'init_db en cada arranque' es falso para el daemon",
+      "evidencia": "init_db corre en cada entrypoint de CLI (cli.py:205 cmd_run, 422 cmd_rescore, 433 cmd_enrich, 459 cmd_ia, 505 channel) pero grep de 'init_db' en bot.py = 0 matches; run_daemon (bot.py:1383-1431) solo database.connect (vía _load_pool bot.py:1367). En una DB de producción existente el daemon arranca bien (las queries viejas no rompen: _load_pool lee score/active que ya existen), pero si el daemon hace digests ANTES del primer sweep, _GATE_SQL (channel.py:202-206, referencias a market_score/date_canonical/notified_channel_at) puede fallar contra un esquema viejo — degradado con log (bot.py:1258-1259 'digests falló'), no fatal. La migración ALTER TABLE en sí es segura (ADD COLUMN con DEFAULT es instantánea en SQLite; patrón idéntico al de ofertas db.py:68-79) y el backfill de date_canonical (db.py:81-83) es idempotente.",
+      "linea": "bot.py:1383-1431 (run_daemon sin init_db); db.py:104-118 (migración scan_log)",
+      "recomendacion": "Una línea: database.init_db tras el primer connect en run_daemon (o dentro de _load_pool). Deja la propiedad del esquema en un solo dueño y elimina la dependencia implícita 'el daemon confía en que alguien más corrió un barrido antes'."
+    },
+    {
+      "id": "H5",
+      "severidad": "P2",
+      "titulo": "Complejidad muerta en consume_lote: compat 3-tuple sin ningún productor + triple mecanismo de inyección (on_result/apply_fn/default)",
+      "evidencia": "El único productor de out_q es worker_ia, que siempre pone 4-tuple (cli.py:81). Nadie en el codebase ni en los tests (test_v41.py usa 4-tuples exclusivamente, p.ej. líneas 179-180, 231) produce (job, parsed, lote_id) de 3 elementos, pero consume_lote mantiene dos ramas de unpicking duplicadas (cli.py:118-122 y 158-162). Además la firma acepta on_result Y apply_fn (cli.py:86-87) más el default apply_ia_result (cli.py:101-102): tres caminos para inyectar la escritura, cuando on_result con default bastaría. La complejidad no está justificada por compat real — es especulativa, duplica el camino de drain y amplifica la superficie del bug-class de H1 (dos sitios que contar/descartar).",
+      "linea": "cli.py:118-122, 158-162 (unpicking 3/4), 86-87/101-102 (on_result/apply_fn/default)",
+      "recomendacion": "Limpiar en el mismo PR: eliminar la rama 3-tuple y el parámetro apply_fn (dejar on_result: Callable | None con default que envuelva apply_ia_result). El drain puede delegar en la misma función interna de proceso de item para que exista UN solo camino de conteo."
+    },
+    {
+      "id": "H6",
+      "severidad": "P2",
+      "titulo": "cmd_run concentra la orquestación de lotes no testeable: el P0 H1 es la prueba empírica de que la frontera de testeo está mal puesta",
+      "evidencia": "worker_ia/consume_lote a nivel módulo SÍ es la frontera correcta y está bien testeada (inyección extract_fn/on_result, 12 tests verdes). Pero el armado de lotes, el cálculo de deadline, la contabilidad de presupuesto, la acumulación de stats y el encadenamiento enrich→rescore→publish viven inline en cmd_run (cli.py:293-389), solo ejercitable con un barrido completo de fuentes. La evidencia de que esto falla: el P0 H1 (stats nunca persistidos) es exactamente el tipo de bug de 'cableado' que un test de orquestación con mocks habría atrapado; con la lógica atrapada en cmd_run, ningún test podía verlo.",
+      "linea": "cli.py:293-389 (loop de lotes + presupuesto + stats + fases inline)",
+      "recomendacion": "Extraer `def run_pipeline_lotes(conn, cfg, new_jobs, api, on_phase=None, publish_fn=publish_channel) -> dict` con los contadores como retorno (y publish_fn inyectable para tests). cmd_run queda como shell de fuentes+digest. Cambio ~40 líneas, cero riesgo de conducta, y convierte el presupuesto A3 y el C5 en testeables."
+    },
+    {
+      "id": "H7",
+      "severidad": "P2",
+      "titulo": "Inversión de dominio: canonical_date/age_days (lógica pura de fechas) viven en channel.py (I/O Telegram), forzando imports locales anti-ciclo en db.py y scoring.py",
+      "evidencia": "db.py importa canonical_date DENTRO de rescore_all y rescore_ids (db.py:173 'import local evita ciclo', db.py:206); scoring.py importa age_days dentro de compute_market_score (scoring.py:256 'evita ciclo channel→scoring'); cli.py importa publish_channel localmente en 3 sitios (cli.py:363, 385, 502). No hay ciclo en runtime (todos los imports conflictivos son function-local) pero la dependencia conceptual es db→channel y scoring→channel para una función PURA sin I/O: el módulo de broadcast es dueño de una primitiva de dominio que todos necesitan. Cualquier refactor futuro que suba esos imports a nivel de módulo revienta con ImportError circular — es una trampa latente documentada solo en comentarios.",
+      "linea": "db.py:173, 206; scoring.py:256; channel.py:89-116 (dueño actual de canonical_date/age_days)",
+      "recomendacion": "Mover normalize_date/canonical_date/age_days a un módulo neutro sin dependencias (p.ej. fechas.py o dentro de db.py, que ya tiene helpers de normalización). channel.py los re-exporta por compat. No urgente — el patrón local-import funciona — pero es la única pieza de acople que no elegirías hoy."
+    }
+  ]
+}
+```

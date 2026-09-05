@@ -124,6 +124,17 @@ class IaConfig:
     timeout: int
     retries: int
     run_hours_utc: list[int]
+    concurrency: int = 2             # threads IA paralelos por lote (1 = secuencial)
+    reasoning_effort: str = ""       # "" | low | medium | high (OpenAI-compat; "" = off)
+    batch_prompt: int = 5            # ofertas por llamada IA (1 = individual; spec-enrich-lotes)
+    # --- IA local (spec-ia-local v2.1) — opt-in, cero regresión si apagado ---
+    local_enabled: bool = False      # true → pipeline local (2 tareas) con fallback cloud
+    local_base_url: str = "http://localhost:8080/v1"
+    local_model: str = "qwen-2.5-7b-instruct"
+    local_timeout: int = 600         # el local es lento; margen amplio
+    local_retries: int = 1
+    local_fallback_cloud: bool = True  # si local falla → cloud (nunca se pierde oferta)
+    local_concurrency: int = 2       # threads IA locales (patrón worker_ia/consume_lote)
 
 
 @dataclass
@@ -160,6 +171,28 @@ class RelevanceCfg:
     ia_batch: int = 30
 
 
+@dataclass
+class ChannelCfg:
+    enabled: bool = True
+    chat_id: str = ""              # vacío = modo canal OFF (no-op silencioso)
+    min_score: int = 70            # market score mínimo para postear
+    max_posts: int = 10            # tope por barrido (anti-flood)
+    sleep_s: float = 2.0
+    max_age_days: int = 14         # ventana canónica (date_canonical)
+    max_first_seen_hours: int = 0  # 0=OFF; ej 72 = solo primeras 72h en el pool
+    require_dev: bool = True       # rol_categoria ∈ set dev
+    digest_daily: bool = True
+    digest_daily_hour_utc: int = 21
+    digest_weekly: bool = True
+    digest_weekly_day_utc: int = 6     # 0=lunes … 6=domingo
+    digest_weekly_hour_utc: int = 13
+    digest_tendencias: bool = True     # mensual, día 1 13:00 UTC
+    digest_min_score: int = 60
+    digest_max: int = 8
+    silence_sweeps: int = 6            # alerta admin si N barridos sin publicar
+    max_posts_per_sweep: int = 15      # presupuesto de posts POR BARRIDO (v4.1 A3)
+
+
 
 
 @dataclass
@@ -184,6 +217,7 @@ class Config:
     alerts: Alerts
     report: ReportCfg
     relevance: RelevanceCfg
+    channel: ChannelCfg
     jooble_api_key: str = ""
     aira_feeds: list[str] = field(default_factory=list)
     project_root: Path = PROJECT_ROOT
@@ -286,7 +320,18 @@ def load_config(env_file: Path | None = None) -> Config:
         batch_size=_env_int("IA_BATCH_SIZE", 40),
         timeout=_env_int("IA_TIMEOUT", 120),
         retries=_env_int("IA_RETRIES", 1),
-        run_hours_utc=_env_list("IA_RUN_HOURS_UTC", "03"),
+        run_hours_utc=[int(h) for h in _env_list("IA_RUN_HOURS_UTC", "03")],
+        concurrency=max(1, min(6, _env_int("IA_CONCURRENCY", 2))),
+        batch_prompt=max(1, min(10, _env_int("IA_BATCH_PROMPT", 5))),
+        reasoning_effort=_env("IA_REASONING_EFFORT", "").strip().lower(),
+        # --- IA local (spec-ia-local v2.1) ---
+        local_enabled=_env_bool("IA_LOCAL_ENABLED", False),
+        local_base_url=_env("IA_LOCAL_BASE_URL", "http://localhost:8080/v1"),
+        local_model=_env("IA_LOCAL_MODEL", "qwen-2.5-7b-instruct"),
+        local_timeout=_env_int("IA_LOCAL_TIMEOUT", 600),
+        local_retries=_env_int("IA_LOCAL_RETRIES", 1),
+        local_fallback_cloud=_env_bool("IA_LOCAL_FALLBACK_CLOUD", True),
+        local_concurrency=max(1, min(6, _env_int("IA_LOCAL_CONCURRENCY", 2))),
     )
     tg = Telegram(
         enabled=_env_bool("TELEGRAM_ENABLED", True),
@@ -324,6 +369,26 @@ def load_config(env_file: Path | None = None) -> Config:
                             r"bodeguero|conductor|mozo|auxiliar|captador"),
         ia_batch=_env_int("RELEVANCE_IA_BATCH", 30),
     )
+    channel = ChannelCfg(
+        enabled=_env_bool("CHANNEL_ENABLED", True),
+        chat_id=_env("TELEGRAM_CHANNEL_ID", "").strip(),
+        min_score=_env_int("CHANNEL_MIN_SCORE", 70),
+        max_posts=_env_int("CHANNEL_MAX_POSTS", 10),
+        sleep_s=float(_env("CHANNEL_SLEEP_S", "2.0")),
+        max_age_days=_env_int("CHANNEL_MAX_AGE_DAYS", 14),
+        max_first_seen_hours=_env_int("CHANNEL_MAX_FIRST_SEEN_HOURS", 0),
+        require_dev=_env_bool("CHANNEL_REQUIRE_DEV", True),
+        digest_daily=_env_bool("CHANNEL_DIGEST_DAILY", True),
+        digest_daily_hour_utc=_env_int("CHANNEL_DIGEST_DAILY_HOUR_UTC", 21),
+        digest_weekly=_env_bool("CHANNEL_DIGEST_WEEKLY", True),
+        digest_weekly_day_utc=_env_int("CHANNEL_DIGEST_WEEKLY_DAY_UTC", 6),
+        digest_weekly_hour_utc=_env_int("CHANNEL_DIGEST_WEEKLY_HOUR_UTC", 13),
+        digest_tendencias=_env_bool("CHANNEL_DIGEST_TENDENCIAS", True),
+        digest_min_score=_env_int("CHANNEL_DIGEST_MIN_SCORE", 60),
+        digest_max=_env_int("CHANNEL_DIGEST_MAX", 8),
+        silence_sweeps=_env_int("CHANNEL_SILENCE_SWEEPS", 6),
+        max_posts_per_sweep=_env_int("CHANNEL_MAX_POSTS_PER_SWEEP", 15),
+    )
     cfg = Config(
         profile=profile,
         scoring=scoring,
@@ -336,6 +401,7 @@ def load_config(env_file: Path | None = None) -> Config:
         daemon=daemon,
         report=report,
         relevance=relevance,
+        channel=channel,
         jooble_api_key=jooble_key,
         aira_feeds=_env_list("AIRA_FEEDS", "walmart,cencosud_scotiabank,tottus,entel,ripley,itau,bancoestado,wom,codelco,copec,cencosud"),
     )

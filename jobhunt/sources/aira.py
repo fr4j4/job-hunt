@@ -112,11 +112,13 @@ def jobs(feeds: list[str], found_by_prefix: str = "", on_feed=None) -> list[dict
         if laos:
             try:
                 freshest = max(_dt.fromisoformat(x) for x in laos if x[:4].isdigit())
+                if freshest.tzinfo is not None:
+                    freshest = freshest.replace(tzinfo=None)
                 if (_dt.now() - freshest).days > 45:
                     log.warning("aira %s: feed dormido (último acceso %s) — skip", fname, freshest.date())
                     time.sleep(1)
                     continue
-            except ValueError:
+            except (ValueError, TypeError):
                 pass
         for a in offers:
             j = _parse_offer(a, feed)
