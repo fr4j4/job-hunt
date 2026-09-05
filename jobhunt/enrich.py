@@ -20,6 +20,7 @@ from .domain.roles import _NONDEV_CATEGORIES  # noqa: F401 (compat: monkeypatch/
 from .domain.techs import ABBR_BY_ALIAS as _TECH_ABBR  # noqa: F401 (compat)
 from .domain.texto import _norm
 from .logging_setup import get_logger
+from .salarios.arbiter import SalaryArbitrator
 
 log = get_logger(__name__)
 
@@ -826,41 +827,18 @@ def _aplicar_ficha(conn, r: dict, info: dict, pool: list[int], cfg: Config | Non
     sal_fila = conn.execute(
         "SELECT salary, salary_raw, salary_source, salary_status FROM ofertas WHERE group_id=?",
         (r["group_id"],)).fetchone()
-    sal_actual = sal_fila["salary"] if sal_fila else ""
-    sal_source = sal_fila["salary_source"] if sal_fila else ""
-    sal_status = sal_fila["salary_status"] if sal_fila else ""
-    sal_texto_crudo = (info.get("salary") or "").strip()
-    sal_texto_val = _st.parse_salary_clp(sal_texto_crudo) if sal_texto_crudo else 0
-    arb_salary, arb_source, arb_status, arb_note = None, None, None, None
-    if sal_texto_val > 0:
-        # F2/S4: JSON-LD con unit YEAR ("/año") viene en anual — dividir por 12
-        # si el resultado mensual es plausible (>=FLOOR), no solo cuando el
-        # valor anual crudo supera CEILING (ej: 18M/año no superaba CEILING y
-        # quedaba mal clasificado como mensual). salary_raw (texto crudo) no
-        # se toca — solo el valor numérico usado para el árbitro/clasificación.
-        if re.search(r"/año|/year|anual", sal_texto_crudo, re.I) and sal_texto_val // 12 >= _st.FLOOR:
-            sal_texto_val = sal_texto_val // 12
-            arb_note = "annual_likely"
-        sal_feed_val = _st.parse_salary_clp(sal_actual)
-        feed_implausible = sal_status == "implausible" or \
-            (sal_feed_val > 0 and (sal_feed_val < _st.FLOOR or sal_feed_val > _st.CEILING))
-        coincide = sal_feed_val > 0 and abs(sal_feed_val - sal_texto_val) <= max(1, int(0.01 * sal_texto_val))
-        if feed_implausible or sal_source in ("", "feed") and sal_feed_val == 0:
-            arb_salary, arb_source, arb_status = sal_texto_crudo[:40], "text", "trusted"
-            arb_note = arb_note or ("text_wins" if feed_implausible else "text_confirms")
-        elif coincide:
-            arb_source, arb_status, arb_note = "text", "trusted", arb_note or "text_confirms"
-        else:
-            arb_salary, arb_source, arb_status, arb_note = sal_texto_crudo[:40], "text", "trusted", "text_wins"
-    elif sal_status == "implausible":
-        arb_salary, arb_source, arb_status, arb_note = "", "feed", "implausible", "source_unverifiable"
+    dec = SalaryArbitrator(cfg).decide(
+        {**r,
+         "db_salary": sal_fila["salary"] if sal_fila else "",
+         "db_source": sal_fila["salary_source"] if sal_fila else "",
+         "db_status": sal_fila["salary_status"] if sal_fila else ""},
+        info, pool)
+    arb_salary, arb_source = dec.salary, dec.salary_source
+    arb_status, arb_note = dec.salary_status, dec.salary_note
     # clasificación estadística con pool cacheado + leave-one-out (spec-enrich-lotes §4)
-    if arb_salary is not None and arb_salary:
-        v = _st.parse_salary_clp(arb_salary)
-        pool_loo = list(pool)
-        if v in pool_loo:
-            pool_loo.remove(v)
-        stat_status, stat_note = _st.classify_salary(v, pool_loo)
+    # (se queda aquí: los tests parchean _st.classify_salary sobre jobhunt.stats)
+    if dec.extra:
+        stat_status, stat_note = _st.classify_salary(dec.extra["value"], dec.extra["pool_loo"])
         arb_status, arb_note = stat_status, stat_note or arb_note
     # ---- techs: modo degradado (IA apagada) — spec-techs-dev-gate §2.1 ----
     # Con IA activa, techs_desc viene vacío (la regex de la ficha se eliminó) y
@@ -869,13 +847,7 @@ def _aplicar_ficha(conn, r: dict, info: dict, pool: list[int], cfg: Config | Non
     if cfg and not cfg.ia.enabled:
         techs_join = ";".join(_extract_techs(r.get("title") or "", info.get("description") or ""))
     # ---- regla §2.5: salario llegó después de la IA → desmarcar (auto-curativo) ----
-    # Solo en el árbitro (único lugar donde salary pasa de '' a valor real — P1-7).
-    # Condición de cambio real: oferta tenía salary='' y ahora tiene valor, con
-    # opinion que dice "sin salario" → re-encola para regenerar la opinion.
-    if (not r.get("salary") and arb_salary and r.get("ia_model")
-            and re.search(r"sin sueldo|sin salario|no declara|no se declara|carece de datos monetarios|"
-                          r"no informa salario|sin información salarial|no menciona el sueldo",
-                          r.get("ai_opinion") or "", re.I)):
+    if dec.unmark_ia:
         conn.execute("UPDATE ofertas SET ia_model='' WHERE group_id=?", (r["group_id"],))
         log.info("salario llegó después de la IA (%s) — desmarcada para re-enriquecer",
                  (r.get("title") or "")[:40])
