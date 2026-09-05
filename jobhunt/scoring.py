@@ -12,6 +12,7 @@ score = f(profile, scoring, captured_fields)
 from __future__ import annotations
 
 import re
+import json
 import unicodedata
 from difflib import SequenceMatcher
 
@@ -181,9 +182,19 @@ def compute_score(job: dict, cfg: Config) -> tuple[int, dict]:
 
 
 def _salary_to_clp_monthly(sal_raw: str, desc: str) -> int | None:
-    """'4,000' (USD) | '$ 2.800.000,00 (Mensual)' | 'USD 4000' → CLP mensual aproximado."""
+    """Parser ÚNICO de salario → CLP mensual (especificado en spec-canal-v3 §1.4).
+
+    Formatos reales del pool (todos testeados):
+      '$ 2.500.000,00 (Mensual)' → 2500000  (formato CB/Laborum)
+      'CLP 2578680'              → 2578680  (formato que escribe la IA — NO es USD)
+      'CLP 15000'                → None     (fuera de banda mensual plausible)
+      'USD 4000' / '4000' / '4,000' → ×950  (heurística USD: números planos de 3-4 dígitos
+                                   o con prefijo USD; 'CLP NNNNNNN' de 7 dígitos NO cae aquí)
+      '' / None                  → None
+    """
     import re
     raw = sal_raw or ""
+    lower = raw.lower()
     m = re.search(r"([\d.,]+)", raw)
     if not m:
         # buscar en la descripción un monto con CLP
@@ -195,22 +206,161 @@ def _salary_to_clp_monthly(sal_raw: str, desc: str) -> int | None:
                 return None
         return None
     num_s = m.group(1)
-    is_usd = "usd" in raw.lower() or (re.fullmatch(r"[\d,]{3,}", num_s) and "." not in num_s and len(num_s) <= 7)
     if "." in num_s and "," in num_s:
-        num_s = num_s.replace(".", "").replace(",", ".")
+        num_s = num_s.replace(".", "").replace(",", ".")   # 2.500.000,00 → 2500000.00
+    elif num_s.count(",") == 1 and re.fullmatch(r"\d{1,3},\d{3}", num_s):
+        num_s = num_s.replace(",", "")                     # formato US 4,000 → 4000 (USD heurística)
     elif has_thousands(num_s):
         num_s = num_s.replace(".", "").replace(",", "")
     try:
         num = float(num_s)
     except ValueError:
         return None
+    # heurística USD: prefijo explícito, o número plano de 3-4 dígitos (4,000/4000).
+    # 'CLP NNNNNNN' (7 dígitos, prefijo CLP) es CLP — formato del batch IA. (P0 fix)
+    is_usd = "usd" in lower or (re.fullmatch(r"[\d,]{3,4}", num_s) and "clp" not in lower)
     if num < 1000:
         return None
     if is_usd:
-        return int(num * 950)  # tasa aproximada USD→CLP
-    return int(num)
+        clp = int(num * 950)
+        return clp if 300_000 <= clp <= 20_000_000 else None   # banda mensual plausible
+    clp = int(num)
+    return clp if 300_000 <= clp <= 20_000_000 else None       # CLP 15000 → None (fuera de banda)
 
 
 def has_thousands(s: str) -> bool:
     parts = s.split(".")
     return len(parts) > 1 and all(len(p) == 3 for p in parts[1:])
+
+
+# ============ market score (objetivo, sin perfil) — spec-canal-v3 §1 ============
+
+# Abreviaturas canónicas de la columna techs (Py;TS;K8s...) + nombres para títulos
+MARKET_TECHS_ABBR = {"Py", "Java", "TS", "JS", "React", "Angular", "Node", "AWS", "GCP",
+                     "Azure", "K8s", "Docker", "NiFi", "SQL", "Postgres", "Mongo", "Go",
+                     ".NET", "Scala", "Spring", "CI/CD", "FastAPI", "Django", "Redis",
+                     "Kafka", "TF", "Terraform"}
+_MARKET_TECHS_TITLE_RE = re.compile(
+    r"\bpython\b|\bjava\b|\bscala\b|\btypescript\b|\bjavascript\b|\bkubernetes\b|\bk8s\b|"
+    r"\bdocker\b|\bnifi\b|\breact\b|\bangular\b|\bspring\b|\b\.net\b|\baws\b|\bgcp\b|"
+    r"\bazure\b|\bgolang\b|\bgo\b(?=\s*(?:lang|developer|dev\b|engineer))|\bnode\b|"
+    r"\bpostgres\b|\bgraphql\b", re.I)
+
+
+def _beneficios_reales(job: dict) -> bool:
+    """True si ai_benefits tiene beneficios reales (lista no vacía)."""
+    b = str(job.get("ai_benefits") or "").strip()
+    if not b or b in ("[]", '""', '"No especificado"', "null"):
+        return False
+    try:
+        arr = json.loads(b)
+        return bool(isinstance(arr, list) and len(arr) > 0)
+    except Exception:
+        return False
+
+
+def compute_market_score(job: dict, now=None) -> tuple[int, dict]:
+    """Score objetivo 0-100 para el canal (comunidad), sin perfil personal.
+
+    v9 — solo señales de la OFERTA (sin stack/inglés/seniority/rol, que miden
+    calce con candidato, no calidad de publicación):
+      salario 36 (ausente 6) · modalidad 16 (ausente 6) · transparencia 20
+      (empresa 10 · desc 4 · contrato 6; fetch bloqueado = mitad) ·
+      ubicación 10 (ausente 3) · frescura 10 (piso 3) · beneficios 8 (piso 2)
+    Regla: dato ausente = piso bajo (NUNCA 0 punitivo); bloqueo de fetch =
+    mitad de transparencia (el dato no se vio, no es culpa de la oferta).
+    """
+    from .channel import age_days  # import local: evita ciclo channel→scoring
+
+    b: dict[str, int | str] = {}
+
+    # ---- salario (36) ----
+    sal = _salary_to_clp_monthly(job.get("salary") or "", job.get("description") or "")
+    if sal is None:
+        sal_pts = 6
+        b["salario"] = "no declarado"
+    elif sal >= 2_700_000:
+        sal_pts = 36
+    elif sal >= 1_900_000:
+        sal_pts = 26
+    elif sal >= 1_300_000:
+        sal_pts = 16
+    else:
+        sal_pts = 6
+    b["salario_pts"] = sal_pts
+
+    # ---- modalidad (16) ----
+    mod = _norm(job.get("modality") or "")
+    if "remot" in mod:
+        mod_pts = 16
+    elif "híbrid" in mod or "hibrid" in mod:
+        mod_pts = 10
+    elif "presencial" in mod:
+        mod_pts = 5
+    else:
+        mod_pts = 6
+        b["modalidad"] = "sin dato"
+    b["mod_pts"] = mod_pts
+
+    # ---- transparencia (20; bloqueado = mitad) ----
+    bloqueado = (job.get("fetch_fails") or 0) > 0
+    company = (job.get("company") or "").strip()
+    trans = 0
+    if company and not re.search(r"importante empresa|empresa del sector|confidencial",
+                                 company, re.I):
+        trans += 10
+        b["empresa"] = "visible"
+    elif bloqueado and company:
+        trans += 4
+        b["empresa"] = "visible-bloqueada"
+    elif not company and bloqueado:
+        trans += 2
+        b["empresa"] = "oculta-bloqueada"
+    else:
+        b["empresa"] = "genérica/oculta"
+    if _norm(job.get("description") or "") and len(job.get("description") or "") >= 400:
+        trans += 4
+    elif bloqueado:
+        trans += 1
+    if _norm(job.get("employment_type") or "") or _norm(job.get("valid_through") or ""):
+        trans += 6
+    elif bloqueado:
+        trans += 2
+    b["trans_pts"] = trans
+
+    # ---- ubicación (10) ----
+    loc = _norm(job.get("location") or "")
+    if loc and loc not in ("chile", "cl", "sin especificar", "no especificado"):
+        loc_pts = 10
+        b["ubicacion"] = "especificada"
+    else:
+        loc_pts = 3
+        b["ubicacion"] = "genérica"
+    b["loc_pts"] = loc_pts
+
+    # ---- frescura (10) — por date_canonical (min(date_posted, first_seen)) ----
+    edad = age_days({"date_posted": job.get("date_posted"),
+                     "first_seen": job.get("first_seen")}, now)
+    if edad <= 2:
+        fresh_pts = 10
+    elif edad <= 7:
+        fresh_pts = 7
+    elif edad <= 14:
+        fresh_pts = 5
+    else:
+        fresh_pts = 3
+    b["fresh_pts"] = fresh_pts
+    b["edad_dias"] = edad
+
+    # ---- beneficios detectados por IA (8; ausente = piso 2) ----
+    ben_pts = 8 if _beneficios_reales(job) else 2
+    b["ben_pts"] = ben_pts
+
+    total = sal_pts + mod_pts + trans + loc_pts + fresh_pts + ben_pts
+
+    # ---- descuentos (clamped por componente) ----
+    if _staffing(job):
+        total = max(0, total - 10)
+        b["staffing"] = -10
+
+    return max(0, int(total)), b
