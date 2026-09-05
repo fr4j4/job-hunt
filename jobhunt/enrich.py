@@ -1,3 +1,4 @@
+# compat: re-export — eliminar en v6 cuando los imports apunten al paquete nuevo
 """Enriquecimiento por anillos.
 
 Anillo A — JSON-LD estructurado (gratis, LinkedIn/Glassdoor/Computrabajo ficha)
@@ -19,6 +20,18 @@ from .config import Config
 from .domain.roles import _NONDEV_CATEGORIES  # noqa: F401 (compat: monkeypatch/import viejo)
 from .domain.techs import ABBR_BY_ALIAS as _TECH_ABBR  # noqa: F401 (compat)
 from .domain.texto import _norm
+from .ia.client import CloudClient, LocalClient
+from .ia.coercion import _coerce_salario, _normalizar_extract_local  # noqa: F401 (compat)
+from .ia.prompts import (  # noqa: F401 (compat: los tests leen estos nombres en jobhunt.enrich)
+    IA_SCHEMA,
+    LOTE_SYSTEM,
+    _PROMPT_EXTRACT_LOCAL,
+    _PROMPT_OPINION_LOCAL,
+    _lote_prompt,
+    _prompt_extract_local,
+    _prompt_opinion_local,
+)
+from .ia.schemas import _LOTE_SCHEMA  # noqa: F401 (compat)
 from .logging_setup import get_logger
 from .salarios.arbiter import SalaryArbitrator
 
@@ -239,17 +252,6 @@ def _extract_techs(title: str, desc: str) -> list[str]:
 
 # ============ Anillo C: batch IA (deepseek-v4-flash) ============
 
-IA_SCHEMA = ('{"modalidad": "R"|"H"|"P"|"?", "salario_clp_mensual": numero|null, '
-             '"ingles": "no"|"deseable"|"requerido"|"desconocido", "years_exp": numero|null, '
-             '"seniority_real": "junior"|"semi"|"senior"|"lead", '
-             '"techs": ["Py","Java","AWS","React","Angular","K8s","Docker","SQL","Node","TS","NiFi","Spring"], '
-             '"red_flags": ["..."], "green_flags": ["..."], "benefits": ["..."], '
-             '"idiomas": [{"idioma": "inglés|alemán|francés|portugués|chino|japonés|italiano|otro", "nivel": "básico|intermedio|avanzado|nativo|fluido", "excluyente": true|false}], '
-             '"rol_categoria": "Full Stack"|"Backend"|"Frontend"|"Data"|"Mobile"|"AI/ML"|"Tech Lead"|"DevOps/Cloud"|"QA"|"Software"|"Seguridad"|"Ingeniería no-software"|"Analista/Empresa"|"Profesor/Formación"|"Soporte/TI"|"No-tech"|"Otro", '
-             '"resumen": "max 120 chars", "fit_reason": "max 140 chars por qué conviene o no al perfil", '
-             '"opinion": "max 160 chars — comentario editorial sobre la oferta: contexto de mercado, señal notable (empresa conocida, staffing, nicho escaso), comparación con la mediana salarial o red flag relevante. PROHIBIDO consejos al candidato (nada de destaca/pregunta/no apliques). No repitas el resumen"}')
-
-
 def compute_market_context(conn) -> str:
     """Contexto de mercado para el comentario editorial — v2 spec salarios-robustos §3.
     Se calcula UNA vez por lote en el MAIN y se pasa como argumento (workers NO tocan DB).
@@ -290,6 +292,28 @@ def compute_market_context(conn) -> str:
         return "estadística de mercado no disponible — no cites números de mercado en opinion"
 
 
+DETAIL_SYSTEM = (
+    "Eres un extractor de datos de ofertas de empleo chilenas. "
+    "Respondes SOLO JSON válido. Dato ausente → null. No inventes. "
+    "El campo 'opinion' es un comentario editorial sobre la oferta "
+    "(contexto de mercado, señal notable, comparación salarial) — "
+    "NUNCA consejos al candidato (prohibido 'destaca', 'pregunta', "
+    "'no apliques', 'practica'). "
+    "Si el sueldo está declarado, la opinion DEBE comentarlo "
+    "(comparar contra la mediana del CONTEXTO provisto); no digas 'sin salario' "
+    "si el campo Sueldo declarado trae un valor. "
+    "ANTI-ALUCINACIÓN: los únicos números de mercado que puedes citar en "
+    "opinion son los del CONTEXTO DE MERCADO provisto arriba — prohibido "
+    "citar medianas, percentiles o estadísticas de tu conocimiento propio "
+    "o de otras fuentes. Si el contexto dice que la muestra es insuficiente, "
+    "no compares salarios: describe solo la oferta. "
+    "Si el sueldo de ESTA oferta viene marcado como anómalo en la Nota, la "
+    "opinion DEBE: (1) citar el valor declarado tal cual, (2) señalar la "
+    "anomalía con la hipótesis provista (probable anual/error de fuente), "
+    "(3) comparar contra la mediana provista. NUNCA corrijas el valor ni lo "
+    "omitas. Prohibido comentar anomalías de OTRAS ofertas.")
+
+
 def ia_extract_detail(cfg: Config, job: dict, profile_desc: str,
                       mercado: str = "") -> tuple[dict | None, str]:
     """Igual que ia_extract pero retorna (parsed, err_kind) para el breaker B5:
@@ -319,61 +343,15 @@ def ia_extract_detail(cfg: Config, job: dict, profile_desc: str,
               f'Descripción: {(job.get("description") or "")[:2400]}'
               f'{nota_anomalia}\n\n'
               f'Responde SOLO JSON: {IA_SCHEMA}')
-    body = {"model": cfg.ia.model,
-            "messages": [{"role": "system",
-                          "content": "Eres un extractor de datos de ofertas de empleo chilenas. "
-                                     "Respondes SOLO JSON válido. Dato ausente → null. No inventes. "
-                                     "El campo 'opinion' es un comentario editorial sobre la oferta "
-                                     "(contexto de mercado, señal notable, comparación salarial) — "
-                                     "NUNCA consejos al candidato (prohibido 'destaca', 'pregunta', "
-                                     "'no apliques', 'practica'). "
-                                     "Si el sueldo está declarado, la opinion DEBE comentarlo "
-                                     "(comparar contra la mediana del CONTEXTO provisto); no digas 'sin salario' "
-                                     "si el campo Sueldo declarado trae un valor. "
-                                     "ANTI-ALUCINACIÓN: los únicos números de mercado que puedes citar en "
-                                     "opinion son los del CONTEXTO DE MERCADO provisto arriba — prohibido "
-                                     "citar medianas, percentiles o estadísticas de tu conocimiento propio "
-                                     "o de otras fuentes. Si el contexto dice que la muestra es insuficiente, "
-                                     "no compares salarios: describe solo la oferta. "
-                                     "Si el sueldo de ESTA oferta viene marcado como anómalo en la Nota, la "
-                                     "opinion DEBE: (1) citar el valor declarado tal cual, (2) señalar la "
-                                     "anomalía con la hipótesis provista (probable anual/error de fuente), "
-                                     "(3) comparar contra la mediana provista. NUNCA corrijas el valor ni lo "
-                                     "omitas. Prohibido comentar anomalías de OTRAS ofertas."},
-                         {"role": "user", "content": prompt}],
-            "temperature": 0, "format": "json"}
-    if cfg.ia.reasoning_effort:          # knob opcional (default: off — flash ya responde rápido)
-        body["reasoning_effort"] = cfg.ia.reasoning_effort
-    for attempt in range(cfg.ia.retries + 1):
-        try:
-            req = requests.post(f"{cfg.ia.base_url}/chat/completions",
-                                json=body, timeout=cfg.ia.timeout,
-                                headers={"Authorization": f"Bearer {cfg.ia.api_key}",
-                                         "Content-Type": "application/json"})
-            if req.status_code >= 400:
-                kind = "rate" if (req.status_code == 429 or req.status_code >= 500) else "other"
-                if attempt == cfg.ia.retries:
-                    log.warning("IA HTTP %d para %s: %s", req.status_code,
-                                job.get("group_id", "?"), req.text[:120])
-                    return None, kind
-                time.sleep(2)
-                continue
-            d = req.json()
-            content = d["choices"][0]["message"]["content"]
-            data = json.loads(content)
-            # DEV-3b: garantiza dict (json.loads acepta list/str)
-            return (data, "") if isinstance(data, dict) else (None, "other")
-        except requests.exceptions.Timeout:
-            if attempt == cfg.ia.retries:
-                log.warning("IA timeout para %s", job.get("group_id", "?"))
-                return None, "timeout"   # B5: timeout aislado NO alimenta el breaker
-            time.sleep(2)
-        except Exception as e:
-            if attempt == cfg.ia.retries:
-                log.warning("IA batch falló: %s", e)
-                return None, "other"
-            time.sleep(2)
-    return None, "other"
+    messages = [{"role": "system",
+                 "content": DETAIL_SYSTEM},
+                {"role": "user", "content": prompt}]
+    data, err = CloudClient(cfg, tag=f"IA {job.get('group_id', '?')}").chat_json(
+        messages, extra={"format": "json"})
+    if err:
+        return None, err   # B5: timeout aislado NO alimenta el breaker
+    # DEV-3b: garantiza dict (json.loads acepta list/str)
+    return (data, "") if isinstance(data, dict) else (None, "other")
 
 
 def ia_extract(cfg: Config, job: dict, profile_desc: str, mercado: str = "") -> dict | None:
@@ -383,125 +361,18 @@ def ia_extract(cfg: Config, job: dict, profile_desc: str, mercado: str = "") -> 
 
 # ============ IA local (spec-ia-local v2.1) — 2 tareas por oferta ============
 
-_PROMPT_EXTRACT_LOCAL = (
-    "Eres un extractor de datos de ofertas de empleo chilenas. REGLAS OBLIGATORIAS "
-    "(violarlas invalida la respuesta):\n"
-    "1. Respondes EXCLUSIVAMENTE un objeto JSON válido. Nada más, sin texto, sin markdown.\n"
-    "2. modalidad SOLO puede ser uno de estos 4 valores exactos: \"R\" (remoto), "
-    "\"H\" (híbrido), \"P\" (presencial), \"?\" (no se puede determinar). "
-    "PROHIBIDO escribir la palabra completa.\n"
-    "3. ingles SOLO puede ser: \"no\", \"deseable\", \"requerido\", \"desconocido\". "
-    "PROHIBIDO true/false/null.\n"
-    "4. seniority_real SOLO puede ser: \"junior\", \"semi\", \"senior\", \"lead\", o \"\" "
-    "(vacío si no se puede inferir).\n"
-    "5. salario_clp_mensual es un NÚMERO entero. 0 si no se declara. PROHIBIDO strings.\n"
-    "6. Dato ausente → null o \"\" según el campo. Nunca inventes.\n\n"
-    "Oferta:\nTítulo: {title}\nEmpresa: {company}\nUbicación: {location}\n"
-    "Sueldo declarado: {salary}\nModalidad declarada: {modality}\n"
-    "Descripción: {description}\n\n"
-    "Responde SOLO JSON con EXACTAMENTE estas claves: techs (array de máx 8 "
-    "abreviaturas: Py, Java, TS, JS, React, Angular, Vue, Node, K8s, Docker, AWS, "
-    "GCP, Azure, TF, Scala, Go, .NET, C#, SQL, Postgres, Mongo, Redis, Kafka, "
-    "FastAPI, Django, Spring, NiFi, Jenkins, CI/CD), modalidad (\"R\"|\"H\"|\"P\"|\"?\"), "
-    "seniority_real (\"junior\"|\"semi\"|\"senior\"|\"lead\"|\"\"), rol_categoria (\"Full Stack\"|"
-    "\"Backend\"|\"Frontend\"|\"Data\"|\"Mobile\"|\"AI/ML\"|\"Tech Lead\"|\"DevOps/Cloud\"|\"QA\"|"
-    "\"Software\"|\"Seguridad\"|\"Ingeniería no-software\"|\"Analista/Empresa\"|"
-    "\"Profesor/Formación\"|\"Soporte/TI\"|\"No-tech\"|\"Otro\"), ingles (\"no\"|\"deseable\"|"
-    "\"requerido\"|\"desconocido\"), idiomas (array de {{idioma, nivel, excluyente}}), "
-    "red_flags (array), green_flags (array), benefits (array), salario_clp_mensual "
-    "(entero, 0 si no se declara).\n\n"
-    "Ejemplo de respuesta VÁLIDA:\n"
-    "{{\"techs\": [\"Java\", \"Spring\"], \"modalidad\": \"R\", \"seniority_real\": \"senior\", "
-    "\"rol_categoria\": \"Backend\", \"ingles\": \"deseable\", \"idiomas\": [], "
-    "\"red_flags\": [], \"green_flags\": [], \"benefits\": [], "
-    "\"salario_clp_mensual\": 2500000}}"
-)
-
-_PROMPT_OPINION_LOCAL = (
-    "Eres un comentarista editorial de ofertas de empleo tech chilenas. REGLAS "
-    "OBLIGATORIAS (violarlas invalida la respuesta):\n"
-    "1. Respondes EXCLUSIVAMENTE un objeto JSON válido. Nada más, sin texto, sin markdown.\n"
-    "2. opinion: max 160 chars. resumen: max 120 chars. fit_reason: max 140 chars.\n"
-    "3. opinion = comentario editorial: contexto de mercado, señal notable, comparación "
-    "salarial. NUNCA consejos al candidato (prohibido 'destaca', 'pregunta', "
-    "'no apliques', 'practica').\n"
-    "4. ANTI-ALUCINACIÓN: los únicos números de mercado que puedes citar son los del "
-    "CONTEXTO DE MERCADO provisto. Si la muestra es insuficiente, describe solo la oferta.\n"
-    "5. Si el sueldo está declarado, DEBE comentarlo (comparar contra la mediana del contexto).\n"
-    "6. Si la oferta tiene nota de anomalía: cita el valor tal cual, señala la anomalía "
-    "con la hipótesis provista, compara contra la mediana. NUNCA corrijas ni omitas.\n"
-    "7. fit_reason: por qué conviene o no al PERFIL del candidato provisto.\n\n"
-    "Perfil del candidato: {perfil}\n\n"
-    "Contexto de mercado (los ÚNICOS números que puedes citar):\n{mercado}\n\n"
-    "Oferta:\nTítulo: {title}\nEmpresa: {company}\nSueldo declarado: {salary}\n"
-    "Datos extraídos: {extraidos}\n{nota}\n\n"
-    "Responde SOLO JSON con EXACTAMENTE estas claves: opinion, resumen, fit_reason.\n\n"
-    "Ejemplo de respuesta VÁLIDA:\n"
-    "{{\"opinion\": \"Sueldo sobre la mediana del mercado; empresa reconocida.\", "
-    "\"resumen\": \"Backend Java con AWS, remoto.\", "
-    "\"fit_reason\": \"Stack coincide con el perfil; seniority adecuada.\"}}"
-)
-
-
-def _prompt_extract_local(job: dict) -> str:
-    return _PROMPT_EXTRACT_LOCAL.format(
-        title=job.get("title", ""), company=job.get("company", ""),
-        location=job.get("location", ""),
-        salary=job.get("salary") or "(no declarado)",
-        modality=job.get("modality") or "(no declarada)",
-        description=(job.get("description") or "")[:2000])
-
-
-def _prompt_opinion_local(job: dict, perfil: str, mercado: str,
-                          extraidos: dict, nota: str = "") -> str:
-    extra = ", ".join(f"{k}={v}" for k, v in extraidos.items() if v not in ("", None, [], {}))
-    return _PROMPT_OPINION_LOCAL.format(
-        perfil=perfil, mercado=mercado, title=job.get("title", ""),
-        company=job.get("company", ""), salary=job.get("salary") or "(no declarado)",
-        extraidos=extra or "sin datos", nota=nota)
-
-
 def _llm_local(cfg: Config, prompt: str) -> tuple[dict | None, str]:
     """Llamada HTTP al endpoint local (Ollama/llama.cpp/vLLM). HTTP puro, sin SQLite.
 
     Retorna (dict, "") si OK, (None, "timeout"|"rate"|"other") en fallo.
     Connection refused → fallback inmediato (sin esperar timeout — P2-3).
     """
-    body = {"model": cfg.ia.local_model,
-            "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0,
-            "response_format": {"type": "json_object"}}
-    for attempt in range(cfg.ia.local_retries + 1):
-        try:
-            req = requests.post(f"{cfg.ia.local_base_url}/chat/completions",
-                                json=body, timeout=cfg.ia.local_timeout,
-                                headers={"Authorization": "Bearer local",
-                                         "Content-Type": "application/json"})
-            if req.status_code >= 400:
-                kind = "rate" if (req.status_code == 429 or req.status_code >= 500) else "other"
-                if attempt == cfg.ia.local_retries:
-                    log.warning("IA local HTTP %d: %s", req.status_code, req.text[:120])
-                    return None, kind
-                time.sleep(2)
-                continue
-            d = req.json()
-            content = d["choices"][0]["message"]["content"]
-            data = json.loads(content)
-            return (data, "") if isinstance(data, dict) else (None, "other")
-        except requests.exceptions.ConnectionError:
-            log.warning("IA local connection refused (fallback inmediato)")
-            return None, "other"
-        except requests.exceptions.Timeout:
-            if attempt == cfg.ia.local_retries:
-                log.warning("IA local timeout")
-                return None, "timeout"
-            time.sleep(2)
-        except Exception as e:
-            if attempt == cfg.ia.local_retries:
-                log.warning("IA local falló: %s", e)
-                return None, "other"
-            time.sleep(2)
-    return None, "other"
+    data, err = LocalClient(cfg).chat_json(
+        [{"role": "user", "content": prompt}],
+        response_format={"type": "json_object"})
+    if err:
+        return None, err
+    return (data, "") if isinstance(data, dict) else (None, "other")
 
 
 def ia_extract_local_con_fallback(cfg: Config, job: dict, profile_desc: str,
@@ -515,56 +386,6 @@ def ia_extract_local_con_fallback(cfg: Config, job: dict, profile_desc: str,
     if cfg.ia.local_fallback_cloud:
         parsed, err = ia_extract_detail(cfg, job, profile_desc, mercado)
     return parsed, err, cfg.ia.model
-
-
-def _coerce_salario(v) -> int:
-    """salario_clp_mensual → int (F4/IA-4): float 2500000.0 → 2500000 (stats
-    parseaba 'CLP 2500000.0' como 25000000); '2.500.000' → 2500000; bool/basura → 0."""
-    if isinstance(v, bool) or v is None:
-        return 0
-    if isinstance(v, (int, float)):
-        return int(v) if v > 0 else 0
-    try:
-        return max(0, int(float(str(v).replace(".", "").replace(",", "").strip())))
-    except ValueError:
-        return 0
-
-
-def _normalizar_extract_local(d: dict) -> dict:
-    """Coerción de tipos post-respuesta (P2-6): un 7B puede emitir strings
-    donde el schema pide listas/ints. Defensa de segundo nivel."""
-    out = dict(d)
-    # salario: string → int/0
-    out["salario_clp_mensual"] = _coerce_salario(out.get("salario_clp_mensual"))
-    # listas: string → []
-    for campo in ("techs", "red_flags", "green_flags", "benefits"):
-        v = out.get(campo)
-        if isinstance(v, str):
-            out[campo] = [v]
-        elif not isinstance(v, list):
-            out[campo] = []
-    # idiomas: string → [] (apply_ia_result normaliza dicts)
-    if isinstance(out.get("idiomas"), str):
-        out["idiomas"] = []
-    elif not isinstance(out.get("idiomas"), list):
-        out["idiomas"] = []
-    # modalidad: palabra completa → código (defensa P1-1)
-    mod = _norm(str(out.get("modalidad") or ""))
-    if "remot" in mod:
-        out["modalidad"] = "R"
-    elif "híbrid" in mod or "hibrid" in mod:
-        out["modalidad"] = "H"
-    elif "presencial" in mod:
-        out["modalidad"] = "P"
-    elif mod not in ("r", "h", "p", "?"):
-        out["modalidad"] = "?"
-    # ingles: boolean → nivel (defensa P1-1)
-    ing = out.get("ingles")
-    if isinstance(ing, bool):
-        out["ingles"] = "requerido" if ing else "desconocido"
-    elif isinstance(ing, str) and ing.lower() not in ("no", "deseable", "requerido", "desconocido"):
-        out["ingles"] = "desconocido"
-    return out
 
 
 def ia_extract_local(cfg: Config, job: dict, profile_desc: str,
@@ -603,76 +424,6 @@ def ia_extract_local(cfg: Config, job: dict, profile_desc: str,
 
 
 # --- Modo lote (spec-enrich-lotes §2) ---
-_LOTE_SCHEMA = {
-    "type": "object",
-    "properties": {"ofertas": {"type": "array", "items": {
-        "type": "object",
-        "properties": {
-            "idx": {"type": "integer"},
-            "opinion": {"type": "string"},
-            "resumen": {"type": "string"},
-            "fit_reason": {"type": "string"},
-            "seniority_real": {"type": "string"},
-            "rol_categoria": {"type": "string",
-                              "enum": ["Full Stack", "Backend", "Frontend", "Data", "Mobile",
-                                       "AI/ML", "Tech Lead", "DevOps/Cloud", "QA", "Software",
-                                       "Seguridad", "Ingeniería no-software", "Analista/Empresa",
-                                       "Profesor/Formación", "Soporte/TI", "No-tech", "Otro"]},
-            "ingles": {"type": "string"},
-            "idiomas": {"type": "array", "items": {"type": "object",
-                "properties": {"idioma": {"type": "string"}, "nivel": {"type": "string"},
-                                "excluyente": {"type": "boolean"}},
-                "required": ["idioma", "nivel", "excluyente"], "additionalProperties": False}},
-            "modalidad": {"type": "string"},
-            "salario_clp_mensual": {"type": "integer"},
-            "techs": {"type": "array", "items": {"type": "string"}},
-            "red_flags": {"type": "array", "items": {"type": "string"}},
-            "green_flags": {"type": "array", "items": {"type": "string"}},
-            "benefits": {"type": "array", "items": {"type": "string"}}},
-        "required": ["idx", "opinion", "resumen", "fit_reason", "seniority_real",
-                      "rol_categoria", "ingles", "idiomas", "modalidad",
-                      "salario_clp_mensual", "techs", "red_flags", "green_flags", "benefits"],
-        "additionalProperties": False}},
-        "required": ["ofertas"], "additionalProperties": False}}
-
-
-def _lote_prompt(rows: list[dict], profile_desc: str, mercado: str) -> str:
-    """Prompt de lote: N bloques --- OFERTA {i} --- con idx 1..N (spec §2.1)."""
-    from . import stats as _st
-    bloques = []
-    for i, r in enumerate(rows, 1):
-        nota = ""
-        sal_esta = _st.parse_salary_clp(r.get("salary") or "")
-        if r.get("salary_status") in ("suspect", "implausible") and sal_esta > 0:
-            if _st.annual_likely(sal_esta, _st.parse_salary_clp("CLP 2150000") or 2150000):
-                hip = f"probable cifra anual (≈ ${sal_esta // 12:,}/mes)"
-            else:
-                hip = "error de la fuente"
-            raw_mostrar = (r.get('salary_raw') or r.get('salary') or "").strip()
-            monto_mostrar = raw_mostrar if raw_mostrar else f"{sal_esta:,}"
-            nota = (f"\nNota: el sueldo declarado de esta oferta (${monto_mostrar}) "
-                    f"fue clasificado anómalo (motivo: {r.get('salary_note') or 'estadística'}; "
-                    f"hipótesis: {hip}) — coméntalo en opinion según las reglas.")
-        bloques.append(
-            f"--- OFERTA {i} ---\n"
-            f"Título: {r.get('title', '')}\nEmpresa: {r.get('company', '')}\n"
-            f"Ubicación: {r.get('location', '')}\n"
-            f"Sueldo declarado: {r.get('salary') or '(no declarado — infiere rango de mercado solo si el texto lo permite)'}\n"
-            f"Modalidad declarada: {r.get('modality') or '(no declarada)'}\n"
-            f"Descripción: {(r.get('description') or '')[:2400]}{nota}")
-    return (f"Perfil del candidato: {profile_desc}\n\n"
-            f"Contexto de mercado (para el campo opinion): {mercado}\n\n"
-            + "\n\n".join(bloques) +
-            "\n\nResponde un JSON array con UN objeto por oferta (idx 1..N), cada uno con: "
-            "idx, opinion, resumen, fit_reason, seniority_real, rol_categoria, ingles, idiomas, "
-            "modalidad, salario_clp_mensual, techs, red_flags, green_flags, benefits. "
-            "techs: lista de tecnologías detectadas en la descripción (máx 8, "
-            "abreviadas: Py, Java, AWS, React, Angular, K8s, Docker, SQL, Node, TS, "
-            "NiFi, Spring, GCP, Azure, Scala, Go, .NET, FastAPI, Kafka, Terraform, "
-            "Postgres, Mongo, Redis, Vue, Jenkins, CI/CD). "
-            "Si una oferta no declara salario, salario_clp_mensual = 0 (cero, nunca inventes un monto).")
-
-
 def ia_extract_lote(cfg: Config, rows: list[dict], profile_desc: str,
                     mercado: str = "") -> tuple[list[dict] | None, str]:
     """Llamada IA por LOTE (spec-enrich-lotes §2). HTTP PURO — sin SQLite.
@@ -680,73 +431,26 @@ def ia_extract_lote(cfg: Config, rows: list[dict], profile_desc: str,
     El schema estricto garantiza estructura; el mapeo idx→fila lo hace el llamador."""
     if not cfg.ia.enabled or not cfg.ia.api_key or not rows:
         return None, "other"
-    body = {"model": cfg.ia.model,
-            "messages": [{"role": "system",
-                          "content": "Eres un extractor de datos de ofertas de empleo chilenas. "
-                                     "Respondes SOLO JSON válido. Dato ausente → null. No inventes. "
-                                     "El campo 'opinion' es un comentario editorial sobre la oferta "
-                                     "(contexto de mercado, señal notable, comparación salarial) — "
-                                     "NUNCA consejos al candidato (prohibido 'destaca', 'pregunta', "
-                                     "'no apliques', 'practica'). "
-                                     "Si el sueldo está declarado, la opinion DEBE comentarlo "
-                                     "(comparar contra la mediana del CONTEXTO provisto); no digas 'sin salario' "
-                                     "si el campo Sueldo declarado trae un valor. "
-                                     "ANTI-ALUCINACIÓN: los únicos números de mercado que puedes citar en "
-                                     "opinion son los del CONTEXTO DE MERCADO provisto arriba — prohibido "
-                                     "citar medianas, percentiles o estadísticas de tu conocimiento propio "
-                                     "o de otras fuentes. Si el contexto dice que la muestra es insuficiente, "
-                                     "no compares salarios: describe solo la oferta. "
-                                     "Si el sueldo de UNA oferta viene marcado como anómalo en su Nota, la "
-                                     "opinion DEBE: (1) citar el valor declarado tal cual, (2) señalar la "
-                                     "anomalía con la hipótesis provista (probable anual/error de fuente), "
-                                     "(3) comparar contra la mediana provista. NUNCA corrijas el valor ni lo "
-                                     "omitas. Prohibido comentar anomalías de OTRAS ofertas."},
-                        {"role": "user", "content": _lote_prompt(rows, profile_desc, mercado)}],
-            "temperature": 0,
-            "response_format": {"type": "json_schema",
-                                "json_schema": {"name": "lote_ofertas", "strict": True,
-                                                "schema": _LOTE_SCHEMA}}}
-    if cfg.ia.reasoning_effort:
-        body["reasoning_effort"] = cfg.ia.reasoning_effort
-    for attempt in range(cfg.ia.retries + 1):
-        try:
-            req = requests.post(f"{cfg.ia.base_url}/chat/completions",
-                                json=body, timeout=cfg.ia.timeout,
-                                headers={"Authorization": f"Bearer {cfg.ia.api_key}",
-                                         "Content-Type": "application/json"})
-            if req.status_code >= 400:
-                kind = "rate" if (req.status_code == 429 or req.status_code >= 500) else "other"
-                if attempt == cfg.ia.retries:
-                    log.warning("IA lote HTTP %d: %s", req.status_code, req.text[:120])
-                    return None, kind
-                time.sleep(2)
-                continue
-            d = req.json()
-            content = d["choices"][0]["message"]["content"]
-            data = json.loads(content)
-            arr = data.get("ofertas") if isinstance(data, dict) else data
-            if not isinstance(arr, list):
-                return None, "other"
-            arr = [i for i in arr if isinstance(i, dict)]   # IA-3: item basura no aborta el lote
-            # normalizar idiomas: el modelo puede devolver strings o dicts (spike verificado)
-            for item in arr:
-                if isinstance(item, dict) and isinstance(item.get("idiomas"), list):
-                    item["idiomas"] = [
-                        {"idioma": str(i).lower()[:20], "nivel": "", "excluyente": False}
-                        if isinstance(i, str) else i
-                        for i in item["idiomas"] if i]
-            return arr, ""
-        except requests.exceptions.Timeout:
-            if attempt == cfg.ia.retries:
-                log.warning("IA lote timeout (%d ofertas)", len(rows))
-                return None, "timeout"
-            time.sleep(2)
-        except Exception as e:
-            if attempt == cfg.ia.retries:
-                log.warning("IA lote falló: %s", e)
-                return None, "other"
-            time.sleep(2)
-    return None, "other"
+    data, err = CloudClient(cfg, tag=f"IA lote ({len(rows)} ofertas)").chat_json(
+        [{"role": "system", "content": LOTE_SYSTEM},
+         {"role": "user", "content": _lote_prompt(rows, profile_desc, mercado)}],
+        response_format={"type": "json_schema",
+                         "json_schema": {"name": "lote_ofertas", "strict": True,
+                                         "schema": _LOTE_SCHEMA}})
+    if err:
+        return None, err
+    arr = data.get("ofertas") if isinstance(data, dict) else data
+    if not isinstance(arr, list):
+        return None, "other"
+    arr = [i for i in arr if isinstance(i, dict)]   # IA-3: item basura no aborta el lote
+    # normalizar idiomas: el modelo puede devolver strings o dicts (spike verificado)
+    for item in arr:
+        if isinstance(item.get("idiomas"), list):
+            item["idiomas"] = [
+                {"idioma": str(i).lower()[:20], "nivel": "", "excluyente": False}
+                if isinstance(i, str) else i
+                for i in item["idiomas"] if i]
+    return arr, ""
 
 
 def _extract_aira_spa(url: str) -> dict:
