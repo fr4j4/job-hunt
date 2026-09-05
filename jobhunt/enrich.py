@@ -549,6 +549,60 @@ def ia_queue_count(conn) -> int:
     ).fetchone()[0]
 
 
+def _clean_text(s, max_len=None, lower=False):
+    """Limpia texto salido de la IA: unescape HTML (el modelo 1-2 bit emite
+    entidades rotas: 'm&eacute;tricas', 'integraci&oacute') y normaliza
+    espacios. max_len: trunca con '…' si el texto REAL supera el largo.
+    Si tras unescape el texto queda vacío devuelve ''."""
+    if not s:
+        return ""
+    import html as _html
+    t = _html.unescape(str(s))
+    t = re.sub(r"\s+", " ", t).strip()
+    if lower:
+        t = t.lower()
+    if max_len and len(t) > max_len:
+        t = t[: max_len - 1] + "…"
+    return t
+
+
+# conceptos que NO son tecnologías (el modelo 1-2 bit los mete en techs)
+# — spec: techs = solo tecnologías escritas literalmente en la oferta.
+_TECH_NO_TECNOLOGIA = {
+    "ci", "ai", "apis", "api", "rest", "backend", "frontend", "front end",
+    "full stack", "fullstack", "devops", "microservicios", "microservice",
+    "microservices", "cloud", "cloud native", "observabilidad", "observability",
+    "ia generativa", "generative ai", "inteligencia artificial",
+    "developer experience", "devx", "versionamiento", "despliegue", "deploy",
+    "slo", "slos", "sli", "slis", "error budgets", "arquitectura",
+    "architecture", "scalability", "escalabilidad", "automatización",
+    "automatizacion", "automation", "pipelines", "pipeline", "agile", "scrum",
+    "kanban", "ci/cd", "cicd",
+}
+
+
+def _clean_tech(t: str) -> str:
+    """Limpia UNA tech: unescape HTML, quita conceptos no-tecnología y
+    puntuación rara al inicio/final. Devuelve '' si no es válida."""
+    raw = str(t)
+    # entidades partidas: 'integraci&oacute' (sin ;) — html.unescape a veces
+    # las procesa igual y deja texto incompleto. Toda & debe ser una entidad
+    # COMPLETA (&name; o &#nn;) — el match incluye el ';' opcional.
+    for m in re.finditer(r"&([a-zA-Z#0-9]+);?", raw):
+        if not m.group(0).endswith(";"):
+            return ""
+    t = _clean_text(raw)
+    t = t.strip("·.,;\"'()[]{}<>*#")
+    if not t:
+        return ""
+    if t.lower() in _TECH_NO_TECNOLOGIA:
+        return ""
+    # conceptos compuestos partidos: 'Inteligencia Artific' (truncado)
+    if any(t.lower().startswith(c) for c in ("inteligencia artific", "desarrollo de ", "experiencia en ")):
+        return ""
+    return t
+
+
 def apply_ia_result(conn, cfg: Config, r: dict, parsed: dict | None,
                     ctx_version: str = "", model: str | None = None) -> bool:
     """Escribe los campos IA de UNA oferta en la DB. Solo el MAIN la llama
@@ -600,11 +654,11 @@ def apply_ia_result(conn, cfg: Config, r: dict, parsed: dict | None,
     for field in ("resumen", "fit_reason", "ingles"):
         if parsed.get(field):
             sets.append(f"ai_{field}=?")
-            params.append(str(parsed[field])[:300])
+            params.append(_clean_text(parsed[field], 300))
             ia_fields.append(field)
     if parsed.get("opinion"):
         sets.append("ai_opinion=?")
-        params.append(str(parsed["opinion"])[:300])
+        params.append(_clean_text(parsed["opinion"], 300))
         ia_fields.append("opinion")
     if parsed.get("rol_categoria"):
         sets.append("rol_categoria=?")
@@ -616,10 +670,11 @@ def apply_ia_result(conn, cfg: Config, r: dict, parsed: dict | None,
     if "techs" in parsed and isinstance(parsed["techs"], list):
         techs_limpio = []
         for t in parsed["techs"][:8]:
-            t = str(t).strip()
+            t = _clean_tech(t)
             if not t:
                 continue
-            techs_limpio.append(_TECH_ABBR.get(_norm(t), t[:20]))
+            t = _TECH_ABBR.get(_norm(t), t[:20])
+            techs_limpio.append(t)
         sets.append("techs=?")
         params.append(";".join(techs_limpio))
         ia_fields.append("techs")
@@ -644,9 +699,11 @@ def apply_ia_result(conn, cfg: Config, r: dict, parsed: dict | None,
             ia_fields.append("idiomas")
     for field in ("red_flags", "green_flags", "benefits"):
         if parsed.get(field):
-            sets.append(f"ai_{field}=?")
-            params.append(json.dumps(parsed[field], ensure_ascii=False))
-            ia_fields.append(field)
+            limpio = [_clean_text(x, 120) for x in parsed[field] if _clean_text(x, 120)]
+            if limpio:
+                sets.append(f"ai_{field}=?")
+                params.append(json.dumps(limpio, ensure_ascii=False))
+                ia_fields.append(field)
     if not sets:
         return False
     sets.append("ia_model=?"); params.append(model or cfg.ia.model)
