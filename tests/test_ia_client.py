@@ -87,6 +87,27 @@ def test_local_usa_endpoint_y_modelo_local(monkeypatch):
     assert visto["timeout"] == cfg.ia.local_timeout
 
 
+def test_local_extra_body_apaga_thinking(monkeypatch):
+    """B1: LocalClient manda think:false + enable_thinking:false (Qwen3 con
+    thinking devuelve content vacío — JSON fail). CloudClient NO los manda."""
+    cfg = _cfg()
+    visto = {}
+
+    def post(url, json=None, timeout=None, headers=None):
+        visto.update(body=json)
+        return _Resp(200, {"choices": [{"message": {"content": "{}"}}]})
+
+    monkeypatch.setattr(requests, "post", post)
+    LocalClient(cfg).chat_json([{"role": "user", "content": "p"}])
+    assert visto["body"]["think"] is False
+    assert visto["body"]["chat_template_kwargs"] == {"enable_thinking": False}
+
+    visto.clear()
+    CloudClient(cfg).chat_json([{"role": "user", "content": "p"}])
+    assert "think" not in visto["body"]
+    assert "chat_template_kwargs" not in visto["body"]
+
+
 def test_arquitectura_ia_no_importa_de_modulos_viejos():
     prohibido = re.compile(
         r"from\s+\.\.(enrich|channel|bot|cli|scoring|db|stats)\s+import"

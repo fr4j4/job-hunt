@@ -94,3 +94,10 @@ class LocalClient(IAClient):
         self.retries = cfg.ia.local_retries
         self.model = cfg.ia.local_model
         self.headers = {"Authorization": "Bearer local", "Content-Type": "application/json"}
+
+    def _extra_body(self) -> dict:
+        # Qwen3 con thinking consume tokens en reasoning y devuelve content vacío
+        # (JSON fail). Ollama respeta "think" top-level; llama.cpp respeta
+        # chat_template_kwargs.enable_thinking. Mandar ambos es seguro: cada
+        # backend ignora el que no conoce (verificado empíricamente, ninguno da 400).
+        return {"think": False, "chat_template_kwargs": {"enable_thinking": False}}
