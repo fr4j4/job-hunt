@@ -765,34 +765,82 @@ def run_ia_batch(conn, cfg: Config, profile_desc: str, max_n: int | None = None,
                 except Exception:
                     pass
         else:
-            for r in grupo:
-                t0 = time.time()
-                modelo = None
-                if local:
-                    # spec-ia-local: 2 tareas con fallback cloud por oferta
-                    parsed, err_kind, modelo = ia_extract_local_con_fallback(
-                        cfg, r, profile_desc, mercado)
-                else:
-                    parsed, err_kind = ia_extract_detail(cfg, r, profile_desc, mercado)
-                log.info("IA %d/%d %s — %s (%.1fs)", i + 1, total, r["group_id"][:20],
-                         (r.get("title") or "")[:40], time.time() - t0)
-                if err_kind == "rate":
-                    rate_racha += 1
-                    if rate_racha >= 10:
-                        log.warning("batch IA nocturno: %d fallos 429/5xx seguidos — circuito cortado, "
-                                    "resto queda en cola para el próximo batch", rate_racha)
-                        return done
-                    time.sleep(min(60, 5 * rate_racha))
-                    continue
-                rate_racha = 0
-                if progress:
-                    try:
-                        progress(i + 1, total, r.get("title") or "")
-                    except Exception:
-                        pass
-                if apply_ia_result(conn, cfg, r, parsed, ctx_version=ctx_version, model=modelo):
-                    conn.commit()
-                    done += 1
-                time.sleep(0.5)
+            # spec-ia-local: paralelo por oferta (2 tareas/oferta) — usa
+            # local_concurrency (decisión #3, speedup 1.54x). Los workers usan
+            # ia_extract_local_con_fallback (etiqueta el modelo REAL — IA-1 del
+            # PR2) y el MAIN escribe (patrón conexión única).
+            max_w = max(1, min(cfg.ia.local_concurrency, len(grupo))) if local else 1
+            if local and max_w > 1 and len(grupo) > 1:
+                from concurrent.futures import ThreadPoolExecutor, as_completed
+
+                def _work_batch(rr):
+                    d, ek, m = ia_extract_local_con_fallback(cfg, rr, profile_desc, mercado)
+                    return rr, d, ek, m
+
+                t0g = time.time()
+                with ThreadPoolExecutor(max_workers=max_w) as ex:
+                    futs = {ex.submit(_work_batch, rr): rr for rr in grupo}
+                    results = []
+                    for fut in as_completed(futs):
+                        if stop_event is not None and stop_event.is_set():
+                            for f in futs:
+                                f.cancel()
+                            break
+                        results.append(fut.result())
+                # ordenar por group_id original para logs deterministas
+                order = {r["group_id"]: idx for idx, r in enumerate(grupo)}
+                results.sort(key=lambda x: order.get(x[0]["group_id"], 999))
+                for rr, parsed, err_kind, modelo in results:
+                    idx = order.get(rr["group_id"], i) + 1
+                    log.info("IA %d/%d %s — %s (%.1fs)", idx, total, rr["group_id"][:20],
+                             (rr.get("title") or "")[:40], time.time() - t0g)
+                    if err_kind == "rate":
+                        rate_racha += 1
+                        if rate_racha >= 10:
+                            log.warning("batch IA nocturno: %d fallos 429/5xx seguidos — circuito cortado, "
+                                        "resto queda en cola para el próximo batch", rate_racha)
+                            return done
+                        time.sleep(min(60, 5 * rate_racha))
+                        continue
+                    rate_racha = 0
+                    if progress:
+                        try:
+                            progress(idx, total, rr.get("title") or "")
+                        except Exception:
+                            pass
+                    if apply_ia_result(conn, cfg, rr, parsed, ctx_version=ctx_version, model=modelo):
+                        conn.commit()
+                        done += 1
+                    time.sleep(0.5)
+            else:
+                for r in grupo:
+                    t0 = time.time()
+                    modelo = None
+                    if local:
+                        # spec-ia-local: 2 tareas con fallback cloud por oferta
+                        parsed, err_kind, modelo = ia_extract_local_con_fallback(
+                            cfg, r, profile_desc, mercado)
+                    else:
+                        parsed, err_kind = ia_extract_detail(cfg, r, profile_desc, mercado)
+                    log.info("IA %d/%d %s — %s (%.1fs)", i + 1, total, r["group_id"][:20],
+                             (r.get("title") or "")[:40], time.time() - t0)
+                    if err_kind == "rate":
+                        rate_racha += 1
+                        if rate_racha >= 10:
+                            log.warning("batch IA nocturno: %d fallos 429/5xx seguidos — circuito cortado, "
+                                        "resto queda en cola para el próximo batch", rate_racha)
+                            return done
+                        time.sleep(min(60, 5 * rate_racha))
+                        continue
+                    rate_racha = 0
+                    if progress:
+                        try:
+                            progress(i + 1, total, r.get("title") or "")
+                        except Exception:
+                            pass
+                    if apply_ia_result(conn, cfg, r, parsed, ctx_version=ctx_version, model=modelo):
+                        conn.commit()
+                        done += 1
+                    time.sleep(0.5)
     conn.commit()
     return done

@@ -875,9 +875,12 @@ def _handle_command(cfg: Config, message: dict, state: dict) -> None:
                                                     drain=True)   # manual: drena toda la cola
                             if action == "dry":
                                 for p in stats.get("dry_run_preview", []):
-                                    _tg_api(cfg, "sendMessage", {
+                                    payload = {
                                         "chat_id": chat_id, "text": "👁 preview:\n" + p["text"],
-                                        "parse_mode": "HTML", "disable_web_page_preview": True})
+                                        "parse_mode": "HTML", "disable_web_page_preview": True}
+                                    if p.get("kb"):
+                                        payload["reply_markup"] = p["kb"]
+                                    _tg_api(cfg, "sendMessage", payload)
                                     _t.sleep(0.5)
                             else:
                                 _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
