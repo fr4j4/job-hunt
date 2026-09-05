@@ -465,11 +465,32 @@ def enrich_pending(conn, cfg: Config | None, max_n: int | None = None,
         if not recargadas:
             continue
         if local:
-            # spec-ia-local: IA individual (2 tareas) con fallback cloud por oferta
-            for r in recargadas:
-                parsed, _, modelo = ia_extract_local_con_fallback(cfg, r, perfil, mercado)
-                if parsed:
-                    apply_ia_result(conn, cfg, r, parsed, ctx_version=ctx_version, model=modelo)
+            # spec-ia-local: IA individual (2 tareas) con fallback cloud por oferta.
+            # Paralelo con IA_LOCAL_CONCURRENCY (speedup 1.54x medido en prod).
+            # Los workers usan ia_extract_local_con_fallback (etiqueta el modelo
+            # REAL — IA-1 del PR2) y el MAIN escribe (patrón conexión única).
+            max_w = max(1, min(cfg.ia.local_concurrency, len(recargadas)))
+            if max_w > 1 and len(recargadas) > 1:
+                from concurrent.futures import ThreadPoolExecutor, as_completed
+
+                def _work_local(rr):
+                    parsed, _, modelo = ia_extract_local_con_fallback(cfg, rr, perfil, mercado)
+                    return rr, parsed, modelo
+
+                with ThreadPoolExecutor(max_workers=max_w) as ex:
+                    futures = [ex.submit(_work_local, r) for r in recargadas]
+                    for fut in as_completed(futures):
+                        rr, parsed, modelo = fut.result()
+                        if parsed:
+                            apply_ia_result(conn, cfg, rr, parsed,
+                                            ctx_version=ctx_version, model=modelo)
+                            conn.commit()   # commit por resultado (C3)
+            else:
+                for r in recargadas:
+                    parsed, _, modelo = ia_extract_local_con_fallback(cfg, r, perfil, mercado)
+                    if parsed:
+                        apply_ia_result(conn, cfg, r, parsed, ctx_version=ctx_version, model=modelo)
+                        conn.commit()   # commit por resultado (C3)
         elif N > 1:
             arr, err = ia_extract_lote(cfg, recargadas, perfil, mercado)
             if arr is None:
