@@ -32,7 +32,7 @@ _PROMPT_EXTRACT_LOCAL = (
     "puede inferir).\n"
     "- rol_categoria: solo uno de: \"Full Stack\", \"Backend\", \"Frontend\", \"Data\", \"Mobile\", "
     "\"AI/ML\", \"Tech Lead\", \"DevOps/Cloud\", \"QA\", \"Software\", \"Seguridad\", "
-    "\"Ingenieria no-software\", \"Analista/Empresa\", \"Profesor/Formacion\", \"Soporte/TI\", "
+    "\"Ingeniería no-software\", \"Analista/Empresa\", \"Profesor/Formación\", \"Soporte/TI\", "
     "\"No-tech\", \"Otro\".\n"
     "- ingles: solo \"no\", \"deseable\", \"requerido\", \"desconocido\".\n"
     "- salario_clp_mensual: numero entero, 0 si no se declara.\n"

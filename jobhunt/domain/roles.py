@@ -22,7 +22,7 @@ _CAT_RULES = (   # CH-1: word boundaries — 'Retail'≠AI, 'Full Time'≠Full S
     ("Tech Lead", r"\btech\s*lead\b|\blead\b(?!\s+(?:de\s+)?(?:ventas|comercial|retail|tienda))"),
     ("DevOps/Cloud", r"\bdev.?ops\b|\bcloud\b|\binfra\w*\b|\bsre\b"),
     ("QA", r"\bqa\b|\btesting\b"),
-    ("Software", r"\bsoftware\b|\bdesarroll\w*\b"),
+    ("Software", r"(?<!no-)\bsoftware\b|\bdesarroll\w*\b"),
     ("Seguridad", r"\bseguridad\b|\bsecops\b|\bsecurity\b"),
 )
 

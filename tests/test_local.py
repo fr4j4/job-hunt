@@ -482,3 +482,25 @@ def test_clean_tech_filtra_conceptos():
     assert en._clean_tech("Inteligencia Artific") == ""  # truncado a medias
     assert en._clean_tech("REST") == ""
     assert en._clean_tech("devops") == ""  # case-insensitive
+
+
+def test_clean_rol_normaliza_variantes():
+    """_clean_rol: variantes sin tilde del modelo → enum canónico."""
+    assert en._clean_rol("Ingenieria no-software") == "Ingeniería no-software"
+    assert en._clean_rol("Profesor/Formacion") == "Profesor/Formación"
+    assert en._clean_rol("Ingeniería no-software") == "Ingeniería no-software"
+    assert en._clean_rol("Backend") == "Backend"
+    assert en._clean_rol("Data") == "Data"
+    assert en._clean_rol("") == ""
+
+
+def test_clean_rol_inventados_a_dev_o_otro():
+    """_clean_rol: inventados → categoría dev más cercana o 'Otro'."""
+    assert en._clean_rol("Gestión") == "Otro"
+    assert en._clean_rol("Mantenimiento") == "Otro"
+    assert en._clean_rol("SAP") == "Otro"
+    assert en._clean_rol("Liderazgo") == "Otro"
+    # con señal dev en el nombre → categoría dev
+    assert en._clean_rol("Desarrollador Salesforce") == "Software"
+    assert en._clean_rol("Backend Developer") == "Backend"
+    assert en._clean_rol("DevOps") == "DevOps/Cloud"

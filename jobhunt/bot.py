@@ -1022,10 +1022,33 @@ def _handle_command(cfg: Config, message: dict, state: dict) -> None:
                     conn = database.connect(cfg)
                     try:
                         if action in ("daily", "all"):
+                            # mensaje honesto: distinguir 0 filas de gate vs
+                            # N filas filtradas por no-dev (el "ya enviado hoy"
+                            # NUNCA aplica en DM — con chat_id envía siempre)
+                            from .channel import _GATE_SQL
+                            from .domain.roles import is_dev
+                            try:
+                                rows = [dict(r) for r in conn.execute(
+                                    _GATE_SQL, {"min_score": cfg.channel.digest_min_score,
+                                                "max_age": cfg.channel.max_age_days}).fetchall()]
+                                n_total = len(rows)
+                                n_dev = sum(1 for r in rows if is_dev(
+                                    r.get("rol_categoria"), r.get("title") or "", cfg,
+                                    r.get("description") or ""))
+                            except Exception:
+                                n_total = n_dev = -1
                             ok = publish_daily_digest(cfg, conn, api, chat_id=chat_id)
+                            if ok:
+                                msg = "📊 report-daily enviado"
+                            elif n_total == 0:
+                                msg = "📊 report-daily: 0 ofertas en el gate (score ≥ digest_min_score y ≤14d)"
+                            elif n_dev == 0:
+                                msg = (f"📊 report-daily: {n_total} ofertas en gate, "
+                                       "ninguna dev (todas filtradas por rol no-dev)")
+                            else:
+                                msg = f"📊 report-daily: {n_dev} dev de {n_total} gate, envío falló"
                             _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
-                                                         "text": "📊 report-daily enviado" if ok else
-                                                                 "📊 report-daily: sin candidatas o ya enviado hoy"})
+                                                         "text": msg})
                             _t.sleep(1)
                         if action in ("weekly-remote", "all"):
                             ok = publish_weekly_remote(cfg, conn, api, chat_id=chat_id)
