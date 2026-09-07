@@ -601,6 +601,7 @@ def _help_text() -> str:
         "/config — configuración actual (tokens enmascarados)",
         "/preview — oferta aleatoria como se vería en el canal (sin marcar publicada)",
         "/preview 80 — aleatoria con market_score >= 80 · /preview java — filtra por texto",
+        "/preview ... s — SOLO ofertas con sueldo declarado (ej: /preview 80 s)",
         "",
         "📢 <b>Canal (broadcast)</b>",
         "/channel — estado del canal (umbral, cola, distribución market score)",
@@ -670,25 +671,53 @@ def _config_text(cfg: Config) -> str:
     return "\n".join(lines)
 
 
+def _parse_preview_arg(arg: str) -> tuple[str | None, str, bool]:
+    """Parsea el arg de /preview → (filtro, modo, solo_sueldo).
+
+    modos: 'score' (N), 'texto' (match título/empresa), '' (aleatorio).
+    El token 's'/'sal' al final activa solo ofertas CON sueldo declarado.
+    /preview 80 s → score>=80 con sueldo · /preview s → aleatoria con sueldo
+    /preview java s → matchea 'java' con sueldo
+    """
+    solo_sueldo = False
+    tokens = arg.split()
+    resto = []
+    for t in tokens:
+        tl = t.lower()
+        if tl in ("s", "sal", "sueldo"):
+            solo_sueldo = True
+        else:
+            resto.append(t)
+    if resto and resto[0].isdigit():
+        return resto[0], "score", solo_sueldo
+    if resto:
+        return " ".join(resto), "texto", solo_sueldo
+    return None, "", solo_sueldo
+
+
 def _preview_offer(cfg: Config, chat_id, arg: str = ""):
     """Comando /preview: oferta aleatoria renderizada como en el canal (DM).
 
     NO marca notified_channel_at — es solo previsualización.
     /preview → aleatoria con IA · /preview N → market_score >= N
     /preview <texto> → aleatoria que matchee título/empresa
+    /preview ... s → SOLO ofertas con sueldo declarado (ej: /preview 80 s)
     """
     from .channel import render_offer_post
     conn = database.connect(cfg)
     try:
         where = "active=1 AND ia_model != ''"
         params: list = []
-        if arg.isdigit():
+        filtro, modo, solo_sueldo = _parse_preview_arg(arg)
+        if modo == "score" and filtro is not None:
             where += " AND market_score >= ?"
-            params.append(int(arg))
-        elif arg.strip():
+            params.append(int(filtro))
+        elif modo == "texto":
             where += " AND (title LIKE ? OR company LIKE ?)"
-            like = f"%{arg.strip()}%"
+            like = f"%{filtro}%"
             params.extend([like, like])
+        if solo_sueldo:
+            where += " AND salary != ''"
         rows = conn.execute(
             f"SELECT * FROM ofertas WHERE {where} ORDER BY RANDOM() LIMIT 1",
             params).fetchall()
