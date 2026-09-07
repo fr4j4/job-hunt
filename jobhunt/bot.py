@@ -230,7 +230,7 @@ def handle_callback(cfg: Config, query: dict, state: dict) -> None:
         if data == "noop":
             _tg_api(cfg, "answerCallbackQuery", {"callback_query_id": qid})
             return
-        m = re.fullmatch(r"(jobs|latest|sc\d+|f[a-z0-9.\-]*):page:(\d+)", data)
+        m = re.fullmatch(r"(jobs|latest|sc\d+s?|f[a-z0-9.\-]*):page:(\d+)", data)
         if not m:
             _tg_api(cfg, "answerCallbackQuery", {"callback_query_id": qid})
             return
@@ -245,10 +245,15 @@ def handle_callback(cfg: Config, query: dict, state: dict) -> None:
             rendered = render_page(_filter_offers(cfg, f), page, cfg.telegram.digest_page_size, cfg,
                                    label=f"🔎 <b>Ofertas — {_describe_filters(f)}</b>", cb_prefix=prefix)
         else:
-            th = int(prefix[2:])
-            offers = _score_offers(cfg, th)
+            sc = prefix[2:]  # ej: "60s" → th=60, solo_sueldo=True
+            solo_s = sc.endswith("s")
+            th = int(sc[:-1] if solo_s else sc)
+            offers = _score_offers(cfg, th, solo_s)
+            label = f"🎯 <b>Ofertas ≥{th}</b>"
+            if solo_s:
+                label += " 💰 con sueldo"
             rendered = render_page(offers, page, cfg.telegram.digest_page_size, cfg,
-                                   label=f"🎯 <b>Ofertas ≥{th}</b>", cb_prefix=prefix)
+                                   label=label, cb_prefix=prefix)
         kb = [[{k: v for k, v in b.items() if k != "style"} for b in row] for row in rendered["keyboard"]]
         _tg_api(cfg, "editMessageText", {
             "chat_id": chat_id,
@@ -419,13 +424,16 @@ def _filter_offers(cfg: Config, f: dict) -> list[dict]:
     return out
 
 
-def _score_offers(cfg: Config, threshold: int) -> list[dict]:
-    """Ofertas activas ≥ threshold, máx 50, ordenadas por score."""
+def _score_offers(cfg: Config, threshold: int, solo_sueldo: bool = False) -> list[dict]:
+    """Ofertas activas ≥ threshold, máx 50, ordenadas por score.
+    solo_sueldo=True → solo ofertas CON sueldo declarado (salary != '')."""
     conn = database.connect(cfg)
     try:
+        sql = "SELECT * FROM ofertas WHERE active=1 AND score >= ? "
+        if solo_sueldo:
+            sql += "AND salary != '' "
         return [dict(r) for r in conn.execute(
-            "SELECT * FROM ofertas WHERE active=1 AND score >= ? "
-            "ORDER BY score DESC LIMIT 50", (threshold,)).fetchall()]
+            sql + "ORDER BY score DESC LIMIT 50", (threshold,)).fetchall()]
     finally:
         conn.close()
 
@@ -580,7 +588,7 @@ def _help_text() -> str:
         "🔎 <b>Búsqueda y pool</b>",
         "/search — gatilla una búsqueda ahora (reporta inicio, término y error)",
         "/latest — últimas ofertas registradas (default 10, /latest 20 para más)",
-        "/score N — ofertas con score ≥ N (ej: /score 60)",
+        "/score N — ofertas con score ≥ N (ej: /score 60 · /score 60 s solo con sueldo)",
         "/jobs [filtros] — filtra el pool (combinables):",
         "    remote · hybrid · onsite · salary (con sueldo publicado) ·",
         "    salary2.5 (≥$2.5M) · 2.5 / 500k / 2.500.000 ·",
@@ -1242,23 +1250,27 @@ def _handle_command(cfg: Config, message: dict, state: dict) -> None:
                 "disable_web_page_preview": True,
                 "reply_markup": _kb_json(kb)})
         elif cmd == "/score":
-            try:
-                th = int(arg)
-            except ValueError:
+            filtro, modo, solo_sueldo = _parse_preview_arg(arg)
+            if modo != "score" or filtro is None:
                 _tg_api(cfg, "sendMessage", {
                     "chat_id": chat_id, "parse_mode": "HTML",
-                    "text": "Uso: <code>/score N</code> — ej: <code>/score 60</code>"})
+                    "text": "Uso: <code>/score N</code> — ej: <code>/score 60</code> · "
+                            "<code>/score 60 s</code> solo con sueldo"})
                 return
-            th = max(0, min(100, th))
-            offers = _score_offers(cfg, th)
+            th = max(0, min(100, int(filtro)))
+            offers = _score_offers(cfg, th, solo_sueldo)
             if not offers:
                 _tg_api(cfg, "sendMessage", {
                     "chat_id": chat_id, "parse_mode": "HTML",
-                    "text": f"Nada con score ≥{th} en el pool activo."})
+                    "text": f"Nada con score ≥{th} en el pool activo."
+                            + (" con sueldo declarado." if solo_sueldo else "")})
                 return
-            prefix = f"sc{th}"
+            prefix = f"sc{th}" + ("s" if solo_sueldo else "")
+            label = f"🎯 <b>Ofertas ≥{th}</b>"
+            if solo_sueldo:
+                label += " 💰 con sueldo"
             rendered = render_page(offers, 0, cfg.telegram.digest_page_size, cfg,
-                                   label=f"🎯 <b>Ofertas ≥{th}</b>", cb_prefix=prefix)
+                                   label=label, cb_prefix=prefix)
             kb = [[{k: v for k, v in b.items() if k != "style"} for b in row]
                   for row in rendered["keyboard"]]
             _tg_api(cfg, "sendMessage", {
