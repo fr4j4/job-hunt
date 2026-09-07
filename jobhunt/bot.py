@@ -794,7 +794,7 @@ def _handle_command(cfg: Config, message: dict, state: dict) -> None:
         return
     parts = text.split()
     cmd = parts[0].split("@")[0].lower()      # /score@MiBot → /score
-    arg = parts[1] if len(parts) > 1 else ""
+    arg = " ".join(parts[1:]).strip()          # TODOS los tokens: '/score 60 s' → '60 s'
     log.info("comando %s (chat %s)", cmd, chat_id)
     try:
         if cmd == "/search":
