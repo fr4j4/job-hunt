@@ -231,7 +231,7 @@ def handle_callback(cfg: Config, query: dict, state: dict) -> None:
         if data == "noop":
             _tg_api(cfg, "answerCallbackQuery", {"callback_query_id": qid})
             return
-        m = re.fullmatch(r"(jobs|latest|sc\d+s?|f[a-z0-9.\-]*):page:(\d+)", data)
+        m = re.fullmatch(r"(jobs|latest|sc\d+s?|f[a-zA-Z0-9._\-]*):page:(\d+)", data)
         if not m:
             _tg_api(cfg, "answerCallbackQuery", {"callback_query_id": qid})
             return

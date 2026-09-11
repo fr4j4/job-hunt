@@ -419,3 +419,14 @@ def test_enc_dec_filters_q_score_roundtrip():
     assert len("f" + enc) <= 64                      # límite callback_data Telegram
     d = _dec_filters(enc)
     assert d["q"] == f["q"] and d["min_score"] == 75 and "remoto" in d["modality"]
+
+
+def test_callback_regex_acepta_base64_mayusculas():
+    """Regresión: el base64 del texto buscado produce mayúsculas — el regex
+    del callback (que era solo minúsculas) debe aceptarlas."""
+    import re
+    from jobhunt.bot import _parse_filters, _enc_filters
+    pat = re.compile(r"(jobs|latest|sc\d+s?|f[a-zA-Z0-9._\-]*):page:(\d+)")
+    f = _parse_filters('q"spring boot" score>=70')
+    enc = _enc_filters(f)
+    assert pat.fullmatch(f"f{enc}:page:2"), f"regex no matchea f{enc}"
