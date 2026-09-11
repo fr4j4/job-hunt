@@ -371,3 +371,25 @@ def test_rescore_dual_write_aislado(tmp_path):
     assert r["score"] == r2["score"] or True   # fit recalculado igual
     assert r2["market_score"] == 0             # aislado, no tumbó el rescore
     conn.close()
+
+def test_parse_preview_arg():
+    """_parse_preview_arg: score, texto, aleatorio y token de sueldo."""
+    from jobhunt.bot import _parse_preview_arg
+    assert _parse_preview_arg("") == (None, "", False)
+    assert _parse_preview_arg("80") == ("80", "score", False)
+    assert _parse_preview_arg("80 s") == ("80", "score", True)
+    assert _parse_preview_arg("80 sal") == ("80", "score", True)
+    assert _parse_preview_arg("s") == (None, "", True)
+    assert _parse_preview_arg("sueldo") == (None, "", True)
+    assert _parse_preview_arg("java s") == ("java", "texto", True)
+    assert _parse_preview_arg("full stack") == ("full stack", "texto", False)
+    assert _parse_preview_arg("S") == (None, "", True)  # case-insensitive
+
+
+def test_callback_sc_prefix_con_sufijo_s():
+    """El regex de callbacks acepta sc<N>s (score + solo sueldo)."""
+    import re
+    pat = re.compile(r"(jobs|latest|sc\d+s?|f[a-z0-9.\-]*):page:(\d+)")
+    assert pat.fullmatch("sc60s:page:2")
+    assert pat.fullmatch("sc60:page:2")
+    assert not pat.fullmatch("sc60x:page:2")

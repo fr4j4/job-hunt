@@ -230,7 +230,7 @@ def handle_callback(cfg: Config, query: dict, state: dict) -> None:
         if data == "noop":
             _tg_api(cfg, "answerCallbackQuery", {"callback_query_id": qid})
             return
-        m = re.fullmatch(r"(jobs|latest|sc\d+|f[a-z0-9.\-]*):page:(\d+)", data)
+        m = re.fullmatch(r"(jobs|latest|sc\d+s?|f[a-z0-9.\-]*):page:(\d+)", data)
         if not m:
             _tg_api(cfg, "answerCallbackQuery", {"callback_query_id": qid})
             return
@@ -245,10 +245,15 @@ def handle_callback(cfg: Config, query: dict, state: dict) -> None:
             rendered = render_page(_filter_offers(cfg, f), page, cfg.telegram.digest_page_size, cfg,
                                    label=f"🔎 <b>Ofertas — {_describe_filters(f)}</b>", cb_prefix=prefix)
         else:
-            th = int(prefix[2:])
-            offers = _score_offers(cfg, th)
+            sc = prefix[2:]  # ej: "60s" → th=60, solo_sueldo=True
+            solo_s = sc.endswith("s")
+            th = int(sc[:-1] if solo_s else sc)
+            offers = _score_offers(cfg, th, solo_s)
+            label = f"🎯 <b>Ofertas ≥{th}</b>"
+            if solo_s:
+                label += " 💰 con sueldo"
             rendered = render_page(offers, page, cfg.telegram.digest_page_size, cfg,
-                                   label=f"🎯 <b>Ofertas ≥{th}</b>", cb_prefix=prefix)
+                                   label=label, cb_prefix=prefix)
         kb = [[{k: v for k, v in b.items() if k != "style"} for b in row] for row in rendered["keyboard"]]
         _tg_api(cfg, "editMessageText", {
             "chat_id": chat_id,
@@ -419,13 +424,16 @@ def _filter_offers(cfg: Config, f: dict) -> list[dict]:
     return out
 
 
-def _score_offers(cfg: Config, threshold: int) -> list[dict]:
-    """Ofertas activas ≥ threshold, máx 50, ordenadas por score."""
+def _score_offers(cfg: Config, threshold: int, solo_sueldo: bool = False) -> list[dict]:
+    """Ofertas activas ≥ threshold, máx 50, ordenadas por score.
+    solo_sueldo=True → solo ofertas CON sueldo declarado (salary != '')."""
     conn = database.connect(cfg)
     try:
+        sql = "SELECT * FROM ofertas WHERE active=1 AND score >= ? "
+        if solo_sueldo:
+            sql += "AND salary != '' "
         return [dict(r) for r in conn.execute(
-            "SELECT * FROM ofertas WHERE active=1 AND score >= ? "
-            "ORDER BY score DESC LIMIT 50", (threshold,)).fetchall()]
+            sql + "ORDER BY score DESC LIMIT 50", (threshold,)).fetchall()]
     finally:
         conn.close()
 
@@ -580,7 +588,7 @@ def _help_text() -> str:
         "🔎 <b>Búsqueda y pool</b>",
         "/search — gatilla una búsqueda ahora (reporta inicio, término y error)",
         "/latest — últimas ofertas registradas (default 10, /latest 20 para más)",
-        "/score N — ofertas con score ≥ N (ej: /score 60)",
+        "/score N — ofertas con score ≥ N (ej: /score 60 · /score 60 s solo con sueldo)",
         "/jobs [filtros] — filtra el pool (combinables):",
         "    remote · hybrid · onsite · salary (con sueldo publicado) ·",
         "    salary2.5 (≥$2.5M) · 2.5 / 500k / 2.500.000 ·",
@@ -601,6 +609,7 @@ def _help_text() -> str:
         "/config — configuración actual (tokens enmascarados)",
         "/preview — oferta aleatoria como se vería en el canal (sin marcar publicada)",
         "/preview 80 — aleatoria con market_score >= 80 · /preview java — filtra por texto",
+        "/preview ... s — SOLO ofertas con sueldo declarado (ej: /preview 80 s)",
         "",
         "📢 <b>Canal (broadcast)</b>",
         "/channel — estado del canal (umbral, cola, distribución market score)",
@@ -670,25 +679,53 @@ def _config_text(cfg: Config) -> str:
     return "\n".join(lines)
 
 
+def _parse_preview_arg(arg: str) -> tuple[str | None, str, bool]:
+    """Parsea el arg de /preview → (filtro, modo, solo_sueldo).
+
+    modos: 'score' (N), 'texto' (match título/empresa), '' (aleatorio).
+    El token 's'/'sal' al final activa solo ofertas CON sueldo declarado.
+    /preview 80 s → score>=80 con sueldo · /preview s → aleatoria con sueldo
+    /preview java s → matchea 'java' con sueldo
+    """
+    solo_sueldo = False
+    tokens = arg.split()
+    resto = []
+    for t in tokens:
+        tl = t.lower()
+        if tl in ("s", "sal", "sueldo"):
+            solo_sueldo = True
+        else:
+            resto.append(t)
+    if resto and resto[0].isdigit():
+        return resto[0], "score", solo_sueldo
+    if resto:
+        return " ".join(resto), "texto", solo_sueldo
+    return None, "", solo_sueldo
+
+
 def _preview_offer(cfg: Config, chat_id, arg: str = ""):
     """Comando /preview: oferta aleatoria renderizada como en el canal (DM).
 
     NO marca notified_channel_at — es solo previsualización.
     /preview → aleatoria con IA · /preview N → market_score >= N
     /preview <texto> → aleatoria que matchee título/empresa
+    /preview ... s → SOLO ofertas con sueldo declarado (ej: /preview 80 s)
     """
     from .channel import render_offer_post
     conn = database.connect(cfg)
     try:
         where = "active=1 AND ia_model != ''"
         params: list = []
-        if arg.isdigit():
+        filtro, modo, solo_sueldo = _parse_preview_arg(arg)
+        if modo == "score" and filtro is not None:
             where += " AND market_score >= ?"
-            params.append(int(arg))
-        elif arg.strip():
+            params.append(int(filtro))
+        elif modo == "texto":
             where += " AND (title LIKE ? OR company LIKE ?)"
-            like = f"%{arg.strip()}%"
+            like = f"%{filtro}%"
             params.extend([like, like])
+        if solo_sueldo:
+            where += " AND salary != ''"
         rows = conn.execute(
             f"SELECT * FROM ofertas WHERE {where} ORDER BY RANDOM() LIMIT 1",
             params).fetchall()
@@ -727,14 +764,15 @@ def _stats_text(cfg: Config) -> str:
         # sin IA + sin descripción suficiente → requieren scan (no enrich)
         sin_ficha = q("""SELECT COUNT(*) FROM ofertas WHERE active=1 AND ia_model=''
                          AND NOT (length(description)>200 OR description_source!='')""")
-        model = conn.execute("SELECT ia_model FROM ofertas WHERE ia_model != '' "
-                             "ORDER BY last_seen DESC LIMIT 1").fetchone()
+        # modelo ACTIVO (config) — no el de la última oferta por last_seen
+        # (last_seen refleja el search, no cuándo se procesó con IA — engañoso)
+        modelo_activo = cfg.ia.local_model if cfg.ia.local_enabled else cfg.ia.model
         lines = [
             "📊 <b>Estado del pool</b>",
             "",
             f"Activas: <code>{total}</code>",
             f"🧠 Procesadas por IA: <code>{ia}</code> ({ia * 100 // max(total, 1)}%)",
-            f"   Modelo: <code>{model[0] if model else '—'}</code>",
+            f"   Modelo: <code>{modelo_activo}</code>",
             f"   En cola IA: <code>{en_cola}</code> (procesables con /enrich)",
             f"   Sin ficha: <code>{sin_ficha}</code> (requieren /search para bajar descripción)",
             "",
@@ -756,7 +794,7 @@ def _handle_command(cfg: Config, message: dict, state: dict) -> None:
         return
     parts = text.split()
     cmd = parts[0].split("@")[0].lower()      # /score@MiBot → /score
-    arg = parts[1] if len(parts) > 1 else ""
+    arg = " ".join(parts[1:]).strip()          # TODOS los tokens: '/score 60 s' → '60 s'
     log.info("comando %s (chat %s)", cmd, chat_id)
     try:
         if cmd == "/search":
@@ -1021,10 +1059,33 @@ def _handle_command(cfg: Config, message: dict, state: dict) -> None:
                     conn = database.connect(cfg)
                     try:
                         if action in ("daily", "all"):
+                            # mensaje honesto: distinguir 0 filas de gate vs
+                            # N filas filtradas por no-dev (el "ya enviado hoy"
+                            # NUNCA aplica en DM — con chat_id envía siempre)
+                            from .channel import _GATE_SQL
+                            from .domain.roles import is_dev
+                            try:
+                                rows = [dict(r) for r in conn.execute(
+                                    _GATE_SQL, {"min_score": cfg.channel.digest_min_score,
+                                                "max_age": cfg.channel.max_age_days}).fetchall()]
+                                n_total = len(rows)
+                                n_dev = sum(1 for r in rows if is_dev(
+                                    r.get("rol_categoria"), r.get("title") or "", cfg,
+                                    r.get("description") or ""))
+                            except Exception:
+                                n_total = n_dev = -1
                             ok = publish_daily_digest(cfg, conn, api, chat_id=chat_id)
+                            if ok:
+                                msg = "📊 report-daily enviado"
+                            elif n_total == 0:
+                                msg = "📊 report-daily: 0 ofertas en el gate (score ≥ digest_min_score y ≤14d)"
+                            elif n_dev == 0:
+                                msg = (f"📊 report-daily: {n_total} ofertas en gate, "
+                                       "ninguna dev (todas filtradas por rol no-dev)")
+                            else:
+                                msg = f"📊 report-daily: {n_dev} dev de {n_total} gate, envío falló"
                             _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
-                                                         "text": "📊 report-daily enviado" if ok else
-                                                                 "📊 report-daily: sin candidatas o ya enviado hoy"})
+                                                         "text": msg})
                             _t.sleep(1)
                         if action in ("weekly-remote", "all"):
                             ok = publish_weekly_remote(cfg, conn, api, chat_id=chat_id)
@@ -1189,23 +1250,27 @@ def _handle_command(cfg: Config, message: dict, state: dict) -> None:
                 "disable_web_page_preview": True,
                 "reply_markup": _kb_json(kb)})
         elif cmd == "/score":
-            try:
-                th = int(arg)
-            except ValueError:
+            filtro, modo, solo_sueldo = _parse_preview_arg(arg)
+            if modo != "score" or filtro is None:
                 _tg_api(cfg, "sendMessage", {
                     "chat_id": chat_id, "parse_mode": "HTML",
-                    "text": "Uso: <code>/score N</code> — ej: <code>/score 60</code>"})
+                    "text": "Uso: <code>/score N</code> — ej: <code>/score 60</code> · "
+                            "<code>/score 60 s</code> solo con sueldo"})
                 return
-            th = max(0, min(100, th))
-            offers = _score_offers(cfg, th)
+            th = max(0, min(100, int(filtro)))
+            offers = _score_offers(cfg, th, solo_sueldo)
             if not offers:
                 _tg_api(cfg, "sendMessage", {
                     "chat_id": chat_id, "parse_mode": "HTML",
-                    "text": f"Nada con score ≥{th} en el pool activo."})
+                    "text": f"Nada con score ≥{th} en el pool activo."
+                            + (" con sueldo declarado." if solo_sueldo else "")})
                 return
-            prefix = f"sc{th}"
+            prefix = f"sc{th}" + ("s" if solo_sueldo else "")
+            label = f"🎯 <b>Ofertas ≥{th}</b>"
+            if solo_sueldo:
+                label += " 💰 con sueldo"
             rendered = render_page(offers, 0, cfg.telegram.digest_page_size, cfg,
-                                   label=f"🎯 <b>Ofertas ≥{th}</b>", cb_prefix=prefix)
+                                   label=label, cb_prefix=prefix)
             kb = [[{k: v for k, v in b.items() if k != "style"} for b in row]
                   for row in rendered["keyboard"]]
             _tg_api(cfg, "sendMessage", {

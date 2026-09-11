@@ -16,6 +16,7 @@ import requests
 
 from .config import Config
 from .domain.roles import _NONDEV_CATEGORIES  # noqa: F401 (compat: monkeypatch/import viejo)
+from .domain.roles import _DEV_CATEGORIES, _categorias_dev
 from .domain.techs import ABBR_BY_ALIAS as _TECH_ABBR  # noqa: F401 (compat)
 from .domain.techs import _extract_techs, _TECH_PATTERNS  # noqa: F401 (compat)
 from .domain.texto import _norm
@@ -549,6 +550,91 @@ def ia_queue_count(conn) -> int:
     ).fetchone()[0]
 
 
+def _clean_text(s, max_len=None, lower=False):
+    """Limpia texto salido de la IA: unescape HTML (el modelo 1-2 bit emite
+    entidades rotas: 'm&eacute;tricas', 'integraci&oacute') y normaliza
+    espacios. max_len: trunca con '…' si el texto REAL supera el largo.
+    Si tras unescape el texto queda vacío devuelve ''."""
+    if not s:
+        return ""
+    import html as _html
+    t = _html.unescape(str(s))
+    t = re.sub(r"\s+", " ", t).strip()
+    if lower:
+        t = t.lower()
+    if max_len and len(t) > max_len:
+        t = t[: max_len - 1] + "…"
+    return t
+
+
+# conceptos que NO son tecnologías (el modelo 1-2 bit los mete en techs)
+# — spec: techs = solo tecnologías escritas literalmente en la oferta.
+_TECH_NO_TECNOLOGIA = {
+    "ci", "ai", "apis", "api", "rest", "backend", "frontend", "front end",
+    "full stack", "fullstack", "devops", "microservicios", "microservice",
+    "microservices", "cloud", "cloud native", "observabilidad", "observability",
+    "ia generativa", "generative ai", "inteligencia artificial",
+    "developer experience", "devx", "versionamiento", "despliegue", "deploy",
+    "slo", "slos", "sli", "slis", "error budgets", "arquitectura",
+    "architecture", "scalability", "escalabilidad", "automatización",
+    "automatizacion", "automation", "pipelines", "pipeline", "agile", "scrum",
+    "kanban", "ci/cd", "cicd",
+}
+
+
+def _clean_tech(t: str) -> str:
+    """Limpia UNA tech: unescape HTML, quita conceptos no-tecnología y
+    puntuación rara al inicio/final. Devuelve '' si no es válida."""
+    raw = str(t)
+    # entidades partidas: 'integraci&oacute' (sin ;) — html.unescape a veces
+    # las procesa igual y deja texto incompleto. Toda & debe ser una entidad
+    # COMPLETA (&name; o &#nn;) — el match incluye el ';' opcional.
+    for m in re.finditer(r"&([a-zA-Z#0-9]+);?", raw):
+        if not m.group(0).endswith(";"):
+            return ""
+    t = _clean_text(raw)
+    t = t.strip("·.,;\"'()[]{}<>*#")
+    if not t:
+        return ""
+    if t.lower() in _TECH_NO_TECNOLOGIA:
+        return ""
+    # conceptos compuestos partidos: 'Inteligencia Artific' (truncado)
+    if any(t.lower().startswith(c) for c in ("inteligencia artific", "desarrollo de ", "experiencia en ")):
+        return ""
+    return t
+
+
+def _clean_rol(rc) -> str:
+    """Normaliza rol_categoria de la IA contra el enum canónico (domain.roles).
+
+    El modelo 1-2bit reproduce variantes sin tilde del prompt ('Ingenieria
+    no-software', 'Profesor/Formacion') que rompen el gate dev (is_dev no las
+    reconoce y _categorias_dev matchea 'software' dentro de 'no-software' →
+    falso positivo masivo). Mapeo de variantes conocidas + categoría dev más
+    cercana vía _categorias_dev; si no matchea nada → 'Otro'."""
+    rc = _clean_text(rc, 40)
+    if not rc:
+        return ""
+    # variantes sin tilde / grafías del modelo → enum canónico
+    _MAP = {
+        "ingenieria no-software": "Ingeniería no-software",
+        "profesor/formacion": "Profesor/Formación",
+        "ingeniería no-software": "Ingeniería no-software",
+        "profesor/formación": "Profesor/Formación",
+    }
+    key = rc.lower().strip()
+    if key in _MAP:
+        return _MAP[key]
+    if rc in _DEV_CATEGORIES or rc in _NONDEV_CATEGORIES:
+        return rc
+    # inventado (Gestión, Mantenimiento, SAP, Liderazgo...): categoría dev más
+    # cercana si matchea reglas; si no → Otro (no-dev por defecto)
+    cats = _categorias_dev(rc)
+    if cats & _DEV_CATEGORIES:
+        return sorted(cats & _DEV_CATEGORIES)[0]
+    return "Otro"
+
+
 def apply_ia_result(conn, cfg: Config, r: dict, parsed: dict | None,
                     ctx_version: str = "", model: str | None = None) -> bool:
     """Escribe los campos IA de UNA oferta en la DB. Solo el MAIN la llama
@@ -600,26 +686,29 @@ def apply_ia_result(conn, cfg: Config, r: dict, parsed: dict | None,
     for field in ("resumen", "fit_reason", "ingles"):
         if parsed.get(field):
             sets.append(f"ai_{field}=?")
-            params.append(str(parsed[field])[:300])
+            params.append(_clean_text(parsed[field], 300))
             ia_fields.append(field)
     if parsed.get("opinion"):
         sets.append("ai_opinion=?")
-        params.append(str(parsed["opinion"])[:300])
+        params.append(_clean_text(parsed["opinion"], 300))
         ia_fields.append("opinion")
     if parsed.get("rol_categoria"):
-        sets.append("rol_categoria=?")
-        params.append(str(parsed["rol_categoria"])[:40])
-        ia_fields.append("rol_categoria")
+        rol = _clean_rol(parsed["rol_categoria"])
+        if rol:
+            sets.append("rol_categoria=?")
+            params.append(rol)
+            ia_fields.append("rol_categoria")
     # techs de la IA: SIEMPRE se regeneran (decisión usuario 2026-09-05) — si la
     # IA detecta [] limpia la columna, no preserva lo existente (una run anterior
     # pudo detectar techs que ya no aplican o alucinadas).
     if "techs" in parsed and isinstance(parsed["techs"], list):
         techs_limpio = []
         for t in parsed["techs"][:8]:
-            t = str(t).strip()
+            t = _clean_tech(t)
             if not t:
                 continue
-            techs_limpio.append(_TECH_ABBR.get(_norm(t), t[:20]))
+            t = _TECH_ABBR.get(_norm(t), t[:20])
+            techs_limpio.append(t)
         sets.append("techs=?")
         params.append(";".join(techs_limpio))
         ia_fields.append("techs")
@@ -627,7 +716,7 @@ def apply_ia_result(conn, cfg: Config, r: dict, parsed: dict | None,
     # — si la IA clasifica el rol como no-software, NO puede haber techs (contradicción).
     # En SQLite gana la ÚLTIMA asignación del SET, así que este append pisa la lista
     # alucinada. No agrega techs a ia_fields (la IA no escribió un valor válido).
-    rol_ia = str(parsed.get("rol_categoria") or "").strip()
+    rol_ia = _clean_rol(parsed.get("rol_categoria"))
     if rol_ia in _NONDEV_CATEGORIES:
         sets.append("techs=?")
         params.append("")
@@ -644,9 +733,11 @@ def apply_ia_result(conn, cfg: Config, r: dict, parsed: dict | None,
             ia_fields.append("idiomas")
     for field in ("red_flags", "green_flags", "benefits"):
         if parsed.get(field):
-            sets.append(f"ai_{field}=?")
-            params.append(json.dumps(parsed[field], ensure_ascii=False))
-            ia_fields.append(field)
+            limpio = [_clean_text(x, 120) for x in parsed[field] if _clean_text(x, 120)]
+            if limpio:
+                sets.append(f"ai_{field}=?")
+                params.append(json.dumps(limpio, ensure_ascii=False))
+                ia_fields.append(field)
     if not sets:
         return False
     sets.append("ia_model=?"); params.append(model or cfg.ia.model)

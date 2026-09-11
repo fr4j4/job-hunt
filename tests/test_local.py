@@ -453,3 +453,54 @@ def test_local_cmd_run_dispatch(monkeypatch):
                         lambda *a, **k: (cloud_calls.append(1) or (None, "other")))
     d, err = fn(cfg, {"title": "Dev"}, "perfil", "mercado")
     assert d is not None and local_calls == [1] and cloud_calls == []
+
+
+def test_clean_text_unescape_html():
+    """_clean_text: unescape entidades HTML rotas del modelo 1-2bit."""
+    assert en._clean_text("m&eacute;tricas") == "métricas"
+    assert en._clean_text("automatizaci&oacute;n") == "automatización"
+    assert en._clean_text("Ingenier&iacute;a Inform&aacute;tica") == "Ingeniería Informática"
+    assert en._clean_text(None) == ""
+    assert en._clean_text("  Java  ") == "Java"
+    # truncado con … sobre el texto REAL (post-unescape)
+    t = en._clean_text("a" * 25, 20)
+    assert len(t) == 20 and t.endswith("…")
+    en._clean_text("Sueldo sobre la mediana del mercado; empresa reconocida.", 300)
+
+
+def test_clean_tech_filtra_conceptos():
+    """_clean_tech: elimina conceptos no-tecnología y entidades partidas."""
+    assert en._clean_tech("Java") == "Java"
+    assert en._clean_tech("  Py  ") == "Py"
+    assert en._clean_tech("CI") == ""
+    assert en._clean_tech("AI") == ""
+    assert en._clean_tech("Backend") == ""
+    assert en._clean_tech("Full Stack") == ""
+    assert en._clean_tech("Microservicios") == ""
+    assert en._clean_tech("integraci&oacute") == ""  # entidad partida sin ;
+    assert en._clean_tech("m&eacute;tricas") == "métricas"
+    assert en._clean_tech("Inteligencia Artific") == ""  # truncado a medias
+    assert en._clean_tech("REST") == ""
+    assert en._clean_tech("devops") == ""  # case-insensitive
+
+
+def test_clean_rol_normaliza_variantes():
+    """_clean_rol: variantes sin tilde del modelo → enum canónico."""
+    assert en._clean_rol("Ingenieria no-software") == "Ingeniería no-software"
+    assert en._clean_rol("Profesor/Formacion") == "Profesor/Formación"
+    assert en._clean_rol("Ingeniería no-software") == "Ingeniería no-software"
+    assert en._clean_rol("Backend") == "Backend"
+    assert en._clean_rol("Data") == "Data"
+    assert en._clean_rol("") == ""
+
+
+def test_clean_rol_inventados_a_dev_o_otro():
+    """_clean_rol: inventados → categoría dev más cercana o 'Otro'."""
+    assert en._clean_rol("Gestión") == "Otro"
+    assert en._clean_rol("Mantenimiento") == "Otro"
+    assert en._clean_rol("SAP") == "Otro"
+    assert en._clean_rol("Liderazgo") == "Otro"
+    # con señal dev en el nombre → categoría dev
+    assert en._clean_rol("Desarrollador Salesforce") == "Software"
+    assert en._clean_rol("Backend Developer") == "Backend"
+    assert en._clean_rol("DevOps") == "DevOps/Cloud"
