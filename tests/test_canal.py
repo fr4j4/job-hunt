@@ -393,3 +393,29 @@ def test_callback_sc_prefix_con_sufijo_s():
     assert pat.fullmatch("sc60s:page:2")
     assert pat.fullmatch("sc60:page:2")
     assert not pat.fullmatch("sc60x:page:2")
+
+
+def test_parse_filters_q_y_score():
+    """_parse_filters: búsqueda entre comillas + score min/max."""
+    from jobhunt.bot import _parse_filters
+    f = _parse_filters('q"python aws"')
+    assert f["q"] == "python aws"
+    f = _parse_filters('remoto Q"Kubernetes" score80')
+    assert f["q"] == "kubernetes" and f["min_score"] == 80 and "remoto" in f["modality"]
+    f = _parse_filters("score<=60")
+    assert f["max_score"] == 60 and f["min_score"] is None
+    f = _parse_filters("sc>=85 salary")
+    assert f["min_score"] == 85 and f["has_salary"]
+    # sin q ni score: no rompe
+    f = _parse_filters("remoto stgo")
+    assert f["q"] == "" and f["min_score"] is None and "remoto" in f["modality"]
+
+
+def test_enc_dec_filters_q_score_roundtrip():
+    """Encode/decode de callback_data preserva q + score (paginación)."""
+    from jobhunt.bot import _enc_filters, _dec_filters, _parse_filters
+    f = _parse_filters('q"kubernetes" score>=75 remote')
+    enc = _enc_filters(f)
+    assert len("f" + enc) <= 64                      # límite callback_data Telegram
+    d = _dec_filters(enc)
+    assert d["q"] == f["q"] and d["min_score"] == 75 and "remoto" in d["modality"]
