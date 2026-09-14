@@ -641,7 +641,7 @@ def _help_text() -> str:
         "/jobs [filtros] — filtra el pool (combinables):",
         "    remote · hybrid · onsite · salary (con sueldo publicado) ·",
         "    q\"texto\" — busca la frase en título y descripción (ej: q\"kubernetes\") ·",
-        "    score80 / score>=80 — score mínimo · score<=60 — score máximo ·",
+        "    score80 / score>=80 — score mínimo · score≤60 — score máximo ·",
         "    salary2.5 (≥$2.5M) · 2.5 / 500k / 2.500.000 ·",
         "    sinen (sin idioma excluyente) · en (pide inglés)",
         "    ubicación: stgo, temuco, valpo, conce, araucania o texto libre",

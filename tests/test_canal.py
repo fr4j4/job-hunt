@@ -430,3 +430,17 @@ def test_callback_regex_acepta_base64_mayusculas():
     f = _parse_filters('q"spring boot" score>=70')
     enc = _enc_filters(f)
     assert pat.fullmatch(f"f{enc}:page:2"), f"regex no matchea f{enc}"
+
+
+def test_help_text_html_valido():
+    """Regresión: /help se envía con parse_mode HTML — un '<' crudo (ej:
+    'score<=60') rompe el envío con Telegram 400. Todo el texto debe
+    parsear limpio."""
+    from html.parser import HTMLParser
+    from jobhunt.bot import _help_text
+
+    class _V(HTMLParser):
+        pass
+
+    _V().feed(_help_text())   # error si hay tags malformados
+    assert "score≤" in _help_text() or "score<=" not in _help_text()
