@@ -44,12 +44,15 @@ def _score_row(j: dict) -> int:
 
 
 def render_page(offers: list[dict], page: int, page_size: int, cfg: Config,
-                label: str | None = None, cb_prefix: str = "jobs") -> dict:
+                label: str | None = None, cb_prefix: str = "jobs",
+                filtros_txt: str = "") -> dict:
     """Renderiza página N: texto con títulos numerados + botones compactos (≤64 chars).
 
     La fila N del texto = botón N. El pago va después del porcentaje.
     label = encabezado alternativo (ej: "🎯 Ofertas ≥60"); cb_prefix = namespace
     de callback_data para la navegación (jobs = ancla, sc<umbral> = /score).
+    filtros_txt: descripción de filtros activos — se muestra SIEMPRE (header +
+    cada página navegada) para que se sepa qué búsqueda está paginando.
     """
     total = len(offers)
     pages = max(1, (total + page_size - 1) // page_size)
@@ -62,6 +65,8 @@ def render_page(offers: list[dict], page: int, page_size: int, cfg: Config,
         f"{head} · <i>{total} activas</i> · {stamp}",
         f"Página <b>{page + 1}/{pages}</b>",
     ]
+    if filtros_txt:
+        lines.insert(2, f"🔍 <b>Filtros:</b> {esc(filtros_txt)}")
     if chunk:
         best = chunk[0]
         lines += [
@@ -244,7 +249,9 @@ def handle_callback(cfg: Config, query: dict, state: dict) -> None:
         elif prefix.startswith("f"):
             f = _dec_filters(prefix[1:])
             rendered = render_page(_filter_offers(cfg, f), page, cfg.telegram.digest_page_size, cfg,
-                                   label=f"🔎 <b>Ofertas — {_describe_filters(f)}</b>", cb_prefix=prefix)
+                                   label=f"🔎 <b>Ofertas</b>",
+                                   filtros_txt=_describe_filters(f),
+                                   cb_prefix=prefix)
         else:
             sc = prefix[2:]  # ej: "60s" → th=60, solo_sueldo=True
             solo_s = sc.endswith("s")
@@ -1292,7 +1299,8 @@ def _handle_command(cfg: Config, message: dict, state: dict) -> None:
                 return
             prefix = "f" + _enc_filters(f)
             rendered = render_page(offers, 0, cfg.telegram.digest_page_size, cfg,
-                                   label=f"🔎 <b>Ofertas — {_describe_filters(f)}</b>",
+                                   label=f"🔎 <b>Ofertas</b>",
+                                   filtros_txt=_describe_filters(f),
                                    cb_prefix=prefix)
             kb = [[{k: v for k, v in b.items() if k != "style"} for b in row]
                   for row in rendered["keyboard"]]
