@@ -300,11 +300,21 @@ def get_salary_pool(conn) -> list[int]:
 
 def _fetch_ficha(r: dict) -> dict:
     """Solo HTTP — NUNCA toca la DB (spec-enrich-lotes §3.1.2, patrón P0-3).
-    Retorna info (con _access) o {"_access": "error"}."""
+    Retorna info (con _access) o {"_access": "error"}.
+    LinkedIn: la ficha normal está auth-walled (fetch_page → blocked); se usa el
+    endpoint guest de detalle (sources.linkedin.fetch_description), que responde
+    200 con la desc completa (verificado 30-09-2026)."""
     try:
-        if "airavirtual.com" in (r.get("url") or ""):
-            return _extract_aira_spa(r["url"])
-        return extract_structured(r["url"])
+        url = r.get("url") or ""
+        if "airavirtual.com" in url:
+            return _extract_aira_spa(url)
+        if "linkedin.com/jobs/view/" in url:
+            from .sources.linkedin import fetch_description
+            desc = fetch_description(url)
+            if desc:
+                return {"_access": "ok", "description": desc, "description_source": "linkedin-guest"}
+            return {"_access": "blocked", "error": "linkedin guest sin desc"}
+        return extract_structured(url)
     except Exception as e:
         log.warning("enrich falló para %s (%s): %s", r["group_id"], (r.get("title") or "")[:40], e)
         return {"_access": "error"}

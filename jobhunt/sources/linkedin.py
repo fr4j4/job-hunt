@@ -39,7 +39,9 @@ def parse_cards(html, source):
                      "source": source})
     return jobs
 
-def fetch_jobs(queries, found_by_prefix="", on_query=None):
+def fetch_jobs(queries, found_by_prefix="", on_query=None, max_pages=3):
+    """LinkedIn guest API. Pagina hasta max_pages (start=25*i — verificado: sin
+    solapamiento entre páginas, ~10 ofertas nuevas por página)."""
     out = []
     for q in queries:
         if on_query:
@@ -47,11 +49,41 @@ def fetch_jobs(queries, found_by_prefix="", on_query=None):
                 on_query(q, 1)
             except Exception:
                 pass
-        url = ("https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search?"
-               + urllib.parse.urlencode({"keywords": q, "location": "Chile", "start": 0, "f_TPR": "r604800"}))
         fb = f"{found_by_prefix}{q}"
-        for j in parse_cards(fetch(url), f"linkedin:{q}"):
-            j["found_by"] = fb
-            out.append(j)
+        seen = set()
+        for pag in range(max_pages):
+            url = ("https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search?"
+                   + urllib.parse.urlencode({"keywords": q, "location": "Chile",
+                                             "start": pag * 25, "f_TPR": "r604800"}))
+            cards = parse_cards(fetch(url), f"linkedin:{q}")
+            nuevos = [j for j in cards if j["url"] and j["url"] not in seen]
+            if not nuevos:
+                break
+            for j in nuevos:
+                seen.add(j["url"])
+                j["found_by"] = fb
+                out.append(j)
+            if len(cards) < 10:      # última página
+                break
+            time.sleep(2)
         time.sleep(2)
     return out
+
+
+def fetch_description(url: str) -> str:
+    """Descripción completa de una oferta LinkedIn vía endpoint guest de detalle.
+
+    La ficha normal (/jobs/view/...) está auth-walled para requests anónimos
+    (fetch_page → blocked), pero jobs/api/jobPosting/<id> responde 200 con el
+    HTML de la ficha guest, que trae la desc en div.show-more-less-html__markup.
+    """
+    m = re.search(r"-(\d{8,})(?:\?|$)", url) or re.search(r"(\d{8,})", url)
+    if not m:
+        return ""
+    html = fetch(f"https://www.linkedin.com/jobs-guest/jobs/api/jobPosting/{m.group(1)}")
+    if not html:
+        return ""
+    md = re.search(r'<div class="show-more-less-html__markup[^"]*"[^>]*>(.*?)</div>', html, re.S)
+    if not md:
+        return ""
+    return clean(md.group(1))[:4000]
