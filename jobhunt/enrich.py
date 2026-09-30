@@ -310,9 +310,22 @@ def _fetch_ficha(r: dict) -> dict:
             return _extract_aira_spa(url)
         if "linkedin.com/jobs/view/" in url:
             from .sources.linkedin import fetch_description
-            desc = fetch_description(url)
+            meta = fetch_description(url)
+            desc = meta.get("description") or ""
             if desc:
-                return {"_access": "ok", "description": desc, "description_source": "linkedin-guest"}
+                info = {"_access": "ok", "description": desc,
+                        "description_source": "linkedin-guest",
+                        "employment_type": meta.get("employment_type", ""),
+                        "industry": meta.get("industry", "")}
+                if meta.get("seniority_oficial"):
+                    # mapeo a los niveles que usa seniority_real/IA
+                    sen = meta["seniority_oficial"].lower()
+                    if "intern" in sen or "trainee" in sen:
+                        info["years_official"] = 0
+                    info["seniority_oficial"] = meta["seniority_oficial"]
+                if meta.get("applicants_hint"):
+                    info["applicants_hint"] = meta["applicants_hint"]
+                return info
             return {"_access": "blocked", "error": "linkedin guest sin desc"}
         return extract_structured(url)
     except Exception as e:
@@ -389,7 +402,10 @@ def _aplicar_ficha(conn, r: dict, info: dict, pool: list[int], cfg: Config | Non
         employment_type=COALESCE(NULLIF(employment_type,''), ?),
         years_official=COALESCE(years_official, ?),
         remote_official=COALESCE(remote_official, ?),
-        description_source=?
+        description_source=?,
+        industry=COALESCE(NULLIF(industry,''), ?),
+        applicants_hint=COALESCE(NULLIF(applicants_hint,''), ?),
+        seniority_oficial=COALESCE(NULLIF(seniority_oficial,''), ?)
         WHERE group_id=?""",
         (desc, info.get("company") or "", info.get("modality_badge") or "", arb_salary,
          arb_source, arb_status, arb_note,
@@ -397,6 +413,9 @@ def _aplicar_ficha(conn, r: dict, info: dict, pool: list[int], cfg: Config | Non
          info.get("valid_through") or "", info.get("employment_type") or "",
          info.get("years_official"), info.get("remote_official"),
          "jsonld" if info.get("description") else "section",
+         info.get("industry") or "",
+         info.get("applicants_hint") or "",
+         info.get("seniority_oficial") or "",
          r["group_id"]))
     conn.commit()
     return "ok"

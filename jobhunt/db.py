@@ -93,6 +93,9 @@ def init_db(conn: sqlite3.Connection) -> None:
         ("ctx_version", "ALTER TABLE ofertas ADD COLUMN ctx_version TEXT DEFAULT ''"),
         ("fetch_fails", "ALTER TABLE ofertas ADD COLUMN fetch_fails INTEGER DEFAULT 0"),
         ("last_fetch_ok", "ALTER TABLE ofertas ADD COLUMN last_fetch_ok TEXT DEFAULT ''"),
+        # metadatos v2: señal de demanda (applicants), seniority oficial del aviso
+        ("applicants_hint", "ALTER TABLE ofertas ADD COLUMN applicants_hint TEXT DEFAULT ''"),
+        ("seniority_oficial", "ALTER TABLE ofertas ADD COLUMN seniority_oficial TEXT DEFAULT ''"),
     ]:
         if col not in cols:
             conn.execute(ddl)

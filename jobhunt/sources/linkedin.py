@@ -70,20 +70,48 @@ def fetch_jobs(queries, found_by_prefix="", on_query=None, max_pages=3):
     return out
 
 
-def fetch_description(url: str) -> str:
-    """Descripción completa de una oferta LinkedIn vía endpoint guest de detalle.
+def fetch_description(url: str) -> dict:
+    """Ficha guest de LinkedIn: descripción + metadatos estructurados.
 
     La ficha normal (/jobs/view/...) está auth-walled para requests anónimos
     (fetch_page → blocked), pero jobs/api/jobPosting/<id> responde 200 con el
-    HTML de la ficha guest, que trae la desc en div.show-more-less-html__markup.
+    HTML de la ficha guest. De ahí se extraen, además de la descripción
+    (div.show-more-less-html__markup), los criterios oficiales que LinkedIn
+    muestra en 'Requisitos' (verificado 30-09-2026, offsets regex testeados):
+    - seniority_oficial  (h3 'Seniority level')
+    - employment_type    (h3 'Employment type')
+    - industry           (h3 'Industries')
+    - applicants_hint    ('Be among the first 25 applicants' / 'X applicants')
     """
     m = re.search(r"-(\d{8,})(?:\?|$)", url) or re.search(r"(\d{8,})", url)
     if not m:
-        return ""
+        return {}
     html = fetch(f"https://www.linkedin.com/jobs-guest/jobs/api/jobPosting/{m.group(1)}")
     if not html:
-        return ""
+        return {}
+    out: dict = {}
     md = re.search(r'<div class="show-more-less-html__markup[^"]*"[^>]*>(.*?)</div>', html, re.S)
-    if not md:
-        return ""
-    return clean(md.group(1))[:4000]
+    if md:
+        out["description"] = clean(md.group(1))[:4000]
+
+    def _criteria(label: str) -> str:
+        mc = re.search(label + r"\s*</h3>\s*<span[^>]*>\s*([^<]+)", html)
+        return mc.group(1).strip() if mc else ""
+
+    seniority = _criteria("Seniority level")
+    if seniority and seniority.lower() != "not applicable":
+        out["seniority_oficial"] = seniority
+    emp = _criteria("Employment type")
+    if emp:
+        out["employment_type"] = emp
+    ind = _criteria("Industries")
+    if ind:
+        out["industry"] = ind
+    ma = re.search(r"Be among the first (\d+) applicants", html)
+    if ma:
+        out["applicants_hint"] = f"first {ma.group(1)}"
+    else:
+        ma = re.search(r"(\d[\d.,]*)\s*applicants", html)
+        if ma:
+            out["applicants_hint"] = ma.group(1).replace(".", "").replace(",", "")
+    return out
