@@ -1,5 +1,6 @@
 """LinkedIn guest API (sin login)."""
 import re, time, urllib.request, urllib.parse
+from datetime import datetime, timedelta, timezone
 
 UA = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120 Safari/537.36"}
 
@@ -39,10 +40,21 @@ def parse_cards(html, source):
                      "source": source})
     return jobs
 
-def fetch_jobs(queries, found_by_prefix="", on_query=None, max_pages=3):
-    """LinkedIn guest API. Pagina hasta max_pages (start=25*i — verificado: sin
-    solapamiento entre páginas, ~10 ofertas nuevas por página)."""
+def fetch_jobs(queries, found_by_prefix="", on_query=None, max_pages=8,
+               max_age_days=7):
+    """LinkedIn guest API con ventana ancha + corte por antigüedad (v3).
+
+    Estrategia medida en vivo (30-09-2026, /tmp/test_li_orden*.py):
+    - f_TPR=r2592000 (30d) para que LinkedIn no corte a 7d server-side;
+      el corte fino lo hace acá (max_age_days).
+    - Las páginas NO vienen ordenadas por fecha (orden por relevancia): una
+      misma página puede mezclar ofertas ≤7d con >7d. Por eso el corte es por
+      PÁGINA (≥60% viejas → la cola ya no vale la pena), no por oferta.
+    - start=0 puede venir vacío por rate-limit blando → 1 reintento.
+    Sin solapamiento entre páginas (verificado: 0 duplicados en 7 páginas).
+    """
     out = []
+    corte = (datetime.now(timezone.utc) - timedelta(days=max_age_days)).date()
     for q in queries:
         if on_query:
             try:
@@ -54,15 +66,28 @@ def fetch_jobs(queries, found_by_prefix="", on_query=None, max_pages=3):
         for pag in range(max_pages):
             url = ("https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search?"
                    + urllib.parse.urlencode({"keywords": q, "location": "Chile",
-                                             "start": pag * 25, "f_TPR": "r604800"}))
+                                             "start": pag * 25, "f_TPR": "r2592000"}))
             cards = parse_cards(fetch(url), f"linkedin:{q}")
+            if not cards and pag == 0:
+                # rate-limit blando: la primera puede venir vacía; 1 reintento
+                time.sleep(4)
+                cards = parse_cards(fetch(url), f"linkedin:{q}")
             nuevos = [j for j in cards if j["url"] and j["url"] not in seen]
             if not nuevos:
                 break
+            viejas = 0
             for j in nuevos:
                 seen.add(j["url"])
                 j["found_by"] = fb
+                try:
+                    if j.get("date") and datetime.fromisoformat(j["date"]).date() <= corte:
+                        viejas += 1
+                except (ValueError, TypeError):
+                    pass
                 out.append(j)
+            # corte por página: si la mayoría ya es vieja, la cola no aporta
+            if nuevos and viejas / len(nuevos) >= 0.6:
+                break
             if len(cards) < 10:      # última página
                 break
             time.sleep(2)
