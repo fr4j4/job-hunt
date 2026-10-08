@@ -18,6 +18,7 @@ from datetime import datetime, timedelta, timezone
 import requests
 
 from ..logging_setup import get_logger
+from . import errores
 
 log = get_logger(__name__)
 
@@ -80,6 +81,10 @@ def _parse_offer(a: dict, feed: str) -> dict | None:
         "_desc": _clean(a.get("description") or a.get("snippet") or "")[:2000],
         "description_source": "aira-feed",
         "_aira_area": _clean(a.get("area") or a.get("area_text") or ""),
+        # metadatos estructurados del feed (v2): contrato/jornada oficiales
+        "employment_type": " ".join(
+            x for x in [_clean(a.get("hire_mode") or ""), _clean(a.get("contract_type") or "")] if x
+        ).replace("FULL_TIME", "Full-time").replace("PART_TIME", "Part-time")[:60],
     }
 
 
@@ -95,10 +100,12 @@ def jobs(feeds: list[str], found_by_prefix: str = "", on_feed=None) -> list[dict
             r = s.get(f"https://gcs-storage.airavirtual.com/public/feeds/{fname}.json", timeout=20)
             if r.status_code != 200:
                 log.warning("aira %s: HTTP %s", fname, r.status_code)
+                errores.registrar("aira")
                 continue
             d = r.json()
         except Exception as e:
             log.warning("aira %s falló: %s", fname, e)
+            errores.registrar("aira")
             continue
         offers = _extract_offers(d)
         if on_feed:

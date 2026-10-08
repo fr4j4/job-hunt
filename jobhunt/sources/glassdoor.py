@@ -14,6 +14,7 @@ from pathlib import Path
 import tls_client
 
 from ..logging_setup import get_logger
+from . import errores
 
 log = get_logger(__name__)
 
@@ -25,16 +26,20 @@ _LOCATION_ID_CHILE = 49  # COUNTRY (ver SCRAPING_CHILE.md §4.3)
 
 
 def _session():
-    """Nueva sesión con cookies CF + token CSRF. (session, token)"""
+    """Sesión con cookies CF + token CSRF. (session, token)
+
+    v2: job-listing/ empezó a responder 403 CF (challenge), pero el token CSRF
+    del /graph ya no se extrae de ahí — el endpoint acepta el token literal "1"
+    (verificado en vivo: HTTP 200, 20 listings) mientras las cookies del warm-up
+    (gdsid/gdId/asst/__cf_bm) estén frescas. Solo el warm-up a index.htm.
+    """
     s = tls_client.Session(client_identifier="chrome_131", random_tls_extension_order=True)
     s.headers.update(_HEADERS)
     # warm-up cookies (obligatorio: gdsid, gdId, asst, __cf_bm)
-    s.get("https://www.glassdoor.com/index.htm", timeout_seconds=25)
-    page = s.get("https://www.glassdoor.com/job-listing/", timeout_seconds=25)
-    toks = re.findall(r'"token":\s*"([^"]+)"', page.text)
-    if not toks:
-        raise RuntimeError("glassdoor: challenge Cloudflare o sin token CSRF")
-    return s, toks[0]
+    r = s.get("https://www.glassdoor.com/index.htm", timeout_seconds=25)
+    if r.status_code != 200:
+        raise RuntimeError(f"glassdoor: warm-up index.htm HTTP {r.status_code}")
+    return s, "1"
 
 
 def jobs(queries: list[str], found_by_prefix: str = "", max_pages: int = 2, on_query=None) -> list[dict]:
@@ -45,7 +50,8 @@ def jobs(queries: list[str], found_by_prefix: str = "", max_pages: int = 2, on_q
         s, token = _session()
     except Exception as e:
         log.warning("glassdoor sesión falló: %s", e)
-        return out
+        errores.registrar("glassdoor")
+        return []
 
     for q in queries:
         for pag in range(1, max_pages + 1):
@@ -100,6 +106,7 @@ def jobs(queries: list[str], found_by_prefix: str = "", max_pages: int = 2, on_q
                     }
             except Exception as e:
                 log.warning("glassdoor query '%s' p%s falló: %s", q, pag, e)
+                errores.registrar("glassdoor")
                 break
             time.sleep(4)
     return list(out.values())

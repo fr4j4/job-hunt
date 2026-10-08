@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+import base64
 import re
 import sqlite3
 import threading
@@ -43,12 +44,15 @@ def _score_row(j: dict) -> int:
 
 
 def render_page(offers: list[dict], page: int, page_size: int, cfg: Config,
-                label: str | None = None, cb_prefix: str = "jobs") -> dict:
+                label: str | None = None, cb_prefix: str = "jobs",
+                filtros_txt: str = "") -> dict:
     """Renderiza página N: texto con títulos numerados + botones compactos (≤64 chars).
 
     La fila N del texto = botón N. El pago va después del porcentaje.
     label = encabezado alternativo (ej: "🎯 Ofertas ≥60"); cb_prefix = namespace
     de callback_data para la navegación (jobs = ancla, sc<umbral> = /score).
+    filtros_txt: descripción de filtros activos — se muestra SIEMPRE (header +
+    cada página navegada) para que se sepa qué búsqueda está paginando.
     """
     total = len(offers)
     pages = max(1, (total + page_size - 1) // page_size)
@@ -61,6 +65,8 @@ def render_page(offers: list[dict], page: int, page_size: int, cfg: Config,
         f"{head} · <i>{total} activas</i> · {stamp}",
         f"Página <b>{page + 1}/{pages}</b>",
     ]
+    if filtros_txt:
+        lines.insert(2, f"🔍 <b>Filtros:</b> {esc(filtros_txt)}")
     if chunk:
         best = chunk[0]
         lines += [
@@ -230,7 +236,7 @@ def handle_callback(cfg: Config, query: dict, state: dict) -> None:
         if data == "noop":
             _tg_api(cfg, "answerCallbackQuery", {"callback_query_id": qid})
             return
-        m = re.fullmatch(r"(jobs|latest|sc\d+s?|f[a-z0-9.\-]*):page:(\d+)", data)
+        m = re.fullmatch(r"(jobs|latest|sc\d+s?|f[a-zA-Z0-9._\-]*):page:(\d+)", data)
         if not m:
             _tg_api(cfg, "answerCallbackQuery", {"callback_query_id": qid})
             return
@@ -243,7 +249,9 @@ def handle_callback(cfg: Config, query: dict, state: dict) -> None:
         elif prefix.startswith("f"):
             f = _dec_filters(prefix[1:])
             rendered = render_page(_filter_offers(cfg, f), page, cfg.telegram.digest_page_size, cfg,
-                                   label=f"🔎 <b>Ofertas — {_describe_filters(f)}</b>", cb_prefix=prefix)
+                                   label=f"🔎 <b>Ofertas</b>",
+                                   filtros_txt=_describe_filters(f),
+                                   cb_prefix=prefix)
         else:
             sc = prefix[2:]  # ej: "60s" → th=60, solo_sueldo=True
             solo_s = sc.endswith("s")
@@ -310,10 +318,12 @@ def _salary_clp(cfg: Config, j: dict) -> float | None:
     return val
 
 
-def _parse_filters(tokens: list[str]) -> dict:
-    """'remoto sueldo2.5 stgo' → {'modality': {...}, 'min_salary': 2.5e6, 'has_salary': False, 'loc': ['santiago']}"""
+def _parse_filters(arg: str) -> dict:
+    """'remoto sueldo2.5 stgo q\"python aws\" score80' → filtros.
+    q\"...\" busca la frase (case-insensitive) en título+descripción;
+    score80 / score>=80 / score<=80 filtran por score mínimo/máximo."""
     f: dict = {"modality": set(), "min_salary": None, "has_salary": False, "loc": [],
-               "no_excluyente": False, "lang": ""}
+               "no_excluyente": False, "lang": "", "q": "", "min_score": None, "max_score": None}
     _MOD = {"remote": "remoto", "remoto": "remoto", "remota": "remoto",
             "hybrid": "híbrido", "hibrido": "híbrido", "hibrida": "híbrido",
             "onsite": "presencial", "presencial": "presencial"}
@@ -323,7 +333,12 @@ def _parse_filters(tokens: list[str]) -> dict:
             "araucania": "araucania", "temuco": "temuco"}
     _LANG = {"en": "inglés", "ingles": "inglés", "english": "inglés",
              "aleman": "alemán", "frances": "francés", "portugues": "portugués"}
-    for t in tokens:
+    # búsqueda entre comillas: q"texto a buscar" (q o Q) — extraer ANTES del split
+    m_q = re.search(r'[qQ]"([^"]+)"', arg)
+    if m_q:
+        f["q"] = m_q.group(1).strip().lower()
+        arg = arg.replace(m_q.group(0), " ")
+    for t in arg.split():
         tl = _norm_txt(t).replace(":", "")
         if tl in _MOD:
             f["modality"].add(_MOD[tl])
@@ -333,6 +348,15 @@ def _parse_filters(tokens: list[str]) -> dict:
             continue
         if tl in _LANG:
             f["lang"] = _LANG[tl]
+            continue
+        # score: score80 / score>=80 / score<=80 / sc80 / sc<80
+        m_sc = re.fullmatch(r"(?:score|sc)(>=|<=|>|<)?(\d{1,3})", tl)
+        if m_sc:
+            v = max(0, min(100, int(m_sc.group(2))))
+            if m_sc.group(1) in ("<=", "<"):
+                f["max_score"] = v
+            else:                      # sin operador o >= / > → mínimo
+                f["min_score"] = v
             continue
         m_num = re.fullmatch(r"(?:salary|sueldo|min|pay|pago|>|>=)?([\d.,]+)\s*([mk]?)", tl)
         if m_num and any(ch.isdigit() for ch in tl) and tl not in ("min",):
@@ -363,6 +387,12 @@ def _parse_filters(tokens: list[str]) -> dict:
 
 def _describe_filters(f: dict) -> str:
     parts = []
+    if f["q"]:
+        parts.append(f'buscar "{f["q"]}"')
+    if f["min_score"] is not None:
+        parts.append(f"score≥{f['min_score']}")
+    if f["max_score"] is not None:
+        parts.append(f"score≤{f['max_score']}")
     if f["modality"]:
         parts.append("/".join(sorted(f["modality"])))
     if f["has_salary"]:
@@ -393,6 +423,14 @@ def _filter_offers(cfg: Config, f: dict) -> list[dict]:
         if f["modality"] and not (
                 mod in f["modality"]
                 or ("remoto" in f["modality"] and j.get("remote_official") == 1)):
+            continue
+        if f["q"]:
+            hay = f"{(j.get('title') or '')} {(j.get('description') or '')}".lower()
+            if f["q"] not in hay:
+                continue
+        if f["min_score"] is not None and (j.get("score") or 0) < f["min_score"]:
+            continue
+        if f["max_score"] is not None and (j.get("score") or 0) > f["max_score"]:
             continue
         if f["has_salary"] and not (j.get("salary") or "").strip():
             continue
@@ -439,8 +477,16 @@ def _score_offers(cfg: Config, threshold: int, solo_sueldo: bool = False) -> lis
 
 
 def _enc_filters(f: dict) -> str:
-    """Serializa filtros para callback_data: {'remoto', ≥2.5M, santiago} → 'r-s2.5-lstgo'."""
+    """Serializa filtros para callback_data (máx 64 bytes): texto → base64 't…',
+    score → 'n80' (min) / 'x80' (max)."""
     parts = []
+    if f["q"]:
+        b64 = base64.urlsafe_b64encode(f["q"].encode()).decode().rstrip("=")
+        parts.append("t" + b64[:22])          # 22 b64 chars ≈ 16 chars de texto
+    if f["min_score"] is not None:
+        parts.append(f"n{f['min_score']}")
+    if f["max_score"] is not None:
+        parts.append(f"x{f['max_score']}")
     for m in sorted(f["modality"]):
         parts.append({"remoto": "r", "híbrido": "h", "presencial": "p"}.get(m, ""))
     if f["min_salary"] is not None:
@@ -459,11 +505,21 @@ def _enc_filters(f: dict) -> str:
 def _dec_filters(enc: str) -> dict:
     """Inverso de _enc_filters (fallback si el daemon se reinició entre páginas)."""
     f: dict = {"modality": set(), "min_salary": None, "has_salary": False, "loc": [],
-               "no_excluyente": False, "lang": ""}
+               "no_excluyente": False, "lang": "", "q": "", "min_score": None, "max_score": None}
     for p in (enc or "").split("-"):
         if not p:
             continue
-        if p in ("r", "h", "p"):
+        if p.startswith("t"):
+            try:
+                b64 = p[1:] + "=" * (-len(p[1:]) % 4)
+                f["q"] = base64.urlsafe_b64decode(b64.encode()).decode().lower()
+            except Exception:
+                pass
+        elif p.startswith("n") and p[1:].isdigit():
+            f["min_score"] = int(p[1:])
+        elif p.startswith("x") and p[1:].isdigit():
+            f["max_score"] = int(p[1:])
+        elif p in ("r", "h", "p"):
             f["modality"].add({"r": "remoto", "h": "híbrido", "p": "presencial"}[p])
         elif p == "q":
             f["has_salary"] = True
@@ -581,9 +637,9 @@ def _run_search_async(cfg: Config, chat_id: int):
         _SEARCH_STATE.update(running=False, t0=0.0)
 
 
-def _help_text() -> str:
+def _help_admin_text() -> str:
     return "\n".join([
-        "🤖 <b>Comandos del bot</b>",
+        "🤖 <b>Comandos del bot — administración</b>",
         "",
         "🔎 <b>Búsqueda y pool</b>",
         "/search — gatilla una búsqueda ahora (reporta inicio, término y error)",
@@ -591,6 +647,8 @@ def _help_text() -> str:
         "/score N — ofertas con score ≥ N (ej: /score 60 · /score 60 s solo con sueldo)",
         "/jobs [filtros] — filtra el pool (combinables):",
         "    remote · hybrid · onsite · salary (con sueldo publicado) ·",
+        "    q\"texto\" — busca la frase en título y descripción (ej: q\"kubernetes\") ·",
+        "    score80 / score>=80 — score mínimo · score≤60 — score máximo ·",
         "    salary2.5 (≥$2.5M) · 2.5 / 500k / 2.500.000 ·",
         "    sinen (sin idioma excluyente) · en (pide inglés)",
         "    ubicación: stgo, temuco, valpo, conce, araucania o texto libre",
@@ -606,6 +664,8 @@ def _help_text() -> str:
         "/report — análisis completo del mercado con gráficos → PDF",
         "/report status · /report list — avance del reporte · historial de PDFs",
         "/stats — cobertura del pool (procesadas IA, datos faltantes)",
+        "/encaje [N] — asigna el encaje con el perfil a ofertas ya procesadas por IA y recalcula scores",
+        "/fuentes — salud del scraping: ofertas por fuente en los últimos barridos",
         "/config — configuración actual (tokens enmascarados)",
         "/preview — oferta aleatoria como se vería en el canal (sin marcar publicada)",
         "/preview 80 — aleatoria con market_score >= 80 · /preview java — filtra por texto",
@@ -639,6 +699,70 @@ def _help_text() -> str:
         "",
         "/help — esta ayuda",
     ])
+
+
+def _help_text(admin: bool = False) -> str:
+    """Ayuda: versión simple por defecto; admin=True (/help admin) trae TODOS los comandos."""
+    if admin:
+        return _help_admin_text()
+    return "\n".join([
+        "👋 <b>Hola, soy tu buscador de empleo tech</b>",
+        "Reviso LinkedIn, Computrabajo, Indeed, Laborum y más, y te dejo "
+        "solo lo que calza con tu perfil.",
+        "",
+        "🔎 <b>Lo más usado</b>",
+        "/latest — las últimas ofertas encontradas",
+        "/score 60 — ofertas con buen puntaje (cambia 60 por el mínimo que quieras)",
+        "/jobs remote salary2.5 — filtra: remoto, sueldo desde $2,5M, ciudad…",
+        "/search — buscar ofertas nuevas ahora",
+        "",
+        "📊 <b>Cómo va todo</b>",
+        "/fuentes — ¿están funcionando los portales?",
+        "/stats — cuántas ofertas hay y qué tan completas están",
+        "/report — informe de mercado en PDF",
+        "",
+        "💡 <b>Tips</b>",
+        "• Combina filtros: <code>/jobs hybrid stgo score70</code>",
+        "• Busca por palabra: <code>/jobs q\"kubernetes\"</code>",
+        "• ¿Algo tarda? <code>/stop</code> lo detiene sin perder lo ya hecho",
+        "",
+        "⚙️ Canal, IA y base de datos: <code>/help admin</code>",
+    ])
+
+
+def _help_keyboard() -> str:
+    """Botones de acción rápida (callback go:<comando>)."""
+    return _kb_json([
+        [{"text": "🔎 Últimas ofertas", "callback_data": "go:latest"},
+         {"text": "🔄 Buscar ahora", "callback_data": "go:search"}],
+        [{"text": "📡 Fuentes", "callback_data": "go:fuentes"},
+         {"text": "📊 Estado", "callback_data": "go:stats"}],
+    ])
+
+
+_GO_COMANDOS = {"latest", "search", "fuentes", "stats", "encaje", "report"}
+
+
+def handle_go(cfg: Config, query: dict, state: dict) -> None:
+    """Botón de acción rápida: ejecuta el comando como si el usuario lo hubiera escrito."""
+    qid = query.get("id")
+    cmd = (query.get("data") or "")[3:]
+    msg = query.get("message") or {}
+    chat_id = (msg.get("chat") or {}).get("id")
+    try:
+        _tg_api(cfg, "answerCallbackQuery", {"callback_query_id": qid})
+    except Exception:
+        pass
+    if cmd in _GO_COMANDOS and chat_id and _chat_allowed(cfg, chat_id):
+        _handle_command(cfg, {"chat": {"id": chat_id}, "text": f"/{cmd}"}, state)
+
+
+def _sugerir_comando(cmd: str) -> str:
+    """'/lastest' → '/latest' (difflib sobre el menú registrado)."""
+    import difflib
+    conocidos = ["/" + c["command"] for c in _MENU_COMANDOS]
+    cerca = difflib.get_close_matches(cmd, conocidos, n=2, cutoff=0.6)
+    return " o ".join(f"<code>{c}</code>" for c in cerca)
 
 
 def _config_text(cfg: Config) -> str:
@@ -856,6 +980,27 @@ def _handle_command(cfg: Config, message: dict, state: dict) -> None:
                                          "text": _config_text(cfg)})
         elif cmd == "/preview":
             _preview_offer(cfg, chat_id, arg)
+        elif cmd == "/encaje":
+            busy = _op_busy()
+            if busy:
+                _tg_api(cfg, "sendMessage", {
+                    "chat_id": chat_id, "parse_mode": "HTML",
+                    "text": f"⏳ Hay una operación en curso ({busy}, {_op_minutes(busy)}m) — "
+                            f"espera que termine antes de lanzar el backfill de encaje"})
+            else:
+                max_n = int(arg) if arg.strip().isdigit() else None
+                threading.Thread(target=_encaje_async, args=(cfg, chat_id, max_n), daemon=True).start()
+        elif cmd == "/fuentes":
+            from .salud import texto_fuentes
+            conn = database.connect(cfg)
+            try:
+                txt = texto_fuentes(conn, cfg)
+            finally:
+                conn.close()
+            _tg_api(cfg, "sendMessage", {
+                "chat_id": chat_id, "parse_mode": "HTML", "text": txt,
+                "reply_markup": _kb_json([[{"text": "🔄 Buscar ahora", "callback_data": "go:search"},
+                                           {"text": "📊 Estado", "callback_data": "go:stats"}]])})
         elif cmd == "/stats":
             _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
                                          "text": _stats_text(cfg)})
@@ -1232,7 +1377,7 @@ def _handle_command(cfg: Config, message: dict, state: dict) -> None:
                 "disable_web_page_preview": True,
                 "reply_markup": _kb_json(kb)})
         elif cmd == "/jobs":
-            f = _parse_filters(parts[1:])
+            f = _parse_filters(arg)
             offers = _filter_offers(cfg, f)
             if not offers:
                 _tg_api(cfg, "sendMessage", {
@@ -1241,7 +1386,8 @@ def _handle_command(cfg: Config, message: dict, state: dict) -> None:
                 return
             prefix = "f" + _enc_filters(f)
             rendered = render_page(offers, 0, cfg.telegram.digest_page_size, cfg,
-                                   label=f"🔎 <b>Ofertas — {_describe_filters(f)}</b>",
+                                   label=f"🔎 <b>Ofertas</b>",
+                                   filtros_txt=_describe_filters(f),
                                    cb_prefix=prefix)
             kb = [[{k: v for k, v in b.items() if k != "style"} for b in row]
                   for row in rendered["keyboard"]]
@@ -1278,17 +1424,24 @@ def _handle_command(cfg: Config, message: dict, state: dict) -> None:
                 "disable_web_page_preview": True,
                 "reply_markup": _kb_json(kb)})
         elif cmd in ("/help", "/start"):
+            admin = cmd == "/help" and arg.lower() in ("admin", "avanzado")
             _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
-                                         "text": _help_text()})
+                                         "text": _help_text(admin=admin),
+                                         **({} if admin else {"reply_markup": _help_keyboard()})})
         else:
+            cerca = _sugerir_comando(cmd)
             _tg_api(cfg, "sendMessage", {
                 "chat_id": chat_id, "parse_mode": "HTML",
-                "text": "Comando no reconocido. <code>/help</code> para ver los disponibles."})
+                "text": f"🤔 No conozco <code>{esc(cmd)}</code>."
+                        + (f" ¿Quisiste decir {cerca}?" if cerca else "")
+                        + "\nEscribe <code>/help</code> para ver lo que puedo hacer."})
     except Exception as exc:
         log.error("comando %s falló: %s", cmd, exc)
         try:
-            _tg_api(cfg, "sendMessage", {"chat_id": chat_id,
-                                         "text": f"⚠️ Error ejecutando {cmd}: {esc(str(exc)[:200])}"})
+            _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
+                                         "text": f"😕 No pude ejecutar <code>{esc(cmd)}</code>. "
+                                                 f"Prueba de nuevo en un momento; si sigue fallando, "
+                                                 f"avisa al administrador.\n<i>Detalle: {esc(str(exc)[:160])}</i>"})
         except Exception:
             pass
 
@@ -1397,6 +1550,53 @@ def _ia_batch_async(cfg: Config, chat_id: int | None, scheduled: bool = False,
                                              "text": f"⚠️ Batch IA falló: <code>{esc(str(exc)[:200])}</code>"})
             except Exception:
                 pass
+
+
+def _encaje_async(cfg: Config, chat_id: int | None, max_n: int | None = None) -> None:
+    """Backfill de ai_encaje + rescore en background (comparte el lock _IA_STATE con /enrich).
+    Nunca tumba el daemon; reporta inicio y fin al chat."""
+    if _IA_STATE["running"] or _SEARCH_STATE["running"]:
+        return
+    _IA_STATE.update(running=True, done=0, total=0, current="encaje", t0=time.time())
+    t0 = time.time()
+    try:
+        from .enrich import backfill_encaje
+        from .scoring import compute_score, compute_market_score
+        conn = database.connect(cfg)
+        try:
+            pend = conn.execute("SELECT COUNT(*) FROM ofertas WHERE active=1 AND ia_model != '' "
+                                "AND ai_encaje = ''").fetchone()[0]
+            total = min(pend, max_n) if max_n else pend
+            if chat_id:
+                _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
+                                             "text": f"🎯 <b>Backfill de encaje iniciado</b> — {total} ofertas"})
+            _IA_STATE.update(total=total)
+            hechas, fallidas = backfill_encaje(
+                conn, cfg, max_n, on_progress=lambda i, n: _IA_STATE.update(done=i))
+            version_id = database.current_version(conn) or (
+                "env-" + datetime.now(timezone.utc).strftime("%Y%m%d%H%M"))
+            database.register_criteria_version(conn, version_id, cfg)
+            rescored = database.rescore_all(conn, compute_score, version_id, cfg,
+                                            market_score_fn=compute_market_score)
+        finally:
+            conn.close()
+        dur = int(time.time() - t0)
+        if chat_id:
+            _tg_api(cfg, "sendMessage", {
+                "chat_id": chat_id, "parse_mode": "HTML",
+                "text": f"🎯 <b>Encaje terminado</b> — {hechas} asignados · {fallidas} fallidos · "
+                        f"rescore: {rescored} · {dur // 60}m{dur % 60:02d}s"})
+        log.info("backfill encaje OK: %d asignados, %d fallidos, rescore %d", hechas, fallidas, rescored)
+    except Exception as exc:
+        log.error("backfill encaje falló: %s", exc)
+        if chat_id:
+            try:
+                _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
+                                             "text": f"⚠️ Backfill de encaje falló: <code>{esc(str(exc)[:200])}</code>"})
+            except Exception:
+                pass
+    finally:
+        _IA_STATE.reset()
 
 
 def _enrich_status(cfg: Config, chat_id: int) -> None:
@@ -1646,46 +1846,51 @@ def _digests_maybe(cfg: Config, state: dict) -> None:
         conn.close()
 
 
+_MENU_COMANDOS = [
+    {"command": "latest", "description": "Ver las últimas ofertas"},
+    {"command": "score", "description": "Ofertas con buen puntaje (ej: /score 60)"},
+    {"command": "jobs", "description": "Filtrar: remote, salary2.5, temuco, q\"python\"…"},
+    {"command": "search", "description": "Buscar ofertas nuevas ahora"},
+    {"command": "fuentes", "description": "¿Funcionan los portales? Estado de cada fuente"},
+    {"command": "stats", "description": "Cuántas ofertas hay y qué tan completas están"},
+    {"command": "report", "description": "Informe de mercado en PDF"},
+    {"command": "stop", "description": "Detener lo que esté corriendo"},
+    {"command": "help", "description": "Ayuda (/help admin para el resto)"},
+    {"command": "encaje", "description": "Evaluar el encaje con tu perfil de ofertas ya analizadas"},
+    {"command": "enrich", "description": "Corre el batch IA ahora (rellena datos faltantes)"},
+    {"command": "enrich_all", "description": "TODAS las activas sin IA con descripción"},
+    {"command": "config", "description": "Configuración actual (tokens enmascarados)"},
+    {"command": "preview", "description": "Oferta aleatoria como se vería en el canal"},
+    {"command": "channel", "description": "Estado del canal"},
+    {"command": "channel_publish", "description": "Publicar candidatas al canal ahora"},
+    {"command": "channel_publish_ia", "description": "Publicar solo ofertas revisadas por IA"},
+    {"command": "channel_daily", "description": "Daily digest ahora"},
+    {"command": "channel_weekly", "description": "Digests semanales ahora (remote+rol+salary)"},
+    {"command": "channel_weekly_remote", "description": "Solo digest weekly-remote"},
+    {"command": "channel_weekly_rol", "description": "Solo mejor de la semana por rol"},
+    {"command": "channel_weekly_techs", "description": "Solo tecnologías del mercado"},
+    {"command": "channel_weekly_salary", "description": "Solo ranking salarial"},
+    {"command": "channel_trends", "description": "Post mensual de tendencias"},
+    {"command": "channel_all", "description": "Publish + todos los digests"},
+    {"command": "channel_dry", "description": "Preview sin publicar"},
+    {"command": "report_daily", "description": "Prueba DM: top del día por categoría"},
+    {"command": "report_weekly_rol", "description": "Prueba DM: mejor de la semana por rol"},
+    {"command": "report_weekly_techs", "description": "Prueba DM: tecnologías del mercado"},
+    {"command": "report_weekly_salary", "description": "Prueba DM: ranking salarial con contexto"},
+    {"command": "report_all", "description": "Prueba DM: todos los reportes"},
+    {"command": "channel_reset_confirm", "description": "Limpiar marcas de publicados"},
+    {"command": "channel_wipe_confirm", "description": "Borrar TODOS los mensajes del canal"},
+    {"command": "db", "description": "DB stats"},
+    {"command": "db_old_confirm", "description": "Purge inactivas >30d (confirm)"},
+    {"command": "db_nondev_confirm", "description": "Purge no-dev (confirm)"},
+    {"command": "db_all_confirm", "description": "Borrar TODO el pool (backup previo)"},
+    {"command": "db_iaclear_confirm", "description": "Limpiar marca IA (re-encola todo)"},
+]
+
+
 def _register_commands(cfg: Config) -> None:
     """Registra los comandos en Telegram (menú "/" del cliente)."""
-    commands = [
-        {"command": "search", "description": "Gatilla una búsqueda ahora"},
-        {"command": "enrich", "description": "Corre el batch IA ahora (rellena datos faltantes)"},
-        {"command": "enrich_all", "description": "TODAS las activas sin IA con descripción"},
-        {"command": "stop", "description": "Detiene la operación en curso (corte limpio)"},
-        {"command": "report", "description": "Análisis de mercado completo con PDF"},
-        {"command": "latest", "description": "Últimas ofertas registradas"},
-        {"command": "stats", "description": "Cobertura del pool"},
-        {"command": "config", "description": "Configuración actual (tokens enmascarados)"},
-        {"command": "preview", "description": "Oferta aleatoria como se vería en el canal"},
-        {"command": "channel", "description": "Estado del canal"},
-        {"command": "channel_publish", "description": "Publicar candidatas al canal ahora"},
-        {"command": "channel_publish_ia", "description": "Publicar solo ofertas revisadas por IA"},
-        {"command": "channel_daily", "description": "Daily digest ahora"},
-        {"command": "channel_weekly", "description": "Digests semanales ahora (remote+rol+salary)"},
-        {"command": "channel_weekly_remote", "description": "Solo digest weekly-remote"},
-        {"command": "channel_weekly_rol", "description": "Solo mejor de la semana por rol"},
-        {"command": "channel_weekly_techs", "description": "Solo tecnologías del mercado"},
-        {"command": "channel_weekly_salary", "description": "Solo ranking salarial"},
-        {"command": "channel_trends", "description": "Post mensual de tendencias"},
-        {"command": "channel_all", "description": "Publish + todos los digests"},
-        {"command": "channel_dry", "description": "Preview sin publicar"},
-        {"command": "report_daily", "description": "Prueba DM: top del día por categoría"},
-        {"command": "report_weekly_rol", "description": "Prueba DM: mejor de la semana por rol"},
-        {"command": "report_weekly_techs", "description": "Prueba DM: tecnologías del mercado"},
-        {"command": "report_weekly_salary", "description": "Prueba DM: ranking salarial con contexto"},
-        {"command": "report_all", "description": "Prueba DM: todos los reportes"},
-        {"command": "channel_reset_confirm", "description": "Limpiar marcas de publicados"},
-        {"command": "channel_wipe_confirm", "description": "Borrar TODOS los mensajes del canal"},
-        {"command": "db", "description": "DB stats"},
-        {"command": "db_old_confirm", "description": "Purge inactivas >30d (confirm)"},
-        {"command": "db_nondev_confirm", "description": "Purge no-dev (confirm)"},
-        {"command": "db_all_confirm", "description": "Borrar TODO el pool (backup previo)"},
-        {"command": "db_iaclear_confirm", "description": "Limpiar marca IA (re-encola todo)"},
-        {"command": "score",  "description": "Ofertas con score ≥ N (ej: /score 60)"},
-        {"command": "jobs",   "description": "Filtra: remote, salary2.5, temuco… combinables"},
-        {"command": "help",   "description": "Ayuda"},
-    ]
+    commands = _MENU_COMANDOS
     try:
         _tg_api(cfg, "setMyCommands", {"commands": commands})
         log.info("comandos registrados en Telegram")
@@ -1866,6 +2071,9 @@ def run_daemon(cfg: Config) -> None:
             for upd in data.get("result", []):
                 offset = upd["update_id"] + 1
                 cq = upd.get("callback_query")
+                if cq and (cq.get("data") or "").startswith("go:"):
+                    handle_go(cfg, cq, state)
+                    continue
                 if cq and (cq.get("data") or "").startswith(("jobs:", "sc", "latest", "f", "noop")):
                     handle_callback(cfg, cq, state)
                     continue

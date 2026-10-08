@@ -95,6 +95,7 @@ class Scoring:
     stack_overlap_max: float
     cap: int
     modality_bonus: dict[str, int] = field(default_factory=dict)
+    role_profile: int = 6          # bonus si un PROFILE_ROLES aparece en el título
 
 
 @dataclass
@@ -112,6 +113,7 @@ class Search:
     sample_computrabajo: list[str]
     sample_glassdoor: list[str]
     sample_rotation: float
+    max_pages: int = 3             # páginas por query (LinkedIn/Computrabajo/Indeed/Accenture)
 
 
 @dataclass
@@ -142,6 +144,7 @@ class Alerts:
     min_score: int
     max_per_digest: int
     worth_it_score: int
+    source_sweeps: int = 3         # avisa al admin si una fuente rinde 0 N barridos seguidos
 
 
 @dataclass
@@ -181,6 +184,8 @@ class ChannelCfg:
     max_age_days: int = 14         # ventana canónica (date_canonical)
     max_first_seen_hours: int = 0  # 0=OFF; ej 72 = solo primeras 72h en el pool
     require_dev: bool = True       # rol_categoria ∈ set dev
+    require_fit: bool = True       # exige encaje con el perfil (score + veredicto IA)
+    min_fit_score: int = 45        # score de perfil mínimo (0 = sin piso; base=40 sin señales)
     digest_daily: bool = True
     digest_daily_hour_utc: int = 21
     digest_weekly: bool = True
@@ -242,6 +247,7 @@ def load_config(env_file: Path | None = None) -> Config:
     scoring = Scoring(
         base=_env_int("SCORE_BASE", 40),
         n_tech_primary=_env_int("N_TECH_PRIMARY", 4),
+        role_profile=_env_int("SCORE_ROLE_PROFILE", 6),
         tech_primary=_env_int("SCORE_TECH_PRIMARY", 15),
         tech_secondary=_env_int("SCORE_TECH_SECONDARY", 8),
         role_keywords=_env_pairs("SCORE_ROLE_KEYWORDS"),
@@ -295,6 +301,7 @@ def load_config(env_file: Path | None = None) -> Config:
         sample_computrabajo=_env_list("SAMPLE_QUERIES_COMPUTRABAJO"),
         sample_glassdoor=_env_list("SAMPLE_QUERIES_GLASSDOOR"),
         sample_rotation=_env_float("SAMPLE_ROTATION", 0.33),
+        max_pages=max(1, min(10, _env_int("SEARCH_MAX_PAGES", 3))),
     )
     sources = {
         "jooble": _env_bool("ENABLE_JOOBLE", True),
@@ -346,6 +353,7 @@ def load_config(env_file: Path | None = None) -> Config:
         min_score=_env_int("ALERT_MIN_SCORE", 70),
         max_per_digest=_env_int("ALERT_MAX_PER_DIGEST", 10),
         worth_it_score=_env_int("ALERT_WORTH_IT_SCORE", 60),
+        source_sweeps=max(1, _env_int("ALERT_SOURCE_SWEEPS", 3)),
     )
     daemon = Daemon(
         interval_min=_env_int("DAEMON_INTERVAL_MIN", 240),
@@ -378,6 +386,8 @@ def load_config(env_file: Path | None = None) -> Config:
         max_age_days=_env_int("CHANNEL_MAX_AGE_DAYS", 14),
         max_first_seen_hours=_env_int("CHANNEL_MAX_FIRST_SEEN_HOURS", 0),
         require_dev=_env_bool("CHANNEL_REQUIRE_DEV", True),
+        require_fit=_env_bool("CHANNEL_REQUIRE_FIT", True),
+        min_fit_score=_env_int("CHANNEL_MIN_FIT_SCORE", 45),
         digest_daily=_env_bool("CHANNEL_DIGEST_DAILY", True),
         digest_daily_hour_utc=_env_int("CHANNEL_DIGEST_DAILY_HOUR_UTC", 21),
         digest_weekly=_env_bool("CHANNEL_DIGEST_WEEKLY", True),

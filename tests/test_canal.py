@@ -3,7 +3,7 @@
 Corre: .venv/bin/python -m pytest tests/test_canal.py -v
 """
 import sqlite3
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
@@ -173,7 +173,9 @@ def conn_mem():
 
 
 def _insert(conn, gid, title="Dev Python", ms=80, rol="Backend", company="X Corp",
-            modality="remoto", date_canonical="2026-09-02", notified=""):
+            modality="remoto", date_canonical=None, notified=""):
+    # fecha relativa a hoy: la ventana del canal (14d) usa date('now') y fijarla rompe la suite
+    date_canonical = date_canonical or (date.today() - timedelta(days=1)).isoformat()
     desc = "x" * 2000
     # ¡ojo!: el INSERT tiene 22 columnas pero 21 placeholders → los params van en orden:
     # (gid, title, company, modality, desc, ms, rol, notified, date_canonical)
@@ -191,6 +193,7 @@ def _insert(conn, gid, title="Dev Python", ms=80, rol="Backend", company="X Corp
 def test_publish_orden_tope_dedup(conn_mem):
     cfg = load_config()
     cfg.channel.enabled = True
+    cfg.channel.require_fit = False
     cfg.channel.chat_id = "-1004495706494"
     for i in range(15):
         _insert(conn_mem, f"g{i}", ms=90 - i)
@@ -227,6 +230,7 @@ def test_publish_noop_sin_chat_id(conn_mem):
 def test_publish_notified_solo_si_ok(conn_mem):
     cfg = load_config()
     cfg.channel.enabled = True
+    cfg.channel.require_fit = False
     cfg.channel.chat_id = "-1004495706494"
     _insert(conn_mem, "g_fail")
 
@@ -243,6 +247,7 @@ def test_publish_notified_solo_si_ok(conn_mem):
 def test_publish_dry_run_no_api(conn_mem):
     cfg = load_config()
     cfg.channel.enabled = True
+    cfg.channel.require_fit = False
     cfg.channel.chat_id = "-1004495706494"
     _insert(conn_mem, "g_dry", ms=95)
     called = []
@@ -255,13 +260,14 @@ def test_publish_dry_run_no_api(conn_mem):
     stats = publish_channel(cfg, conn_mem, spy, dry_run=True)
     assert called == []
     assert len(stats["dry_run_preview"]) == 1
-    assert "🎯" in stats["dry_run_preview"][0]["text"]
+    assert "⭐ 95/100" in stats["dry_run_preview"][0]["text"]
     assert stats["dry_run_preview"][0]["kb"]["inline_keyboard"][0][0]["url"] == "https://x.cl/1"
 
 
 def test_gate_dev_bloquea_cobol(conn_mem):
     cfg = load_config()
     cfg.channel.enabled = True
+    cfg.channel.require_fit = False
     cfg.channel.chat_id = "-1004495706494"
     _insert(conn_mem, "g_cobol", title="Analista Programador Mainframe COBOL $2.5M",
             ms=90, rol="Backend")
@@ -288,10 +294,10 @@ def test_render_omite_lineas_sin_dato():
     assert "&lt;b&gt;" in post          # HTML escapado
     # V3: sin salario → línea explícita "💰 Sin sueldo declarado" (decisión #6:
     # el dato salarial SIEMPRE se muestra, aunque sea ausencia)
-    assert "💰 Sin sueldo declarado" in post
+    assert "💰 Sueldo no declarado" in post
     assert "🧰" not in post
     assert kb is None                   # sin url → sin botón
-    assert "📅 2d" in post
+    assert "📅 Hace 2 días" in post
 
 
 def test_render_con_boton_url():
@@ -320,9 +326,9 @@ def test_render_info_ia_completa():
     post, kb = render_offer_post(r)
     assert "📝 Backend Java/Spring remoto." in post
     assert "💬 Sueldo sobre la mediana del mercado (1,4M) y el P75 (2,4M)." in post
-    assert "⚠️ Proyecto hasta fin de año · Prueba técnica anti-LLM" in post
-    assert "✅ Contrato indefinido · Clientes grandes" in post
-    assert "🎁 Remoto · Seguro" in post
+    assert "A considerar:</b> Proyecto hasta fin de año · Prueba técnica anti-LLM" in post
+    assert "A favor:</b> Contrato indefinido · Clientes grandes" in post
+    assert "Beneficios:</b> Remoto · Seguro" in post
     assert "🧰 Java · Spring · AWS" in post
 
 
@@ -393,3 +399,54 @@ def test_callback_sc_prefix_con_sufijo_s():
     assert pat.fullmatch("sc60s:page:2")
     assert pat.fullmatch("sc60:page:2")
     assert not pat.fullmatch("sc60x:page:2")
+
+
+def test_parse_filters_q_y_score():
+    """_parse_filters: búsqueda entre comillas + score min/max."""
+    from jobhunt.bot import _parse_filters
+    f = _parse_filters('q"python aws"')
+    assert f["q"] == "python aws"
+    f = _parse_filters('remoto Q"Kubernetes" score80')
+    assert f["q"] == "kubernetes" and f["min_score"] == 80 and "remoto" in f["modality"]
+    f = _parse_filters("score<=60")
+    assert f["max_score"] == 60 and f["min_score"] is None
+    f = _parse_filters("sc>=85 salary")
+    assert f["min_score"] == 85 and f["has_salary"]
+    # sin q ni score: no rompe
+    f = _parse_filters("remoto stgo")
+    assert f["q"] == "" and f["min_score"] is None and "remoto" in f["modality"]
+
+
+def test_enc_dec_filters_q_score_roundtrip():
+    """Encode/decode de callback_data preserva q + score (paginación)."""
+    from jobhunt.bot import _enc_filters, _dec_filters, _parse_filters
+    f = _parse_filters('q"kubernetes" score>=75 remote')
+    enc = _enc_filters(f)
+    assert len("f" + enc) <= 64                      # límite callback_data Telegram
+    d = _dec_filters(enc)
+    assert d["q"] == f["q"] and d["min_score"] == 75 and "remoto" in d["modality"]
+
+
+def test_callback_regex_acepta_base64_mayusculas():
+    """Regresión: el base64 del texto buscado produce mayúsculas — el regex
+    del callback (que era solo minúsculas) debe aceptarlas."""
+    import re
+    from jobhunt.bot import _parse_filters, _enc_filters
+    pat = re.compile(r"(jobs|latest|sc\d+s?|f[a-zA-Z0-9._\-]*):page:(\d+)")
+    f = _parse_filters('q"spring boot" score>=70')
+    enc = _enc_filters(f)
+    assert pat.fullmatch(f"f{enc}:page:2"), f"regex no matchea f{enc}"
+
+
+def test_help_text_html_valido():
+    """Regresión: /help se envía con parse_mode HTML — un '<' crudo (ej:
+    'score<=60') rompe el envío con Telegram 400. Todo el texto debe
+    parsear limpio."""
+    from html.parser import HTMLParser
+    from jobhunt.bot import _help_text
+
+    class _V(HTMLParser):
+        pass
+
+    _V().feed(_help_text())   # error si hay tags malformados
+    assert "score≤" in _help_text() or "score<=" not in _help_text()

@@ -232,6 +232,65 @@ def ia_extract_local(cfg: Config, job: dict, profile_desc: str,
     return d1, ""
 
 
+_PROMPT_ENCAJE = (
+    "Eres un reclutador tech estricto. Decide cuánto calza esta oferta con el PERFIL.\n"
+    "Perfil del candidato: {perfil}\n\n"
+    "Oferta:\nTítulo: {title}\nEmpresa: {company}\nRol: {rol}\nTechs: {techs}\n"
+    "Descripción: {desc}\n\n"
+    "encaje: \"alto\" (rol y stack coinciden) | \"medio\" (rol de desarrollo/datos afín pero "
+    "stack o seniority parcial) | \"bajo\" (rol tech de otra área o stack ajeno) | "
+    "\"ninguno\" (no es tecnología o sin relación con el perfil). "
+    "Ante duda elige el nivel MÁS BAJO.\n"
+    "Responde SOLO JSON: {{\"encaje\": \"alto|medio|bajo|ninguno\"}}")
+
+
+def ia_encaje(cfg: Config, job: dict, profile_desc: str) -> str:
+    """Veredicto de encaje de UNA oferta ya procesada (backfill). Local si está activo,
+    si no cloud. Retorna 'alto'|'medio'|'bajo'|'ninguno' o '' si la IA falla."""
+    prompt = _PROMPT_ENCAJE.format(
+        perfil=profile_desc, title=job.get("title") or "", company=job.get("company") or "",
+        rol=job.get("rol_categoria") or "(sin clasificar)", techs=job.get("techs") or "(ninguna)",
+        desc=(job.get("description") or "")[:1200])
+    if cfg.ia.local_enabled:
+        data, err = _llm_local(cfg, prompt)
+    elif cfg.ia.enabled and cfg.ia.api_key:
+        data, err = CloudClient(cfg, tag="IA encaje").chat_json(
+            [{"role": "user", "content": prompt}], extra={"format": "json"})
+    else:
+        return ""
+    if err or not isinstance(data, dict):
+        return ""
+    v = _clean_text(data.get("encaje"), 10, lower=True)
+    return v if v in ("alto", "medio", "bajo", "ninguno") else ""
+
+
+def backfill_encaje(conn, cfg: Config, max_n: int | None = None, on_progress=None) -> tuple[int, int]:
+    """Asigna ai_encaje a ofertas activas con IA previa pero sin veredicto.
+    Mejores primero (score DESC). Retorna (hechas, fallidas). Commit cada 10."""
+    rows = conn.execute(
+        "SELECT group_id, title, company, rol_categoria, techs, description FROM ofertas "
+        "WHERE active=1 AND ia_model != '' AND ai_encaje = '' ORDER BY score DESC"
+        + (" LIMIT ?" if max_n else ""), (max_n,) if max_n else ()).fetchall()
+    p_desc = profile_description(cfg)
+    hechas = fallidas = 0
+    for i, r in enumerate(rows, 1):
+        v = ia_encaje(cfg, dict(r), p_desc)
+        if v:
+            conn.execute("UPDATE ofertas SET ai_encaje=? WHERE group_id=?", (v, r["group_id"]))
+            hechas += 1
+        else:
+            fallidas += 1
+        if i % 10 == 0:
+            conn.commit()
+        if on_progress:
+            try:
+                on_progress(i, len(rows))
+            except Exception:
+                pass
+    conn.commit()
+    return hechas, fallidas
+
+
 # --- Modo lote (spec-enrich-lotes §2) ---
 def ia_extract_lote(cfg: Config, rows: list[dict], profile_desc: str,
                     mercado: str = "") -> tuple[list[dict] | None, str]:
@@ -300,11 +359,34 @@ def get_salary_pool(conn) -> list[int]:
 
 def _fetch_ficha(r: dict) -> dict:
     """Solo HTTP — NUNCA toca la DB (spec-enrich-lotes §3.1.2, patrón P0-3).
-    Retorna info (con _access) o {"_access": "error"}."""
+    Retorna info (con _access) o {"_access": "error"}.
+    LinkedIn: la ficha normal está auth-walled (fetch_page → blocked); se usa el
+    endpoint guest de detalle (sources.linkedin.fetch_description), que responde
+    200 con la desc completa (verificado 30-09-2026)."""
     try:
-        if "airavirtual.com" in (r.get("url") or ""):
-            return _extract_aira_spa(r["url"])
-        return extract_structured(r["url"])
+        url = r.get("url") or ""
+        if "airavirtual.com" in url:
+            return _extract_aira_spa(url)
+        if "linkedin.com/jobs/view/" in url:
+            from .sources.linkedin import fetch_description
+            meta = fetch_description(url)
+            desc = meta.get("description") or ""
+            if desc:
+                info = {"_access": "ok", "description": desc,
+                        "description_source": "linkedin-guest",
+                        "employment_type": meta.get("employment_type", ""),
+                        "industry": meta.get("industry", "")}
+                if meta.get("seniority_oficial"):
+                    # mapeo a los niveles que usa seniority_real/IA
+                    sen = meta["seniority_oficial"].lower()
+                    if "intern" in sen or "trainee" in sen:
+                        info["years_official"] = 0
+                    info["seniority_oficial"] = meta["seniority_oficial"]
+                if meta.get("applicants_hint"):
+                    info["applicants_hint"] = meta["applicants_hint"]
+                return info
+            return {"_access": "blocked", "error": "linkedin guest sin desc"}
+        return extract_structured(url)
     except Exception as e:
         log.warning("enrich falló para %s (%s): %s", r["group_id"], (r.get("title") or "")[:40], e)
         return {"_access": "error"}
@@ -379,7 +461,10 @@ def _aplicar_ficha(conn, r: dict, info: dict, pool: list[int], cfg: Config | Non
         employment_type=COALESCE(NULLIF(employment_type,''), ?),
         years_official=COALESCE(years_official, ?),
         remote_official=COALESCE(remote_official, ?),
-        description_source=?
+        description_source=?,
+        industry=COALESCE(NULLIF(industry,''), ?),
+        applicants_hint=COALESCE(NULLIF(applicants_hint,''), ?),
+        seniority_oficial=COALESCE(NULLIF(seniority_oficial,''), ?)
         WHERE group_id=?""",
         (desc, info.get("company") or "", info.get("modality_badge") or "", arb_salary,
          arb_source, arb_status, arb_note,
@@ -387,6 +472,9 @@ def _aplicar_ficha(conn, r: dict, info: dict, pool: list[int], cfg: Config | Non
          info.get("valid_through") or "", info.get("employment_type") or "",
          info.get("years_official"), info.get("remote_official"),
          "jsonld" if info.get("description") else "section",
+         info.get("industry") or "",
+         info.get("applicants_hint") or "",
+         info.get("seniority_oficial") or "",
          r["group_id"]))
     conn.commit()
     return "ok"
@@ -688,6 +776,11 @@ def apply_ia_result(conn, cfg: Config, r: dict, parsed: dict | None,
             sets.append(f"ai_{field}=?")
             params.append(_clean_text(parsed[field], 300))
             ia_fields.append(field)
+    encaje = _clean_text(parsed.get("encaje"), 10, lower=True)
+    if encaje in ("alto", "medio", "bajo", "ninguno"):
+        sets.append("ai_encaje=?")
+        params.append(encaje)
+        ia_fields.append("encaje")
     if parsed.get("opinion"):
         sets.append("ai_opinion=?")
         params.append(_clean_text(parsed["opinion"], 300))

@@ -15,6 +15,7 @@ from html import unescape as _u
 import requests
 
 from ..logging_setup import get_logger
+from . import errores
 
 log = get_logger(__name__)
 
@@ -37,6 +38,7 @@ def _search_session() -> requests.Session:
         s.get("https://www.accenture.com/cl-es/careers/jobsearch", timeout=25)
     except Exception as e:
         log.warning("accenture home falló: %s", e)
+        errores.registrar("accenture")
     return s
 
 
@@ -74,6 +76,7 @@ def jobs(queries: list[str], found_by_prefix: str = "", max_pages: int = 2, on_q
                 d = r.json()
             except Exception as e:
                 log.warning("accenture fetch falló (%s p%s): %s", q[:30], page, e)
+                errores.registrar("accenture")
                 break
             data = d.get("data") or []
             if not data:
