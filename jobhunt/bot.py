@@ -637,9 +637,9 @@ def _run_search_async(cfg: Config, chat_id: int):
         _SEARCH_STATE.update(running=False, t0=0.0)
 
 
-def _help_text() -> str:
+def _help_admin_text() -> str:
     return "\n".join([
-        "🤖 <b>Comandos del bot</b>",
+        "🤖 <b>Comandos del bot — administración</b>",
         "",
         "🔎 <b>Búsqueda y pool</b>",
         "/search — gatilla una búsqueda ahora (reporta inicio, término y error)",
@@ -699,6 +699,70 @@ def _help_text() -> str:
         "",
         "/help — esta ayuda",
     ])
+
+
+def _help_text(admin: bool = False) -> str:
+    """Ayuda: versión simple por defecto; admin=True (/help admin) trae TODOS los comandos."""
+    if admin:
+        return _help_admin_text()
+    return "\n".join([
+        "👋 <b>Hola, soy tu buscador de empleo tech</b>",
+        "Reviso LinkedIn, Computrabajo, Indeed, Laborum y más, y te dejo "
+        "solo lo que calza con tu perfil.",
+        "",
+        "🔎 <b>Lo más usado</b>",
+        "/latest — las últimas ofertas encontradas",
+        "/score 60 — ofertas con buen puntaje (cambia 60 por el mínimo que quieras)",
+        "/jobs remote salary2.5 — filtra: remoto, sueldo desde $2,5M, ciudad…",
+        "/search — buscar ofertas nuevas ahora",
+        "",
+        "📊 <b>Cómo va todo</b>",
+        "/fuentes — ¿están funcionando los portales?",
+        "/stats — cuántas ofertas hay y qué tan completas están",
+        "/report — informe de mercado en PDF",
+        "",
+        "💡 <b>Tips</b>",
+        "• Combina filtros: <code>/jobs hybrid stgo score70</code>",
+        "• Busca por palabra: <code>/jobs q\"kubernetes\"</code>",
+        "• ¿Algo tarda? <code>/stop</code> lo detiene sin perder lo ya hecho",
+        "",
+        "⚙️ Canal, IA y base de datos: <code>/help admin</code>",
+    ])
+
+
+def _help_keyboard() -> str:
+    """Botones de acción rápida (callback go:<comando>)."""
+    return _kb_json([
+        [{"text": "🔎 Últimas ofertas", "callback_data": "go:latest"},
+         {"text": "🔄 Buscar ahora", "callback_data": "go:search"}],
+        [{"text": "📡 Fuentes", "callback_data": "go:fuentes"},
+         {"text": "📊 Estado", "callback_data": "go:stats"}],
+    ])
+
+
+_GO_COMANDOS = {"latest", "search", "fuentes", "stats", "encaje", "report"}
+
+
+def handle_go(cfg: Config, query: dict, state: dict) -> None:
+    """Botón de acción rápida: ejecuta el comando como si el usuario lo hubiera escrito."""
+    qid = query.get("id")
+    cmd = (query.get("data") or "")[3:]
+    msg = query.get("message") or {}
+    chat_id = (msg.get("chat") or {}).get("id")
+    try:
+        _tg_api(cfg, "answerCallbackQuery", {"callback_query_id": qid})
+    except Exception:
+        pass
+    if cmd in _GO_COMANDOS and chat_id and _chat_allowed(cfg, chat_id):
+        _handle_command(cfg, {"chat": {"id": chat_id}, "text": f"/{cmd}"}, state)
+
+
+def _sugerir_comando(cmd: str) -> str:
+    """'/lastest' → '/latest' (difflib sobre el menú registrado)."""
+    import difflib
+    conocidos = ["/" + c["command"] for c in _MENU_COMANDOS]
+    cerca = difflib.get_close_matches(cmd, conocidos, n=2, cutoff=0.6)
+    return " o ".join(f"<code>{c}</code>" for c in cerca)
 
 
 def _config_text(cfg: Config) -> str:
@@ -933,7 +997,10 @@ def _handle_command(cfg: Config, message: dict, state: dict) -> None:
                 txt = texto_fuentes(conn, cfg)
             finally:
                 conn.close()
-            _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML", "text": txt})
+            _tg_api(cfg, "sendMessage", {
+                "chat_id": chat_id, "parse_mode": "HTML", "text": txt,
+                "reply_markup": _kb_json([[{"text": "🔄 Buscar ahora", "callback_data": "go:search"},
+                                           {"text": "📊 Estado", "callback_data": "go:stats"}]])})
         elif cmd == "/stats":
             _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
                                          "text": _stats_text(cfg)})
@@ -1357,17 +1424,24 @@ def _handle_command(cfg: Config, message: dict, state: dict) -> None:
                 "disable_web_page_preview": True,
                 "reply_markup": _kb_json(kb)})
         elif cmd in ("/help", "/start"):
+            admin = cmd == "/help" and arg.lower() in ("admin", "avanzado")
             _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
-                                         "text": _help_text()})
+                                         "text": _help_text(admin=admin),
+                                         **({} if admin else {"reply_markup": _help_keyboard()})})
         else:
+            cerca = _sugerir_comando(cmd)
             _tg_api(cfg, "sendMessage", {
                 "chat_id": chat_id, "parse_mode": "HTML",
-                "text": "Comando no reconocido. <code>/help</code> para ver los disponibles."})
+                "text": f"🤔 No conozco <code>{esc(cmd)}</code>."
+                        + (f" ¿Quisiste decir {cerca}?" if cerca else "")
+                        + "\nEscribe <code>/help</code> para ver lo que puedo hacer."})
     except Exception as exc:
         log.error("comando %s falló: %s", cmd, exc)
         try:
-            _tg_api(cfg, "sendMessage", {"chat_id": chat_id,
-                                         "text": f"⚠️ Error ejecutando {cmd}: {esc(str(exc)[:200])}"})
+            _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
+                                         "text": f"😕 No pude ejecutar <code>{esc(cmd)}</code>. "
+                                                 f"Prueba de nuevo en un momento; si sigue fallando, "
+                                                 f"avisa al administrador.\n<i>Detalle: {esc(str(exc)[:160])}</i>"})
         except Exception:
             pass
 
@@ -1772,46 +1846,51 @@ def _digests_maybe(cfg: Config, state: dict) -> None:
         conn.close()
 
 
+_MENU_COMANDOS = [
+    {"command": "latest", "description": "Ver las últimas ofertas"},
+    {"command": "score", "description": "Ofertas con buen puntaje (ej: /score 60)"},
+    {"command": "jobs", "description": "Filtrar: remote, salary2.5, temuco, q\"python\"…"},
+    {"command": "search", "description": "Buscar ofertas nuevas ahora"},
+    {"command": "fuentes", "description": "¿Funcionan los portales? Estado de cada fuente"},
+    {"command": "stats", "description": "Cuántas ofertas hay y qué tan completas están"},
+    {"command": "report", "description": "Informe de mercado en PDF"},
+    {"command": "stop", "description": "Detener lo que esté corriendo"},
+    {"command": "help", "description": "Ayuda (/help admin para el resto)"},
+    {"command": "encaje", "description": "Evaluar el encaje con tu perfil de ofertas ya analizadas"},
+    {"command": "enrich", "description": "Corre el batch IA ahora (rellena datos faltantes)"},
+    {"command": "enrich_all", "description": "TODAS las activas sin IA con descripción"},
+    {"command": "config", "description": "Configuración actual (tokens enmascarados)"},
+    {"command": "preview", "description": "Oferta aleatoria como se vería en el canal"},
+    {"command": "channel", "description": "Estado del canal"},
+    {"command": "channel_publish", "description": "Publicar candidatas al canal ahora"},
+    {"command": "channel_publish_ia", "description": "Publicar solo ofertas revisadas por IA"},
+    {"command": "channel_daily", "description": "Daily digest ahora"},
+    {"command": "channel_weekly", "description": "Digests semanales ahora (remote+rol+salary)"},
+    {"command": "channel_weekly_remote", "description": "Solo digest weekly-remote"},
+    {"command": "channel_weekly_rol", "description": "Solo mejor de la semana por rol"},
+    {"command": "channel_weekly_techs", "description": "Solo tecnologías del mercado"},
+    {"command": "channel_weekly_salary", "description": "Solo ranking salarial"},
+    {"command": "channel_trends", "description": "Post mensual de tendencias"},
+    {"command": "channel_all", "description": "Publish + todos los digests"},
+    {"command": "channel_dry", "description": "Preview sin publicar"},
+    {"command": "report_daily", "description": "Prueba DM: top del día por categoría"},
+    {"command": "report_weekly_rol", "description": "Prueba DM: mejor de la semana por rol"},
+    {"command": "report_weekly_techs", "description": "Prueba DM: tecnologías del mercado"},
+    {"command": "report_weekly_salary", "description": "Prueba DM: ranking salarial con contexto"},
+    {"command": "report_all", "description": "Prueba DM: todos los reportes"},
+    {"command": "channel_reset_confirm", "description": "Limpiar marcas de publicados"},
+    {"command": "channel_wipe_confirm", "description": "Borrar TODOS los mensajes del canal"},
+    {"command": "db", "description": "DB stats"},
+    {"command": "db_old_confirm", "description": "Purge inactivas >30d (confirm)"},
+    {"command": "db_nondev_confirm", "description": "Purge no-dev (confirm)"},
+    {"command": "db_all_confirm", "description": "Borrar TODO el pool (backup previo)"},
+    {"command": "db_iaclear_confirm", "description": "Limpiar marca IA (re-encola todo)"},
+]
+
+
 def _register_commands(cfg: Config) -> None:
     """Registra los comandos en Telegram (menú "/" del cliente)."""
-    commands = [
-        {"command": "search", "description": "Gatilla una búsqueda ahora"},
-        {"command": "enrich", "description": "Corre el batch IA ahora (rellena datos faltantes)"},
-        {"command": "enrich_all", "description": "TODAS las activas sin IA con descripción"},
-        {"command": "stop", "description": "Detiene la operación en curso (corte limpio)"},
-        {"command": "report", "description": "Análisis de mercado completo con PDF"},
-        {"command": "latest", "description": "Últimas ofertas registradas"},
-        {"command": "stats", "description": "Cobertura del pool"},
-        {"command": "config", "description": "Configuración actual (tokens enmascarados)"},
-        {"command": "preview", "description": "Oferta aleatoria como se vería en el canal"},
-        {"command": "channel", "description": "Estado del canal"},
-        {"command": "channel_publish", "description": "Publicar candidatas al canal ahora"},
-        {"command": "channel_publish_ia", "description": "Publicar solo ofertas revisadas por IA"},
-        {"command": "channel_daily", "description": "Daily digest ahora"},
-        {"command": "channel_weekly", "description": "Digests semanales ahora (remote+rol+salary)"},
-        {"command": "channel_weekly_remote", "description": "Solo digest weekly-remote"},
-        {"command": "channel_weekly_rol", "description": "Solo mejor de la semana por rol"},
-        {"command": "channel_weekly_techs", "description": "Solo tecnologías del mercado"},
-        {"command": "channel_weekly_salary", "description": "Solo ranking salarial"},
-        {"command": "channel_trends", "description": "Post mensual de tendencias"},
-        {"command": "channel_all", "description": "Publish + todos los digests"},
-        {"command": "channel_dry", "description": "Preview sin publicar"},
-        {"command": "report_daily", "description": "Prueba DM: top del día por categoría"},
-        {"command": "report_weekly_rol", "description": "Prueba DM: mejor de la semana por rol"},
-        {"command": "report_weekly_techs", "description": "Prueba DM: tecnologías del mercado"},
-        {"command": "report_weekly_salary", "description": "Prueba DM: ranking salarial con contexto"},
-        {"command": "report_all", "description": "Prueba DM: todos los reportes"},
-        {"command": "channel_reset_confirm", "description": "Limpiar marcas de publicados"},
-        {"command": "channel_wipe_confirm", "description": "Borrar TODOS los mensajes del canal"},
-        {"command": "db", "description": "DB stats"},
-        {"command": "db_old_confirm", "description": "Purge inactivas >30d (confirm)"},
-        {"command": "db_nondev_confirm", "description": "Purge no-dev (confirm)"},
-        {"command": "db_all_confirm", "description": "Borrar TODO el pool (backup previo)"},
-        {"command": "db_iaclear_confirm", "description": "Limpiar marca IA (re-encola todo)"},
-        {"command": "score",  "description": "Ofertas con score ≥ N (ej: /score 60)"},
-        {"command": "jobs",   "description": "Filtra: remote, salary2.5, temuco… combinables"},
-        {"command": "help",   "description": "Ayuda"},
-    ]
+    commands = _MENU_COMANDOS
     try:
         _tg_api(cfg, "setMyCommands", {"commands": commands})
         log.info("comandos registrados en Telegram")
@@ -1992,6 +2071,9 @@ def run_daemon(cfg: Config) -> None:
             for upd in data.get("result", []):
                 offset = upd["update_id"] + 1
                 cq = upd.get("callback_query")
+                if cq and (cq.get("data") or "").startswith("go:"):
+                    handle_go(cfg, cq, state)
+                    continue
                 if cq and (cq.get("data") or "").startswith(("jobs:", "sc", "latest", "f", "noop")):
                     handle_callback(cfg, cq, state)
                     continue

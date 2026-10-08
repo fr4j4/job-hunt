@@ -61,9 +61,9 @@ def test_alertar_admin_envia_y_texto_fuentes():
         _scan(conn, {"indeed": {"n": 0, "err": 1}, "laborum": {"n": 7, "err": 0}})
     enviados = []
     assert salud.alertar_admin(conn, c, lambda m, p: enviados.append(p) or {"ok": True})
-    assert "indeed" in enviados[0]["text"]
+    assert "Indeed" in enviados[0]["text"] and "/fuentes" in enviados[0]["text"]
     txt = salud.texto_fuentes(conn, c)
-    assert "🔴" in txt and "indeed" in txt and "🟢" in txt
+    assert "🔴" in txt and "Indeed" in txt and "🟢" in txt and "1 de 2 funcionando" in txt
 
 
 def test_senal_de_perfil():

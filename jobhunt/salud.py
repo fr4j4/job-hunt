@@ -70,36 +70,86 @@ def canal_en_silencio(conn, cfg: Config) -> int:
     return n
 
 
+_NOMBRES = {"linkedin": "LinkedIn", "computrabajo": "Computrabajo", "indeed": "Indeed",
+            "glassdoor": "Glassdoor", "laborum": "Laborum", "jooble": "Jooble",
+            "accenture": "Accenture", "aira": "Feeds de empleadores (AIRA)"}
+
+
+def _nombre(fuente: str) -> str:
+    return _NOMBRES.get(fuente, fuente.capitalize())
+
+
+def _hace(ts: str) -> str:
+    """'2026-10-08T03:00:00' (UTC) → 'hace 3 h' / 'hace 12 min' / 'hace 2 días'."""
+    from datetime import datetime, timezone
+    try:
+        dt = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        mins = int((datetime.now(timezone.utc) - dt).total_seconds() // 60)
+    except ValueError:
+        return str(ts)[:16]
+    if mins < 1:
+        return "hace instantes"
+    if mins < 60:
+        return f"hace {mins} min"
+    if mins < 60 * 24:
+        return f"hace {mins // 60} h"
+    return f"hace {mins // (60 * 24)} días"
+
+
 def texto_alertas(conn, cfg: Config) -> str:
-    """Mensaje para el admin ('' si no hay nada que avisar)."""
-    from .notify import esc
+    """Mensaje para el admin ('' si no hay nada que avisar). Dice qué pasó y qué hacer."""
     lineas = []
     for fuente, r in fuentes_a_alertar(conn, cfg).items():
-        lineas.append(f"• <b>{esc(fuente)}</b>: 0 ofertas hace {r} barridos seguidos "
-                      f"(¿bloqueo o cambio de API?)")
+        lineas.append(f"🔴 <b>{_nombre(fuente)}</b> no devuelve ofertas hace {r} barridos. "
+                      f"Suele ser un bloqueo temporal o un cambio en el sitio.")
     silencio = canal_en_silencio(conn, cfg)
     if silencio:
-        lineas.append(f"• <b>canal</b>: {silencio} barridos sin publicar nada")
-    return ("⚠️ <b>Salud del scraping</b>\n" + "\n".join(lineas)) if lineas else ""
+        lineas.append(f"📢 El canal lleva {silencio} barridos sin publicar nada. Puede que el "
+                      f"filtro de encaje sea muy estricto o que no haya ofertas nuevas.")
+    if not lineas:
+        return ""
+    return ("⚠️ <b>Hay algo que revisar</b>\n\n" + "\n\n".join(lineas)
+            + "\n\n👉 Detalle por fuente: /fuentes")
 
 
 def texto_fuentes(conn, cfg: Config, barridos: int = 5) -> str:
-    """Resumen para /fuentes: ofertas por fuente en los últimos barridos."""
-    from .notify import esc
+    """Estado por fuente en lenguaje simple, para /fuentes."""
     hist = _historial(conn, barridos)
     if not hist or not any(h["fuentes"] for h in hist):
-        return "ℹ️ Aún no hay barridos con detalle por fuente."
-    nombres = sorted({f for h in hist for f in h["fuentes"]})
-    lineas = [f"📡 <b>Fuentes</b> — último barrido {esc(str(hist[0]['ts'])[:16])} UTC",
-              f"<i>ofertas por barrido, más reciente primero ({len(hist)})</i>", ""]
-    for f in nombres:
-        serie = [h["fuentes"].get(f) for h in hist]
-        nums = " · ".join("–" if x is None else str(x.get("n", 0)) for x in serie)
+        return ("ℹ️ Todavía no hay datos por fuente. Se llenan después del próximo barrido "
+                "(puedes lanzarlo con /search).")
+    ultimo = hist[0]["fuentes"]
+    umbral = cfg.alerts.source_sweeps
+    filas, ok = [], 0
+    for f in sorted(ultimo):
+        n = (ultimo[f] or {}).get("n", 0) or 0
+        err = (ultimo[f] or {}).get("err", 0) or 0
         racha = racha_ceros(hist, f)
-        err = (hist[0]["fuentes"].get(f) or {}).get("err", 0)
-        icono = "🔴" if racha >= cfg.alerts.source_sweeps else ("🟡" if racha or err else "🟢")
-        lineas.append(f"{icono} <b>{esc(f)}</b>: {nums}" + (f" · ⚠️ {err} err" if err else ""))
-    return "\n".join(lineas)
+        antes = [str((h["fuentes"].get(f) or {}).get("n", 0)) for h in hist[1:3] if f in h["fuentes"]]
+        if racha >= umbral:
+            icono, estado = "🔴", f"sin resultados hace {racha} barridos · posible bloqueo"
+        elif racha:
+            icono, estado = "🟡", "sin resultados en el último barrido" + (
+                f" (antes: {', '.join(antes)})" if antes else "")
+        else:
+            icono, estado = "🟢", f"funcionando · {n} ofertas"
+            ok += 1
+            if err:
+                icono = "🟡"
+                estado += f" · con {err} error{'es' if err != 1 else ''} de conexión"
+        if racha and err:
+            estado += f" · {err} error{'es' if err != 1 else ''} de conexión"
+        filas.append(f"{icono} <b>{_nombre(f)}</b> — {estado}")
+    return "\n".join([
+        "📡 <b>Estado de las fuentes</b>",
+        f"Último barrido {_hace(hist[0]['ts'])} · {ok} de {len(ultimo)} funcionando bien",
+        "",
+        *filas,
+        "",
+        "<i>🟢 ok · 🟡 a vigilar · 🔴 caída (el sitio pudo bloquear el acceso o cambiar).</i>",
+    ])
 
 
 def alertar_admin(conn, cfg: Config, tg_api) -> bool:

@@ -260,7 +260,7 @@ def test_publish_dry_run_no_api(conn_mem):
     stats = publish_channel(cfg, conn_mem, spy, dry_run=True)
     assert called == []
     assert len(stats["dry_run_preview"]) == 1
-    assert "🎯" in stats["dry_run_preview"][0]["text"]
+    assert "⭐ 95/100" in stats["dry_run_preview"][0]["text"]
     assert stats["dry_run_preview"][0]["kb"]["inline_keyboard"][0][0]["url"] == "https://x.cl/1"
 
 
@@ -294,10 +294,10 @@ def test_render_omite_lineas_sin_dato():
     assert "&lt;b&gt;" in post          # HTML escapado
     # V3: sin salario → línea explícita "💰 Sin sueldo declarado" (decisión #6:
     # el dato salarial SIEMPRE se muestra, aunque sea ausencia)
-    assert "💰 Sin sueldo declarado" in post
+    assert "💰 Sueldo no declarado" in post
     assert "🧰" not in post
     assert kb is None                   # sin url → sin botón
-    assert "📅 2d" in post
+    assert "📅 Hace 2 días" in post
 
 
 def test_render_con_boton_url():
@@ -326,9 +326,9 @@ def test_render_info_ia_completa():
     post, kb = render_offer_post(r)
     assert "📝 Backend Java/Spring remoto." in post
     assert "💬 Sueldo sobre la mediana del mercado (1,4M) y el P75 (2,4M)." in post
-    assert "⚠️ Proyecto hasta fin de año · Prueba técnica anti-LLM" in post
-    assert "✅ Contrato indefinido · Clientes grandes" in post
-    assert "🎁 Remoto · Seguro" in post
+    assert "A considerar:</b> Proyecto hasta fin de año · Prueba técnica anti-LLM" in post
+    assert "A favor:</b> Contrato indefinido · Clientes grandes" in post
+    assert "Beneficios:</b> Remoto · Seguro" in post
     assert "🧰 Java · Spring · AWS" in post
 
 
