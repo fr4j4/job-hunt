@@ -166,3 +166,84 @@ def test_probar_variantes_no_corta_en_la_primera():
         return {"ok": True}
     res = probar_variantes(tg, 1, _OFS)
     assert [ok for _, ok, _ in res] == [True, False, True] and "mala" in res[1][2]
+
+
+# ---------- HTML válido y bajo el límite de Telegram (bug 'Unclosed start tag') ----------
+
+class _Estricto(HTMLParser):
+    """Falla ante etiquetas sin cerrar/desbalanceadas (lo que Telegram rechaza con 400)."""
+    PERMITIDAS = {"b", "i", "u", "s", "code", "pre", "a", "blockquote"}
+    def __init__(self):
+        super().__init__(convert_charrefs=False)
+        self.pila = []
+    def handle_starttag(self, t, a):
+        assert t in self.PERMITIDAS, f"tag no soportada por Telegram: {t}"
+        self.pila.append(t)
+    def handle_endtag(self, t):
+        assert self.pila and self.pila.pop() == t, f"cierre desbalanceado: {t}"
+    def close(self):
+        super().close()
+        assert not self.pila, f"etiquetas sin cerrar: {self.pila}"
+
+
+def _html_ok(texto):
+    p = _Estricto()
+    p.feed(texto)
+    p.close()
+    assert "<" not in re.sub(r"<[^<>]*>", "", texto), "'<' suelto sin escapar"
+    assert len(texto) <= 4096, len(texto)
+
+
+import re
+
+
+def _ofertas_feas(n):
+    return [{"score": 90 - i % 40, "group_id": f"g{i}",
+             "title": f"Desarrollador <Senior> & Líder Técnico Full Stack Python/Java/AWS #{i} " * 3,
+             "company": "Empresa & <Hijos> S.A. " * 3, "modality": "híbrido",
+             "salary": "CLP 3200000", "techs": "Py;AWS;Docker", "seniority_real": "senior",
+             "date_posted": "2026-10-07", "location": "Santiago, Chile",
+             "url": "https://www.linkedin.com/jobs/view/" + "x" * 150 + f"?id={i}&ref=a\"b",
+             "ai_idiomas": '[{"idioma":"inglés","excluyente":true}]', "ai_encaje": "alto",
+             "ai_fit_reason": "Encaje <alto> & stack coincide " * 8, "ia_model": "m"}
+            for i in range(n)]
+
+
+def test_render_page_siempre_html_valido_y_bajo_el_limite():
+    c = _cfg()
+    ofertas = _ofertas_feas(60)
+    for page_size in (1, 5, 10, 20, 50):
+        total_vistas = 0
+        pag = 0
+        while True:
+            r = bot.render_page(ofertas, pag, page_size, c)
+            _html_ok(r["text"])
+            total_vistas += r["text"].count("<a href=")
+            nav = [b["callback_data"] for b in r["keyboard"][0]]
+            if not any(cb.endswith(f":page:{pag + 1}") for cb in nav):
+                break
+            pag += 1
+        # nada se pierde: cada oferta aparece en alguna página (la 'Mejor match' no es enlace)
+        assert total_vistas == len(ofertas), (page_size, total_vistas)
+
+
+def test_digest_y_post_html_validos():
+    from jobhunt.telegram.render import build_digest_text
+    c = _cfg()
+    c.alerts.max_per_digest = 40
+    _html_ok(build_digest_text(_ofertas_feas(40), c))
+    from jobhunt.channel import render_offer_post
+    texto, _ = render_offer_post({**_ofertas_feas(1)[0], "market_score": 80,
+                                  "ai_opinion": "o <x> & y " * 30, "ai_resumen": "r & <z> " * 20,
+                                  "ai_red_flags": '["a <b>","c & d"]'})
+    _html_ok(texto)
+
+
+def test_recortar_html_no_corta_tags_ni_entidades():
+    from jobhunt.telegram.render import recortar_html
+    base = '<b>' + 'a&amp;b ' * 200 + '</b>'
+    for lim in (50, 51, 53, 100, 777):
+        out = recortar_html(base, lim)
+        _html_ok(out)
+    sin_saltos = '<a href="https://x/' + "y" * 300 + '">texto largo</a> ' * 5
+    _html_ok(recortar_html(sin_saltos, 120))

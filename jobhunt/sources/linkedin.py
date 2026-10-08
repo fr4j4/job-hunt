@@ -84,6 +84,7 @@ def fetch_jobs(queries, found_by_prefix="", on_query=None, max_pages=8,
                 try:
                     if j.get("date") and datetime.fromisoformat(j["date"]).date() <= corte:
                         viejas += 1
+                        continue      # fuera de la ventana: la query pide 30d pero se queda con max_age_days
                 except (ValueError, TypeError):
                     pass
                 out.append(j)

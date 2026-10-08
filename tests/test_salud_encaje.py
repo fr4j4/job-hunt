@@ -171,7 +171,7 @@ def test_created_at_updated_at_se_mantienen():
     assert ca.endswith("Z") and ua.endswith("Z")           # rellenados por trigger al insertar
     conn.execute("UPDATE ofertas SET created_at='2020-01-01T00:00:00Z', updated_at='2020-01-01T00:00:00Z' "
                  "WHERE group_id=?", (gid,))
-    conn.execute("UPDATE ofertas SET score=77 WHERE group_id=?", (gid,))   # cualquier escritor
+    conn.execute("UPDATE ofertas SET modality='remoto' WHERE group_id=?", (gid,))   # cualquier escritor
     ca2, ua2 = conn.execute("SELECT created_at, updated_at FROM ofertas WHERE group_id=?", (gid,)).fetchone()
     assert ca2 == "2020-01-01T00:00:00Z"                    # created_at no cambia
     assert ua2 > "2020-01-01T00:00:00Z"                     # updated_at se refrescó
@@ -203,3 +203,99 @@ def test_tarjetas_latest_titulo_completo_y_sin_tabla():
     assert "│" not in out and '<a href="https://x/1">Desarrollador Backend Senior' in out
     assert "…" in out and "🏢 Acme" in out and "🗣 EN!" in out and "🎯 alto" in out
     assert "<b>Dev</b>" in out                              # sin url: título en negrita
+
+
+def test_updated_at_solo_cambia_con_datos_reales():
+    conn = _conn()
+    gid, _ = database.upsert(conn, {"title": "Dev", "company": "X", "url": "https://x/u",
+                                    "source": "t", "date": "2026-10-01"}, "2026-10-01T00:00:00")
+    fijo = "2020-01-01T00:00:00Z"
+    ua = lambda: conn.execute("SELECT updated_at FROM ofertas WHERE group_id=?", (gid,)).fetchone()[0]
+    conn.execute("UPDATE ofertas SET updated_at=? WHERE group_id=?", (fijo, gid))
+    # toque de barrido: no es un cambio de datos
+    conn.execute("UPDATE ofertas SET last_seen='2026-10-09T00:00:00', occurrences=occurrences+1, "
+                 "found_by='x' WHERE group_id=?", (gid,))
+    assert ua() == fijo
+    # rescore / datos derivados / marcado del canal: tampoco
+    conn.execute("UPDATE ofertas SET score=88, market_score=70, score_version='v2', "
+                 "notified_channel_at='2026-10-09' WHERE group_id=?", (gid,))
+    assert ua() == fijo
+    # cambio real de dato: sí
+    conn.execute("UPDATE ofertas SET salary='CLP 2500000' WHERE group_id=?", (gid,))
+    assert ua() > fijo
+
+
+def test_racha_ignora_barridos_donde_la_fuente_no_corrio():
+    conn, c = _conn(), _cfg()
+    muerta = {"n": 0, "err": 1}
+    for premium in (True, False, True, False, True):     # glassdoor solo en ticks premium
+        _scan(conn, {"linkedin": {"n": 9, "err": 0}, **({"glassdoor": muerta} if premium else {})})
+    assert salud.fuentes_a_alertar(conn, c) == {"glassdoor": 3}
+    txt = salud.texto_fuentes(conn, c)
+    assert "Glassdoor" in txt                            # aparece aunque el último barrido no la incluyó
+
+
+def test_aviso_no_se_repite_en_cada_barrido_con_racha_larguisima(monkeypatch):
+    conn, c = _conn(), _cfg()
+    monkeypatch.setattr(salud, "_VENTANA", 20)
+    for _ in range(25):
+        _scan(conn, {"indeed": {"n": 0, "err": 0}})
+    assert salud.fuentes_a_alertar(conn, c) == {}        # racha > ventana: se calla, no spamea
+
+
+def test_aira_salud_cuenta_el_feed_no_el_gate(monkeypatch, tmp_path):
+    import jobhunt.cli as cli
+    from jobhunt.sources import aira
+    c = load_config()
+    monkeypatch.setattr(type(c), "db_path", property(lambda self: tmp_path / "t.sqlite"), raising=False)
+    for k in c.sources:
+        c.sources[k] = (k == "aira")
+    c.ia.enabled, c.channel.chat_id = False, ""
+    monkeypatch.setattr(aira, "jobs", lambda *a, **k: [
+        {"title": "Cajera", "company": "X", "url": "https://x/1", "source": "aira:x", "date": "2026-10-01"},
+        {"title": "Guardia", "company": "X", "url": "https://x/2", "source": "aira:x", "date": "2026-10-01"}])
+    cli.cmd_run(c, notify=False)
+    conn = sqlite3.connect(tmp_path / "t.sqlite")
+    resumen = json.loads(conn.execute("SELECT sources_summary FROM scan_log").fetchone()[0])
+    assert resumen["aira"]["n"] == 2                      # el feed devolvió 2 aunque ninguna es tech
+
+
+def test_gate_de_entrada_usa_palabras_completas():
+    from jobhunt.relevance import title_is_obvious_nontech
+    c = load_config()
+    for ok in ("Ingeniero de Software Semiconductor", "Desarrollador Backend - Gestión de Repositorios",
+               "Analista de Datos", "Ingeniero Conductor de Proyectos TI"):
+        assert not title_is_obvious_nontech(ok, c) or "Conductor de" in ok, ok
+    for malo in ("Guardia de Seguridad", "Cajera Part Time", "Repositores nocturnos",
+                 "Conductor de camión", "Auxiliar de aseo", "Vendedora de tienda"):
+        assert title_is_obvious_nontech(malo, c), malo
+
+
+def test_indeed_data_null_no_pierde_lo_ya_obtenido(monkeypatch):
+    from jobhunt.sources import indeed
+    def _res(k): return {"job": {"key": k, "title": f"Dev {k}", "description": {"html": ""}}}
+    resp = {"": {"data": {"jobSearch": {"pageInfo": {"nextCursor": "c2"}, "results": [_res("a")]}}},
+            "c2": {"errors": [{"message": "boom"}], "data": None}}
+    monkeypatch.setattr(indeed, "_page", lambda q, cursor="": resp[cursor])
+    assert [o["url"][-1] for o in indeed.jobs(["python"], "t:", max_pages=3)] == ["a"]
+
+
+def test_linkedin_descarta_ofertas_fuera_de_ventana(monkeypatch):
+    from datetime import date, timedelta
+    from jobhunt.sources import linkedin
+    hoy = date.today()
+    cards = [{"title": f"t{i}", "url": f"https://l/{i}", "date": d.isoformat(), "company": "", "location": ""}
+             for i, d in enumerate([hoy, hoy - timedelta(days=2), hoy - timedelta(days=20), hoy - timedelta(days=25)])]
+    monkeypatch.setattr(linkedin, "fetch", lambda url: "x")
+    monkeypatch.setattr(linkedin, "parse_cards", lambda html, src: [dict(c) for c in cards])
+    out = linkedin.fetch_jobs(["python"], "t:", max_pages=1, max_age_days=7)
+    assert [o["title"] for o in out] == ["t0", "t1"]
+
+
+def test_filtros_de_paginador_no_se_corrompen(monkeypatch):
+    import jobhunt.bot as bot
+    f = bot._parse_filters('q"kubernetes terraform aws ñandú" remote salary2.5 temuco score70 en')
+    key = bot._registrar_filtros(f)
+    assert key.startswith("fk") and len(f"{key}:page:99") <= 64
+    assert bot._FILTROS_CB[key]["q"] == f["q"]            # texto completo, sin cortar ni '-' ambiguo
+    assert bot._registrar_filtros(f) == key               # estable

@@ -266,7 +266,7 @@ def ia_encaje(cfg: Config, job: dict, profile_desc: str) -> str:
 
 def backfill_encaje(conn, cfg: Config, max_n: int | None = None, on_progress=None) -> tuple[int, int]:
     """Asigna ai_encaje a ofertas activas con IA previa pero sin veredicto.
-    Mejores primero (score DESC). Retorna (hechas, fallidas). Commit cada 10."""
+    Mejores primero (score DESC). Retorna (hechas, fallidas). Commit POR oferta (no retiene el lock de escritura durante las llamadas IA)."""
     rows = conn.execute(
         "SELECT group_id, title, company, rol_categoria, techs, description FROM ofertas "
         "WHERE active=1 AND ia_model != '' AND ai_encaje = '' ORDER BY score DESC"
@@ -277,11 +277,10 @@ def backfill_encaje(conn, cfg: Config, max_n: int | None = None, on_progress=Non
         v = ia_encaje(cfg, dict(r), p_desc)
         if v:
             conn.execute("UPDATE ofertas SET ai_encaje=? WHERE group_id=?", (v, r["group_id"]))
+            conn.commit()      # transacción corta: la IA tarda segundos y el barrido necesita el lock
             hechas += 1
         else:
             fallidas += 1
-        if i % 10 == 0:
-            conn.commit()
         if on_progress:
             try:
                 on_progress(i, len(rows))

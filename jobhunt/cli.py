@@ -95,7 +95,7 @@ def cmd_run(cfg, notify: bool = True, on_phase=None, stop_event: threading.Event
         errores.reset()
         salud: dict[str, dict] = {}   # fuente → {"n": ofertas, "err": fallos} (sources_summary)
 
-        def _fuente_segura(nombre, fn):
+        def _fuente_segura(nombre, fn, contar=len):
             """F3: una fuente rota no aborta el barrido (spec-audit). Registra cuántas
             ofertas rindió cada fuente: 0 con queries configuradas = posible bloqueo."""
             h = salud.setdefault(nombre, {"n": 0, "err": 0})
@@ -105,7 +105,7 @@ def cmd_run(cfg, notify: bool = True, on_phase=None, stop_event: threading.Event
                 log.warning("fuente %s falló (continúa): %s", nombre, e)
                 h["err"] += 1 + errores.tomar(nombre)
                 return []
-            h["n"] += len(res)
+            h["n"] += contar(res)
             h["err"] += errores.tomar(nombre)   # errores que la fuente capturó por dentro
             return res
 
@@ -122,12 +122,16 @@ def cmd_run(cfg, notify: bool = True, on_phase=None, stop_event: threading.Event
         mp = s.max_pages
         if cfg.sources.get("aira"):
             phase("aira (feeds JSON employers)")
+            aira_crudas = []
             def _aira():
                 raw = aira.jobs(cfg.aira_feeds, "aira:")
+                aira_crudas.append(len(raw))
                 relevantes, stats = filter_offers(raw, cfg)
                 log.info("aira: %d/%d ofertas pasaron el gate %s", len(relevantes), len(raw), stats)
                 return relevantes
-            jobs += _fuente_segura("aira", _aira)
+            # salud = ofertas que devolvió el feed (no las que pasaron el gate de relevancia:
+            # un feed sano sin cargos tech no es una fuente caída)
+            jobs += _fuente_segura("aira", _aira, contar=lambda res: sum(aira_crudas))
         if cfg.sources.get("jooble"):
             phase("jooble")
             # jooble usa browser headless bajo xvfb (la API REST exige login de usuario)
@@ -145,7 +149,8 @@ def cmd_run(cfg, notify: bool = True, on_phase=None, stop_event: threading.Event
         if cfg.sources.get("linkedin"):
             phase("linkedin")
             jobs += _fuente_segura("linkedin",
-                lambda: linkedin.fetch_jobs(s.queries_linkedin, "perfil:", on_query=qcb("linkedin")))
+                lambda: linkedin.fetch_jobs(s.queries_linkedin, "perfil:", on_query=qcb("linkedin"),
+                                            max_pages=s.linkedin_max_pages))
         if cfg.sources.get("computrabajo"):
             phase("computrabajo")
             jobs += _fuente_segura("computrabajo",
@@ -157,7 +162,8 @@ def cmd_run(cfg, notify: bool = True, on_phase=None, stop_event: threading.Event
             n = max(1, int(len(s.sample_linkedin) * s.sample_rotation))
             if cfg.sources.get("linkedin"):
                 jobs += _fuente_segura("linkedin",
-                    lambda: linkedin.fetch_jobs(_rotar(s.sample_linkedin, n), "sample:"))
+                    lambda: linkedin.fetch_jobs(_rotar(s.sample_linkedin, n), "sample:",
+                                                max_pages=s.linkedin_max_pages))
             if cfg.sources.get("computrabajo"):
                 jobs += _fuente_segura("computrabajo",
                     lambda: computrabajo.jobs(_rotar(s.sample_computrabajo, n), "sample:",

@@ -14,6 +14,7 @@ from .logging_setup import get_logger
 log = get_logger(__name__)
 
 _RECORDATORIO_CADA = 12   # barridos entre recordatorios de una fuente que sigue en 0
+_VENTANA = 400            # barridos de historial que se leen (~66 días con barridos cada 4 h)
 
 
 def _historial(conn, limite: int) -> list[dict]:
@@ -36,7 +37,9 @@ def racha_ceros(hist: list[dict], fuente: str) -> int:
     racha = 0
     for h in hist:
         f = h["fuentes"].get(fuente)
-        if f is None or (f.get("n") or 0) > 0:
+        if f is None:
+            continue          # no corrió en ese barrido (p. ej. fuentes solo en ticks premium)
+        if (f.get("n") or 0) > 0:
             break
         racha += 1
     return racha
@@ -45,13 +48,17 @@ def racha_ceros(hist: list[dict], fuente: str) -> int:
 def fuentes_a_alertar(conn, cfg: Config) -> dict[str, int]:
     """{fuente: racha} que toca avisar ahora: racha == N exacto o recordatorio periódico."""
     n = max(1, cfg.alerts.source_sweeps)
-    hist = _historial(conn, n + _RECORDATORIO_CADA * 4)
+    hist = _historial(conn, _VENTANA)
     if not hist:
         return {}
     out = {}
+    # la fuente debe haber corrido en el ÚLTIMO barrido (si no, no hay dato nuevo que avisar)
     for fuente in hist[0]["fuentes"]:
         r = racha_ceros(hist, fuente)
-        if r >= n and (r == n or (r - n) % _RECORDATORIO_CADA == 0):
+        # racha que llena TODA la ventana leída: no se puede contar bien → se deja de
+        # recordar en vez de repetir el aviso en cada barrido
+        truncada = len(hist) >= _VENTANA and r == len(hist)
+        if r >= n and not truncada and (r == n or (r - n) % _RECORDATORIO_CADA == 0):
             out[fuente] = r
     return out
 
@@ -120,14 +127,19 @@ def texto_fuentes(conn, cfg: Config, barridos: int = 5) -> str:
     if not hist or not any(h["fuentes"] for h in hist):
         return ("ℹ️ Todavía no hay datos por fuente. Se llenan después del próximo barrido "
                 "(puedes lanzarlo con /search).")
-    ultimo = hist[0]["fuentes"]
+    # unión de las fuentes vistas en la ventana: las que solo corren en ticks premium
+    # (Glassdoor, Indeed-perfil) no aparecen en todos los barridos
+    ultimo = {}
+    for h in reversed(hist):                       # el dato más reciente de cada fuente gana
+        ultimo.update(h["fuentes"])
     umbral = cfg.alerts.source_sweeps
     filas, ok = [], 0
     for f in sorted(ultimo):
         n = (ultimo[f] or {}).get("n", 0) or 0
         err = (ultimo[f] or {}).get("err", 0) or 0
         racha = racha_ceros(hist, f)
-        antes = [str((h["fuentes"].get(f) or {}).get("n", 0)) for h in hist[1:3] if f in h["fuentes"]]
+        previos = [h for h in hist if f in h["fuentes"]][1:3]
+        antes = [str((h["fuentes"].get(f) or {}).get("n", 0)) for h in previos]
         if racha >= umbral:
             icono, estado = "🔴", f"sin resultados hace {racha} barridos · posible bloqueo"
         elif racha:

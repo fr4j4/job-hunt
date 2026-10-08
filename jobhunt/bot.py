@@ -28,6 +28,7 @@ from . import db as database
 from .cli import cmd_run
 from .notify import (esc, score_emoji, score_style, modality_tag, role_tag, techs_tag,
                      age_tag, salary_tag, compact_label, abbr_loc, table_block, _age_short)
+from .telegram.render import paginar_tarjetas, recortar_html
 # compat: re-export — eliminar en v6 cuando los imports apunten al paquete nuevo
 from .telegram.api import TelegramClient
 from .app.state import IAState, SearchState, StopEvent
@@ -55,9 +56,10 @@ def render_page(offers: list[dict], page: int, page_size: int, cfg: Config,
     cada página navegada) para que se sepa qué búsqueda está paginando.
     """
     total = len(offers)
-    pages = max(1, (total + page_size - 1) // page_size)
+    paginas = paginar_tarjetas(offers, page_size)     # ≤page_size ofertas y ≤2800 chars de tarjetas
+    pages = len(paginas)
     page = max(0, min(page, pages - 1))
-    chunk = offers[page * page_size:(page + 1) * page_size]
+    chunk = paginas[page]
 
     stamp = datetime.now(timezone.utc).strftime("%d %b %H:%M")
     head = label or f"📬 <b>Ofertas ≥{cfg.alerts.min_score}</b>"
@@ -82,7 +84,7 @@ def render_page(offers: list[dict], page: int, page_size: int, cfg: Config,
         lines += ["", "<b>Esta página</b> (toca el título para abrir la oferta):", table_block(chunk)]
     lines.append("")
     lines.append("<i>⭐ ≥85 · 🟢 ≥70 · 🟡 ≥55 · ⚪ resto (puntaje de afinidad) · EN! = inglés excluyente · 🎯 = encaje con tu perfil</i>")
-    text = "\n".join(lines)[:4000]
+    text = recortar_html("\n".join(lines))
 
     kb = []   # solo navegación — el link está en el título de cada fila
 
@@ -247,7 +249,15 @@ def handle_callback(cfg: Config, query: dict, state: dict) -> None:
             rendered = render_page(_latest_offers(cfg), page, cfg.telegram.digest_page_size, cfg,
                                    label="🆕 <b>Últimas registradas</b>", cb_prefix=prefix)
         elif prefix.startswith("f"):
-            f = _dec_filters(prefix[1:])
+            if prefix.startswith("fk"):
+                f = _FILTROS_CB.get(prefix)
+                if f is None:      # el daemon se reinició: ya no hay filtros para esa búsqueda
+                    _tg_api(cfg, "answerCallbackQuery", {
+                        "callback_query_id": qid, "show_alert": True,
+                        "text": "Esta búsqueda expiró (el bot se reinició). Repite el comando /jobs."})
+                    return
+            else:
+                f = _dec_filters(prefix[1:])      # botones antiguos
             rendered = render_page(_filter_offers(cfg, f), page, cfg.telegram.digest_page_size, cfg,
                                    label=f"🔎 <b>Ofertas</b>",
                                    filtros_txt=_describe_filters(f),
@@ -474,6 +484,25 @@ def _score_offers(cfg: Config, threshold: int, solo_sueldo: bool = False) -> lis
             sql + "ORDER BY score DESC LIMIT 50", (threshold,)).fetchall()]
     finally:
         conn.close()
+
+
+_FILTROS_CB: dict[str, dict] = {}   # clave corta → filtros (los últimos _FILTROS_CB_MAX)
+_FILTROS_CB_MAX = 300
+
+
+def _registrar_filtros(f: dict) -> str:
+    """Guarda los filtros y devuelve 'fk<8 hex>' para usar como prefijo de callback_data.
+    Antes se serializaban dentro del callback (base64 cortado a 22 chars, separador '-'
+    ambiguo y tope de 64 bytes) → páginas ≥2 filtraban distinto o Telegram rechazaba."""
+    import hashlib
+    canon = json.dumps({k: (sorted(v) if isinstance(v, set) else v) for k, v in f.items()},
+                       sort_keys=True, default=str, ensure_ascii=False)
+    key = "fk" + hashlib.sha1(canon.encode()).hexdigest()[:8]
+    _FILTROS_CB.pop(key, None)
+    _FILTROS_CB[key] = f
+    while len(_FILTROS_CB) > _FILTROS_CB_MAX:
+        _FILTROS_CB.pop(next(iter(_FILTROS_CB)))
+    return key
 
 
 def _enc_filters(f: dict) -> str:
@@ -1387,7 +1416,7 @@ def _handle_command(cfg: Config, message: dict, state: dict) -> None:
                     "chat_id": chat_id, "parse_mode": "HTML",
                     "text": f"Nada con <b>{_describe_filters(f)}</b> en el pool activo."})
                 return
-            prefix = "f" + _enc_filters(f)
+            prefix = _registrar_filtros(f)
             rendered = render_page(offers, 0, cfg.telegram.digest_page_size, cfg,
                                    label=f"🔎 <b>Ofertas</b>",
                                    filtros_txt=_describe_filters(f),
