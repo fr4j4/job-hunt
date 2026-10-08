@@ -79,7 +79,7 @@ def is_dev(rol_categoria: str | None, title: str, cfg: Config, description: str 
     # modo degradado (IA apagada): regex corregida sobre título + descripción
     t = (title or "").lower()
     d = (description or "").lower()
-    if re.search(cfg.relevance.nontech_titles, t, re.I):
+    if re.search(rf"\b(?:{cfg.relevance.nontech_titles})\b", t, re.I):
         return False
     return bool(re.search(
         r"\bdev(?:eloper|ops)?\b|\bdesarroll\w*\b(?=\s+(?:de\s+)?(?:software|aplicaciones|web|backend|frontend|api|sistemas|app))|"

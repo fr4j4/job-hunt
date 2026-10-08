@@ -48,6 +48,8 @@ def _page(q, cursor=""):
         log.warning("indeed query '%s' falló: %s", q, e)
         errores.registrar("indeed")
         return None
+    if not isinstance(d, dict):
+        return None
     if d.get("errors") and not (d.get("data") or {}).get("jobSearch") and not cursor:
         # la API rechazó pageInfo: reintenta con la query original (sin paginar)
         log.warning("indeed: pageInfo rechazado (%s) — sin paginación", str(d["errors"])[:100])
@@ -79,7 +81,7 @@ def jobs(queries, found_by_prefix="", on_query=None, max_pages=1):
             d = _page(q, cursor)
             if d is None:
                 break
-            js = d.get("data", {}).get("jobSearch", {}) or {}
+            js = (d.get("data") or {}).get("jobSearch") or {}
             out += _parse_results(js.get("results", []), q, found_by_prefix, vistos)
             cursor = ((js.get("pageInfo") or {}).get("nextCursor")) or ""
             if not cursor or not js.get("results"):

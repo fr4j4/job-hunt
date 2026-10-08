@@ -361,6 +361,74 @@ def table_block(offers: list[dict], links: bool = True) -> str:
     return "\n\n".join(cards)
 
 
+_TAGS_TG = ("b", "strong", "i", "em", "u", "ins", "s", "strike", "del", "code", "pre", "a",
+            "blockquote", "tg-spoiler", "span")
+_LIMITE_MSG = 3900   # Telegram acepta 4096 chars de texto ya parseado; holgura para cierres y '…'
+
+
+def cerrar_html(texto: str) -> str:
+    """Cierra en orden inverso las etiquetas abiertas de `texto` (HTML de Telegram)."""
+    abiertas: list[str] = []
+    for m in re.finditer(r"<(/?)([a-zA-Z][\w-]*)[^<>]*>", texto):
+        cierre, tag = m.group(1) == "/", m.group(2).lower()
+        if tag not in _TAGS_TG:
+            continue
+        if not cierre:
+            abiertas.append(tag)
+        elif tag in abiertas:
+            while abiertas and abiertas.pop() != tag:
+                pass
+    return "".join(f"</{t}>" for t in reversed(abiertas))
+
+
+def recortar_html(texto: str, limite: int = _LIMITE_MSG) -> str:
+    """Recorta HTML de Telegram SIN romperlo: corta en salto de línea (nunca dentro de una
+    etiqueta ni de una entidad &amp;) y cierra las etiquetas que queden abiertas.
+    Un [:N] ciego dejaba '<a href=...' a medias → Telegram 400 'Unclosed start tag'."""
+    if len(texto) <= limite:
+        return texto
+    corte = texto.rfind("\n", 0, limite)
+    if corte <= 0:
+        corte = limite
+        ini_tag, fin_tag = texto.rfind("<", 0, corte), texto.rfind(">", 0, corte)
+        if ini_tag > fin_tag:
+            corte = ini_tag                       # no cortar dentro de <...>
+        amp, pcoma = texto.rfind("&", 0, corte), texto.rfind(";", 0, corte)
+        if amp > pcoma and corte - amp <= 8:
+            corte = amp                           # no cortar dentro de &entidad;
+    cabeza = texto[:corte].rstrip()
+    return cabeza + cerrar_html(cabeza) + "\n…"
+
+
+def html_a_texto(texto: str) -> str:
+    """HTML de Telegram → texto plano legible (para reintentar sin formato). Los enlaces
+    quedan como 'texto (url)'."""
+    import html as _html
+    t = re.sub(r'<a\s+href="([^"]*)"[^>]*>(.*?)</a>', lambda m: f"{m.group(2)} ({_html.unescape(m.group(1))})",
+               texto or "", flags=re.S)
+    t = re.sub(r"<[^<>]*>", "", t)
+    return _html.unescape(t)
+
+
+def paginar_tarjetas(offers: list[dict], page_size: int, presupuesto: int = 2800) -> list[list[dict]]:
+    """Parte `offers` en páginas de ≤page_size ofertas Y ≤presupuesto caracteres de tarjetas,
+    de modo que ninguna página supere el límite de Telegram (nada se pierde: lo que no cabe
+    pasa a la página siguiente). Determinista: mismas ofertas → mismas páginas."""
+    paginas: list[list[dict]] = []
+    actual: list[dict] = []
+    usado = 0
+    for o in offers:
+        n = len(table_block([o])) + 2
+        if actual and (len(actual) >= page_size or usado + n > presupuesto):
+            paginas.append(actual)
+            actual, usado = [], 0
+        actual.append(o)
+        usado += n
+    if actual:
+        paginas.append(actual)
+    return paginas or [[]]
+
+
 def build_digest_text(offers: list[dict], cfg) -> str:
     """Texto = contexto: mejor match con detalle + tabla tabular de la página.
     El 🔗 de cada fila abre la oferta."""
@@ -368,7 +436,7 @@ def build_digest_text(offers: list[dict], cfg) -> str:
         return f"🔍 <i>Sin ofertas con score ≥ {cfg.alerts.min_score}</i> en este barrido."
     best = max(offers, key=lambda o: o.get("score", 0))
     stamp = datetime.now(timezone.utc).strftime("%d %b %H:%M")
-    shown = offers[:cfg.alerts.max_per_digest]
+    shown = paginar_tarjetas(offers[:cfg.alerts.max_per_digest], cfg.alerts.max_per_digest)[0]
     lines = [
         f"📬 <b>Ofertas ≥{cfg.alerts.min_score}</b> · <i>{len(offers)} activas</i> · {stamp}",
         "",
@@ -380,10 +448,10 @@ def build_digest_text(offers: list[dict], cfg) -> str:
     ]
     if best.get("ai_fit_reason"):
         lines.append(f"   🎯 <i>{esc(best['ai_fit_reason'][:140])}</i>")
-    lines += ["", "<b>Esta página</b> (toca el 🔗 para abrir):", table_block(shown)]
+    lines += ["", "<b>Esta página</b> (toca el título para abrir):", table_block(shown)]
     lines.append("")
-    lines.append("<i>⭐ ≥85 · 🟢 ≥70 · 🟡 ≥55 · ⚪ resto · * = IA · toca el 🔗 para abrir</i>")
-    return "\n".join(lines)[:4000]
+    lines.append("<i>⭐ ≥85 · 🟢 ≥70 · 🟡 ≥55 · ⚪ resto · toca el título para abrir</i>")
+    return recortar_html("\n".join(lines))
 
 
 def build_buttons(offers: list[dict], cfg) -> list[list[dict]]:

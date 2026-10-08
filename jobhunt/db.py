@@ -125,8 +125,20 @@ def init_db(conn: sqlite3.Connection) -> None:
                 updated_at = CASE WHEN NEW.updated_at = '' THEN strftime('%Y-%m-%dT%H:%M:%SZ','now') ELSE NEW.updated_at END
             WHERE group_id = NEW.group_id;
         END""")
-    conn.execute("""CREATE TRIGGER IF NOT EXISTS trg_ofertas_updated AFTER UPDATE ON ofertas
-        WHEN NEW.updated_at = OLD.updated_at
+    # updated_at = última modificación REAL de datos: el trigger solo salta si cambió el
+    # VALOR de alguna columna de contenido. No cuentan los toques de barrido (last_seen,
+    # occurrences, found_by) ni lo derivado (scores, date_canonical) ni el marcado del canal.
+    # Se recrea en cada init para cubrir columnas añadidas por migraciones futuras.
+    _sin_auditar = {"group_id", "created_at", "updated_at", "last_seen", "occurrences",
+                    "found_by", "score_version", "ctx_version", "last_fetch_ok",
+                    # derivadas/operativas: un rescore o el marcado del canal no editan la oferta
+                    "score", "market_score", "date_canonical", "staffing",
+                    "notified_channel_at", "fetch_fails"}
+    cols_cont = [r[1] for r in conn.execute("PRAGMA table_info(ofertas)") if r[1] not in _sin_auditar]
+    cambio = " OR ".join(f'NEW."{c}" IS NOT OLD."{c}"' for c in cols_cont)
+    conn.execute("DROP TRIGGER IF EXISTS trg_ofertas_updated")
+    conn.execute(f"""CREATE TRIGGER trg_ofertas_updated AFTER UPDATE ON ofertas
+        WHEN NEW.updated_at = OLD.updated_at AND ({cambio})
         BEGIN
             UPDATE ofertas SET updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
             WHERE group_id = NEW.group_id;

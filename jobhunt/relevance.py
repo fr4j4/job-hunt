@@ -69,7 +69,9 @@ def area_is_tech(area: str, cfg: Config) -> bool | None:
 
 
 def title_is_obvious_nontech(title: str, cfg: Config) -> bool:
-    return bool(re.search(cfg.relevance.nontech_titles, (title or "").lower(), re.I))
+    """Título obviamente no-tech. Con límites de palabra: 'Semiconductor' no es 'conductor'
+    ni 'Gestión de Repositorios' es 'repositor'."""
+    return bool(re.search(rf"\b(?:{cfg.relevance.nontech_titles})\b", (title or "").lower(), re.I))
 
 
 def batch_relevance(items: list[dict], cfg: Config) -> dict[int, bool]:

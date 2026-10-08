@@ -113,7 +113,8 @@ class Search:
     sample_computrabajo: list[str]
     sample_glassdoor: list[str]
     sample_rotation: float
-    max_pages: int = 3             # páginas por query (LinkedIn/Computrabajo/Indeed/Accenture)
+    max_pages: int = 3             # páginas por query (Computrabajo/Indeed/Accenture)
+    linkedin_max_pages: int = 8    # LinkedIn tiene su propio tope (corta antes por antigüedad)
 
 
 @dataclass
@@ -169,8 +170,9 @@ class RelevanceCfg:
     areas_nontech: str = (r"venta|b2c|seguridad$|guardia|logistica|produccion|manufactura|"
                           r"finanzas|contabilidad|recursos_humanos|servicios_generales|"
                           r"prevencion_de_riesgos|inmobiliaria|administracion_y_secretarias|marketing")
-    nontech_titles: str = (r"guardia|cajer[ao]|repositor|recepcionista|vendedor|operari[ao]|"
-                           r"bodeguero|conductor|mozo|auxiliar|captador")
+    nontech_titles: str = (r"guardias?|cajer[ao]s?|repositor(?:a|es|as)?|recepcionistas?|vendedor(?:a|es|as)?|"
+                           r"operari[ao]s?|bodegueros?|conductor(?:a|es|as)?|mozos?|auxiliar(?:es)?|"
+                           r"captador(?:a|es|as)?")
     ia_batch: int = 30
 
 
@@ -302,6 +304,7 @@ def load_config(env_file: Path | None = None) -> Config:
         sample_glassdoor=_env_list("SAMPLE_QUERIES_GLASSDOOR"),
         sample_rotation=_env_float("SAMPLE_ROTATION", 0.33),
         max_pages=max(1, min(10, _env_int("SEARCH_MAX_PAGES", 3))),
+        linkedin_max_pages=max(1, min(20, _env_int("LINKEDIN_MAX_PAGES", 8))),
     )
     sources = {
         "jooble": _env_bool("ENABLE_JOOBLE", True),
@@ -311,6 +314,7 @@ def load_config(env_file: Path | None = None) -> Config:
         "computrabajo": _env_bool("ENABLE_COMPUTRABAJO", True),
         "indeed": _env_bool("ENABLE_INDEED", True),
         "glassdoor": _env_bool("ENABLE_GLASSDOOR", True),
+        "aira": _env_bool("ENABLE_AIRA", True),   # antes faltaba: el barrido nunca corría AIRA
     }
     premium_hours = [int(h) for h in _env_list("PREMIUM_TICK_HOURS_UTC", "00,12")]
     jooble_key = _env("JOOBLE_API_KEY")
@@ -373,8 +377,9 @@ def load_config(env_file: Path | None = None) -> Config:
                            r"venta|b2c|logistica|produccion|manufactura|finanzas|contabilidad|"
                            r"recursos_humanos|servicios_generales|prevencion_de_riesgos|marketing"),
         nontech_titles=_env("RELEVANCE_NOUNTECH",
-                            r"guardia|cajer[ao]|repositor|recepcionista|vendedor|operari[ao]|"
-                            r"bodeguero|conductor|mozo|auxiliar|captador"),
+                            r"guardias?|cajer[ao]s?|repositor(?:a|es|as)?|recepcionistas?|vendedor(?:a|es|as)?|"
+                            r"operari[ao]s?|bodegueros?|conductor(?:a|es|as)?|mozos?|auxiliar(?:es)?|"
+                            r"captador(?:a|es|as)?"),
         ia_batch=_env_int("RELEVANCE_IA_BATCH", 30),
     )
     channel = ChannelCfg(
