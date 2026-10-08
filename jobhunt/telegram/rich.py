@@ -77,6 +77,20 @@ def _variantes(chat_id, offers):
     ]
 
 
+def probar_variantes(tg_call, chat_id, offers: list[dict]) -> list[tuple[str, bool, str]]:
+    """Prueba TODAS las variantes (sin cortar en la primera que funcione) y devuelve
+    [(variante, ok, detalle)]. Para diagnóstico: `python -m jobhunt tabla`."""
+    out = []
+    for nombre, build in _variantes(chat_id, offers):
+        try:
+            resp = tg_call("sendRichMessage", build())
+            ok = isinstance(resp, dict) and bool(resp.get("ok", True))
+            out.append((nombre, ok, "enviada" if ok else str(resp)[:200]))
+        except Exception as e:
+            out.append((nombre, False, str(e)[:200]))
+    return out
+
+
 def enviar_tabla(tg_call, chat_id, offers: list[dict]) -> tuple[bool, list[str]]:
     """Intenta enviar la tabla nativa. tg_call(method, payload) puede lanzar (error HTTP).
     Retorna (ok, errores) — errores = ["variante: detalle de Telegram", ...]."""

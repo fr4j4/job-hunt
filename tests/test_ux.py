@@ -154,3 +154,15 @@ def test_comando_tabla_cae_a_tarjetas_con_error(monkeypatch):
     bot._handle_command(_cfg(), {"chat": {"id": 1}, "text": "/tabla 5"}, {})
     textos = [p["text"] for m, p in enviados if m == "sendMessage"]
     assert any("Backend Python" in t for t in textos) and any("no aceptó la tabla nativa" in t for t in textos)
+
+
+def test_probar_variantes_no_corta_en_la_primera():
+    from jobhunt.telegram.rich import probar_variantes
+    n = []
+    def tg(m, p):
+        n.append(1)
+        if len(n) == 2:
+            raise RuntimeError("HTTP 400 mala")
+        return {"ok": True}
+    res = probar_variantes(tg, 1, _OFS)
+    assert [ok for _, ok, _ in res] == [True, False, True] and "mala" in res[1][2]
