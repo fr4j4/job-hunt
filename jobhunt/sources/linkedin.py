@@ -5,10 +5,11 @@ from datetime import datetime, timedelta, timezone
 UA = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120 Safari/537.36"}
 
 from ..logging_setup import get_logger
+from . import errores
 
 log = get_logger(__name__)
 
-def fetch(url, retries=2):
+def fetch(url, retries=2, fuente="linkedin"):
     for i in range(retries):
         try:
             req = urllib.request.Request(url, headers=UA)
@@ -17,6 +18,7 @@ def fetch(url, retries=2):
         except Exception as e:
             if i == retries - 1:
                 log.warning("fetch falló %s: %s", url, e)
+                errores.registrar(fuente)
                 return ""
             time.sleep(3)
     return ""

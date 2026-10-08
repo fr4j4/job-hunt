@@ -14,6 +14,7 @@ from pathlib import Path
 import tls_client
 
 from ..logging_setup import get_logger
+from . import errores
 
 log = get_logger(__name__)
 
@@ -49,6 +50,7 @@ def jobs(queries: list[str], found_by_prefix: str = "", max_pages: int = 2, on_q
         s, token = _session()
     except Exception as e:
         log.warning("glassdoor sesión falló: %s", e)
+        errores.registrar("glassdoor")
         return []
 
     for q in queries:
@@ -104,6 +106,7 @@ def jobs(queries: list[str], found_by_prefix: str = "", max_pages: int = 2, on_q
                     }
             except Exception as e:
                 log.warning("glassdoor query '%s' p%s falló: %s", q, pag, e)
+                errores.registrar("glassdoor")
                 break
             time.sleep(4)
     return list(out.values())

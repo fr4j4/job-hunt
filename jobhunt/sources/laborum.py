@@ -19,6 +19,7 @@ from html import unescape as _u
 import requests
 
 from ..logging_setup import get_logger
+from . import errores
 
 log = get_logger(__name__)
 
@@ -67,9 +68,11 @@ def _search(query: str, filtros: list[dict] | None = None, page: int = 0,
                 time.sleep(2 * (attempt + 1))
                 continue
             log.warning("laborum search %s: HTTP %s", query[:30], r.status_code)
+            errores.registrar("laborum")
             time.sleep(2)
         except Exception as e:
             log.warning("laborum fetch falló (%s): %s", query[:30], e)
+            errores.registrar("laborum")
             time.sleep(2 * (attempt + 1))
     return {}
 

@@ -23,6 +23,7 @@ _QUERY = """query GetJobData {
 
 import sys  # noqa: F401
 from ..logging_setup import get_logger
+from . import errores
 
 log = get_logger(__name__)
 
@@ -45,6 +46,7 @@ def _page(q, cursor=""):
             d = json.loads(r.read())
     except Exception as e:
         log.warning("indeed query '%s' falló: %s", q, e)
+        errores.registrar("indeed")
         return None
     if d.get("errors") and not (d.get("data") or {}).get("jobSearch") and not cursor:
         # la API rechazó pageInfo: reintenta con la query original (sin paginar)
@@ -57,6 +59,7 @@ def _page(q, cursor=""):
                 d = json.loads(r.read())
         except Exception as e:
             log.warning("indeed query '%s' falló: %s", q, e)
+            errores.registrar("indeed")
             return None
     return d
 

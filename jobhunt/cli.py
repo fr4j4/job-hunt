@@ -88,8 +88,10 @@ def cmd_run(cfg, notify: bool = True, on_phase=None, stop_event: threading.Event
         from .sources import (linkedin, computrabajo, indeed, glassdoor, laborum,
                               jooble, accenture, aira)
         from .relevance import filter_offers, title_is_obvious_nontech
+        from .sources import errores
         s = cfg.search
         jobs = []
+        errores.reset()
         salud: dict[str, dict] = {}   # fuente → {"n": ofertas, "err": fallos} (sources_summary)
 
         def _fuente_segura(nombre, fn):
@@ -100,9 +102,10 @@ def cmd_run(cfg, notify: bool = True, on_phase=None, stop_event: threading.Event
                 res = fn() or []
             except Exception as e:
                 log.warning("fuente %s falló (continúa): %s", nombre, e)
-                h["err"] += 1
+                h["err"] += 1 + errores.tomar(nombre)
                 return []
             h["n"] += len(res)
+            h["err"] += errores.tomar(nombre)   # errores que la fuente capturó por dentro
             return res
 
         # rotación REAL del muestreo: ventana que avanza en cada barrido (antes

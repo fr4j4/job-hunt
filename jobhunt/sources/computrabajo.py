@@ -18,7 +18,7 @@ def jobs(queries, found_by_prefix="", on_query=None, max_pages=1):
                 except Exception:
                     pass
             base = f"https://www.computrabajo.cl/empleos-de-{q}"
-            html_ = fetch(base if pag == 1 else f"{base}?p={pag}")
+            html_ = fetch(base if pag == 1 else f"{base}?p={pag}", fuente="computrabajo")
             if not html_:
                 break
             n_antes = len(vistos)

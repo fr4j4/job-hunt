@@ -18,6 +18,7 @@ from datetime import datetime, timedelta, timezone
 import requests
 
 from ..logging_setup import get_logger
+from . import errores
 
 log = get_logger(__name__)
 
@@ -99,10 +100,12 @@ def jobs(feeds: list[str], found_by_prefix: str = "", on_feed=None) -> list[dict
             r = s.get(f"https://gcs-storage.airavirtual.com/public/feeds/{fname}.json", timeout=20)
             if r.status_code != 200:
                 log.warning("aira %s: HTTP %s", fname, r.status_code)
+                errores.registrar("aira")
                 continue
             d = r.json()
         except Exception as e:
             log.warning("aira %s falló: %s", fname, e)
+            errores.registrar("aira")
             continue
         offers = _extract_offers(d)
         if on_feed:
