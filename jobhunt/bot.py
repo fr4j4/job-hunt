@@ -158,8 +158,24 @@ def _tg_edit_or_send(cfg: Config, chat_id: int, message_id: int | None,
     return (resp or {}).get("result", {}).get("message_id")
 
 
+_CAMPOS_TEXTO = {"sendMessage": "text", "editMessageText": "text"}
+
+
 def _tg_api(cfg: Config, method: str, payload: dict, retries: int = 2) -> dict:
-    return _tg_client(cfg).call(method, retries=retries, **payload)
+    """Llamada a la Bot API. Si Telegram rechaza el HTML ("can't parse entities") el usuario
+    no debe ver un error: se reintenta UNA vez como texto plano (sin parse_mode, sin tags)."""
+    try:
+        return _tg_client(cfg).call(method, retries=retries, **payload)
+    except RuntimeError as exc:
+        campo = _CAMPOS_TEXTO.get(method)
+        if not (campo and payload.get("parse_mode") and "can't parse entities" in str(exc)):
+            raise
+        from .telegram.render import html_a_texto
+        log.warning("HTML rechazado por Telegram en %s (%s) — reintento como texto plano",
+                    method, str(exc)[-120:])
+        plano = {k: v for k, v in payload.items() if k != "parse_mode"}
+        plano[campo] = html_a_texto(payload.get(campo) or "")[:4096]
+        return _tg_client(cfg).call(method, retries=0, **plano)
 
 
 def _tg_send_document(cfg: Config, chat_id: int, path: str, caption: str = "") -> bool:

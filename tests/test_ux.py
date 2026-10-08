@@ -203,7 +203,7 @@ def _ofertas_feas(n):
              "company": "Empresa & <Hijos> S.A. " * 3, "modality": "híbrido",
              "salary": "CLP 3200000", "techs": "Py;AWS;Docker", "seniority_real": "senior",
              "date_posted": "2026-10-07", "location": "Santiago, Chile",
-             "url": "https://www.linkedin.com/jobs/view/" + "x" * 150 + f"?id={i}&ref=a\"b",
+             "url": "https://www.linkedin.com/jobs/view/" + "x" * 150 + f"{i}?id={i}&ref=a\"b",
              "ai_idiomas": '[{"idioma":"inglés","excluyente":true}]', "ai_encaje": "alto",
              "ai_fit_reason": "Encaje <alto> & stack coincide " * 8, "ia_model": "m"}
             for i in range(n)]
@@ -247,3 +247,95 @@ def test_recortar_html_no_corta_tags_ni_entidades():
         _html_ok(out)
     sin_saltos = '<a href="https://x/' + "y" * 300 + '">texto largo</a> ' * 5
     _html_ok(recortar_html(sin_saltos, 120))
+
+
+# ---------- reintento sin formato ante 400 de parseo ----------
+
+def test_html_a_texto():
+    from jobhunt.telegram.render import html_a_texto
+    assert html_a_texto('<b>Hola</b> &amp; <a href="https://x/?a=1&amp;b=2">ver</a> <code>x</code>') == \
+        "Hola & ver (https://x/?a=1&b=2) x"
+
+
+def test_tg_api_reintenta_como_texto_plano(monkeypatch):
+    llamadas = []
+    class _Cli:
+        def call(self, method, retries=2, **p):
+            llamadas.append((method, p))
+            if len(llamadas) == 1:
+                raise RuntimeError('HTTP 400 {"description":"Bad Request: can\'t parse entities: Unclosed start tag"}')
+            return {"ok": True}
+    monkeypatch.setattr(bot, "_tg_client", lambda cfg: _Cli())
+    r = bot._tg_api(_cfg(), "sendMessage", {"chat_id": 1, "parse_mode": "HTML",
+                                            "text": '<b>Hola</b> <a href="https://x/1">ver', "reply_markup": "{}"})
+    assert r == {"ok": True} and len(llamadas) == 2
+    assert "parse_mode" not in llamadas[1][1] and llamadas[1][1]["text"].startswith("Hola")
+    assert llamadas[1][1]["reply_markup"] == "{}"           # los botones se conservan
+
+
+def test_tg_api_no_reintenta_otros_errores(monkeypatch):
+    class _Cli:
+        def call(self, method, retries=2, **p):
+            raise RuntimeError("HTTP 403 bot was blocked")
+    monkeypatch.setattr(bot, "_tg_client", lambda cfg: _Cli())
+    import pytest
+    with pytest.raises(RuntimeError):
+        bot._tg_api(_cfg(), "sendMessage", {"chat_id": 1, "parse_mode": "HTML", "text": "x"})
+
+
+# ---------- TODOS los mensajes de los comandos son HTML válido (datos hostiles) ----------
+
+class _ConnSinClose:
+    def __init__(self, c): self._c = c
+    def __getattr__(self, n): return getattr(self._c, n)
+    def close(self): pass
+
+
+def _db_hostil():
+    import sqlite3
+    from jobhunt import db as database
+    conn = sqlite3.connect(":memory:", check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    database.init_db(conn)
+    for i, o in enumerate(_ofertas_feas(40)):
+        # títulos/empresas distintos entre sí: si no, la deduplicación fusiona todo en 1 oferta
+        unico = " ".join(f"pal{i}x{j}" for j in range(14))
+        gid, _ = database.upsert(conn, {"title": f"<Dev> & {unico}", "company": f"Emp{i} & <S.A.>", "url": o["url"],
+                                        "source": "linkedin:x", "date": "2026-10-07",
+                                        "location": "Santiago <RM> & Chile"}, "2026-10-07T00:00:00")
+        conn.execute("""UPDATE ofertas SET score=?, market_score=?, salary=?, modality='remoto',
+            techs='Py;AWS', seniority_real='senior', ai_encaje='alto', ia_model='m', rol_categoria='Backend',
+            ai_idiomas=?, ai_fit_reason=?, ai_opinion=?, ai_resumen=?, description=? WHERE group_id=?""",
+                     (90 - i % 30, 80, o["salary"], o["ai_idiomas"], o["ai_fit_reason"],
+                      "op <x> & y " * 20, "res & <z> " * 10, "d " * 300, gid))
+    conn.commit()
+    return conn
+
+
+def test_todos_los_comandos_envian_html_valido(monkeypatch):
+    conn = _db_hostil()
+    c = _cfg()
+    c.channel.enabled, c.channel.chat_id = True, "-100"
+    monkeypatch.setattr(bot.database, "connect", lambda cfg: _ConnSinClose(conn))
+    enviados = []
+    def api(cfg, method, payload, retries=2):
+        enviados.append((method, payload))
+        return {"ok": True, "result": {"message_id": 1}}
+    monkeypatch.setattr(bot, "_tg_api", api)
+    comandos = ["/start", "/help", "/help admin", "/latest", "/latest 30", "/score 50", "/score 50 s",
+                "/jobs remote", '/jobs q"kubernetes terraform ñandú" remote salary2.5', "/jobs sinen",
+                "/stats", "/fuentes", "/config", "/lastest", "/zzz <b>", "/preview", "/channel"]
+    for cmd in comandos:
+        bot._handle_command(c, {"chat": {"id": 1}, "text": cmd}, {})
+    textos = [(m, p) for m, p in enviados if m in ("sendMessage", "editMessageText") and p.get("parse_mode") == "HTML"]
+    assert len(textos) >= len(comandos) - 3
+    for m, p in textos:
+        _html_ok(p["text"])
+        if p.get("reply_markup"):
+            rm = p["reply_markup"]
+            for fila in (json.loads(rm) if isinstance(rm, str) else rm)["inline_keyboard"]:
+                for b in fila:
+                    assert len(b.get("callback_data", "").encode()) <= 64, b   # límite de Telegram
+    # y el paginador (callbacks) también
+    prefijo = [p for m, p in textos if "fk" in str(p.get("reply_markup") or "")]
+    assert prefijo

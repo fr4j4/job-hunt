@@ -400,6 +400,16 @@ def recortar_html(texto: str, limite: int = _LIMITE_MSG) -> str:
     return cabeza + cerrar_html(cabeza) + "\n…"
 
 
+def html_a_texto(texto: str) -> str:
+    """HTML de Telegram → texto plano legible (para reintentar sin formato). Los enlaces
+    quedan como 'texto (url)'."""
+    import html as _html
+    t = re.sub(r'<a\s+href="([^"]*)"[^>]*>(.*?)</a>', lambda m: f"{m.group(2)} ({_html.unescape(m.group(1))})",
+               texto or "", flags=re.S)
+    t = re.sub(r"<[^<>]*>", "", t)
+    return _html.unescape(t)
+
+
 def paginar_tarjetas(offers: list[dict], page_size: int, presupuesto: int = 2800) -> list[list[dict]]:
     """Parte `offers` en páginas de ≤page_size ofertas Y ≤presupuesto caracteres de tarjetas,
     de modo que ninguna página supere el límite de Telegram (nada se pierde: lo que no cabe
