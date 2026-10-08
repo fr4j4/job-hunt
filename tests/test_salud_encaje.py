@@ -105,3 +105,59 @@ def test_ia_encaje_normaliza(monkeypatch):
 def test_laborum_fetch_detail_sin_red(monkeypatch):
     monkeypatch.setattr(laborum, "_search", lambda *a, **k: (_ for _ in ()).throw(AssertionError("red")))
     assert laborum.fetch_detail(1)["description"] == ""
+
+
+def test_errores_por_fuente_se_cuentan_y_limpian(monkeypatch):
+    from jobhunt.sources import errores, indeed
+    errores.reset()
+    monkeypatch.setattr(indeed.urllib.request, "urlopen",
+                        lambda *a, **k: (_ for _ in ()).throw(OSError("403")))
+    assert indeed.jobs(["python"], "t:", max_pages=2) == []
+    assert errores.tomar("indeed") == 1
+    assert errores.tomar("indeed") == 0          # tomar limpia
+
+
+def test_cmd_run_registra_errores_en_salud(monkeypatch, tmp_path):
+    import jobhunt.cli as cli
+    from jobhunt.sources import errores, linkedin
+    c = load_config()
+    c.data_dir = tmp_path
+    monkeypatch.setattr(type(c), "db_path", property(lambda self: tmp_path / "t.sqlite"), raising=False)
+    for k in c.sources:
+        c.sources[k] = (k == "linkedin")
+    c.search.mode, c.search.queries_linkedin = "profile", ["python"]
+    c.ia.enabled, c.channel.chat_id = False, ""
+    def _caida(*a, **k):
+        errores.registrar("linkedin")
+        return []
+    monkeypatch.setattr(linkedin, "fetch_jobs", _caida)
+    cli.cmd_run(c, notify=False)
+    conn = sqlite3.connect(tmp_path / "t.sqlite")
+    resumen = json.loads(conn.execute("SELECT sources_summary FROM scan_log").fetchone()[0])
+    assert resumen["linkedin"] == {"n": 0, "err": 1}
+
+
+def test_bot_encaje_async(monkeypatch):
+    import jobhunt.bot as bot
+    enviados = []
+    monkeypatch.setattr(bot, "_tg_api", lambda cfg, m, p: enviados.append(p.get("text", "")))
+    monkeypatch.setattr(bot.database, "connect", lambda cfg: _conn_enc())
+    monkeypatch.setattr(enrich, "backfill_encaje", lambda conn, cfg, n, on_progress=None: (2, 1))
+    monkeypatch.setattr(bot.database, "rescore_all", lambda *a, **k: 5)
+    bot._encaje_async(load_config(), 1, None)
+    assert any("iniciado" in t for t in enviados) and any("2 asignados" in t and "rescore: 5" in t
+                                                          for t in enviados)
+    assert not bot._IA_STATE["running"]
+
+
+def _conn_enc():
+    conn = _conn()
+    gid, _ = database.upsert(conn, {"title": "Dev", "company": "X", "url": "https://x/9",
+                                    "source": "t", "date": "2026-10-01"}, "2026-10-01T00:00:00")
+    conn.execute("UPDATE ofertas SET ia_model='m' WHERE group_id=?", (gid,))
+
+    class _SinClose:
+        def __init__(self, c): self._c = c
+        def __getattr__(self, n): return getattr(self._c, n)
+        def close(self): pass
+    return _SinClose(conn)

@@ -664,6 +664,7 @@ def _help_text() -> str:
         "/report — análisis completo del mercado con gráficos → PDF",
         "/report status · /report list — avance del reporte · historial de PDFs",
         "/stats — cobertura del pool (procesadas IA, datos faltantes)",
+        "/encaje [N] — asigna el encaje con el perfil a ofertas ya procesadas por IA y recalcula scores",
         "/fuentes — salud del scraping: ofertas por fuente en los últimos barridos",
         "/config — configuración actual (tokens enmascarados)",
         "/preview — oferta aleatoria como se vería en el canal (sin marcar publicada)",
@@ -915,6 +916,16 @@ def _handle_command(cfg: Config, message: dict, state: dict) -> None:
                                          "text": _config_text(cfg)})
         elif cmd == "/preview":
             _preview_offer(cfg, chat_id, arg)
+        elif cmd == "/encaje":
+            busy = _op_busy()
+            if busy:
+                _tg_api(cfg, "sendMessage", {
+                    "chat_id": chat_id, "parse_mode": "HTML",
+                    "text": f"⏳ Hay una operación en curso ({busy}, {_op_minutes(busy)}m) — "
+                            f"espera que termine antes de lanzar el backfill de encaje"})
+            else:
+                max_n = int(arg) if arg.strip().isdigit() else None
+                threading.Thread(target=_encaje_async, args=(cfg, chat_id, max_n), daemon=True).start()
         elif cmd == "/fuentes":
             from .salud import texto_fuentes
             conn = database.connect(cfg)
@@ -1465,6 +1476,53 @@ def _ia_batch_async(cfg: Config, chat_id: int | None, scheduled: bool = False,
                                              "text": f"⚠️ Batch IA falló: <code>{esc(str(exc)[:200])}</code>"})
             except Exception:
                 pass
+
+
+def _encaje_async(cfg: Config, chat_id: int | None, max_n: int | None = None) -> None:
+    """Backfill de ai_encaje + rescore en background (comparte el lock _IA_STATE con /enrich).
+    Nunca tumba el daemon; reporta inicio y fin al chat."""
+    if _IA_STATE["running"] or _SEARCH_STATE["running"]:
+        return
+    _IA_STATE.update(running=True, done=0, total=0, current="encaje", t0=time.time())
+    t0 = time.time()
+    try:
+        from .enrich import backfill_encaje
+        from .scoring import compute_score, compute_market_score
+        conn = database.connect(cfg)
+        try:
+            pend = conn.execute("SELECT COUNT(*) FROM ofertas WHERE active=1 AND ia_model != '' "
+                                "AND ai_encaje = ''").fetchone()[0]
+            total = min(pend, max_n) if max_n else pend
+            if chat_id:
+                _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
+                                             "text": f"🎯 <b>Backfill de encaje iniciado</b> — {total} ofertas"})
+            _IA_STATE.update(total=total)
+            hechas, fallidas = backfill_encaje(
+                conn, cfg, max_n, on_progress=lambda i, n: _IA_STATE.update(done=i))
+            version_id = database.current_version(conn) or (
+                "env-" + datetime.now(timezone.utc).strftime("%Y%m%d%H%M"))
+            database.register_criteria_version(conn, version_id, cfg)
+            rescored = database.rescore_all(conn, compute_score, version_id, cfg,
+                                            market_score_fn=compute_market_score)
+        finally:
+            conn.close()
+        dur = int(time.time() - t0)
+        if chat_id:
+            _tg_api(cfg, "sendMessage", {
+                "chat_id": chat_id, "parse_mode": "HTML",
+                "text": f"🎯 <b>Encaje terminado</b> — {hechas} asignados · {fallidas} fallidos · "
+                        f"rescore: {rescored} · {dur // 60}m{dur % 60:02d}s"})
+        log.info("backfill encaje OK: %d asignados, %d fallidos, rescore %d", hechas, fallidas, rescored)
+    except Exception as exc:
+        log.error("backfill encaje falló: %s", exc)
+        if chat_id:
+            try:
+                _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
+                                             "text": f"⚠️ Backfill de encaje falló: <code>{esc(str(exc)[:200])}</code>"})
+            except Exception:
+                pass
+    finally:
+        _IA_STATE.reset()
 
 
 def _enrich_status(cfg: Config, chat_id: int) -> None:

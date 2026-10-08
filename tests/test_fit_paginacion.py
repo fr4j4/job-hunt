@@ -61,7 +61,7 @@ def test_computrabajo_pagina_y_corta_sin_nuevas(monkeypatch):
                "https://www.computrabajo.cl/empleos-de-python?p=2": _card(3),
                "https://www.computrabajo.cl/empleos-de-python?p=3": _card(3)}   # repetida → corta
     pedidas = []
-    monkeypatch.setattr(computrabajo, "fetch", lambda u: pedidas.append(u) or paginas.get(u, ""))
+    monkeypatch.setattr(computrabajo, "fetch", lambda u, **kw: pedidas.append(u) or paginas.get(u, ""))
     out = computrabajo.jobs(["python"], "t:", max_pages=5)
     assert len(out) == 3 and len(pedidas) == 3
 
