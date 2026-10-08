@@ -86,37 +86,53 @@ def cmd_run(cfg, notify: bool = True, on_phase=None, stop_event: threading.Event
 
         from .sources import (linkedin, computrabajo, indeed, glassdoor, laborum,
                               jooble, accenture, aira)
-        from .relevance import filter_offers
+        from .relevance import filter_offers, title_is_obvious_nontech
         s = cfg.search
         jobs = []
+        salud: dict[str, dict] = {}   # fuente → {"n": ofertas, "err": fallos} (sources_summary)
+
+        def _fuente_segura(nombre, fn):
+            """F3: una fuente rota no aborta el barrido (spec-audit). Registra cuántas
+            ofertas rindió cada fuente: 0 con queries configuradas = posible bloqueo."""
+            h = salud.setdefault(nombre, {"n": 0, "err": 0})
+            try:
+                res = fn() or []
+            except Exception as e:
+                log.warning("fuente %s falló (continúa): %s", nombre, e)
+                h["err"] += 1
+                return []
+            h["n"] += len(res)
+            return res
+
+        # rotación REAL del muestreo: ventana que avanza en cada barrido (antes
+        # [:n] repetía siempre las mismas queries y el resto nunca se visitaba)
+        tick = int(time.time() // 3600 // max(1, cfg.daemon.interval_min // 60))
+
+        def _rotar(lst, n):
+            if not lst or n >= len(lst):
+                return list(lst)
+            ini = (tick * n) % len(lst)
+            return (lst + lst)[ini:ini + n]
+
+        mp = s.max_pages
         if cfg.sources.get("aira"):
             phase("aira (feeds JSON employers)")
-            try:
+            def _aira():
                 raw = aira.jobs(cfg.aira_feeds, "aira:")
                 relevantes, stats = filter_offers(raw, cfg)
-                jobs += relevantes
                 log.info("aira: %d/%d ofertas pasaron el gate %s", len(relevantes), len(raw), stats)
-            except Exception as e:
-                log.warning("aira falló (continúa el barrido): %s", e)
+                return relevantes
+            jobs += _fuente_segura("aira", _aira)
         if cfg.sources.get("jooble"):
             phase("jooble")
             # jooble usa browser headless bajo xvfb (la API REST exige login de usuario)
-            try:
-                jobs += jooble.jobs(s.queries_jooble, "perfil:", on_query=qcb("jooble"))
-            except Exception as e:
-                log.warning("jooble falló (continúa el barrido): %s", e)
-        def _fuente_segura(nombre, fn):
-            """F3: una fuente rota no aborta el barrido (spec-audit)."""
-            try:
-                return fn()
-            except Exception as e:
-                log.warning("fuente %s falló (continúa): %s", nombre, e)
-                return []
-
+            jobs += _fuente_segura("jooble",
+                lambda: jooble.jobs(s.queries_jooble, "perfil:", on_query=qcb("jooble")))
         if cfg.sources.get("accenture", True):
             phase("accenture")
             jobs += _fuente_segura("accenture",
-                lambda: accenture.jobs(s.queries_accenture, "perfil:", on_query=qcb("accenture")))
+                lambda: accenture.jobs(s.queries_accenture, "perfil:", max_pages=mp,
+                                       on_query=qcb("accenture")))
         if cfg.sources.get("laborum", True):
             phase("laborum")
             jobs += _fuente_segura("laborum",
@@ -128,34 +144,51 @@ def cmd_run(cfg, notify: bool = True, on_phase=None, stop_event: threading.Event
         if cfg.sources.get("computrabajo"):
             phase("computrabajo")
             jobs += _fuente_segura("computrabajo",
-                lambda: computrabajo.jobs(s.queries_computrabajo, "perfil:", on_query=qcb("computrabajo")))
+                lambda: computrabajo.jobs(s.queries_computrabajo, "perfil:", max_pages=mp,
+                                          on_query=qcb("computrabajo")))
         if cfg.search.mode in ("both", "sample"):
             # muestreo amplio: rotación para diversificar sin inflar requests
             phase("linkedin/computrabajo (muestreo)")
             n = max(1, int(len(s.sample_linkedin) * s.sample_rotation))
-            jobs += _fuente_segura("linkedin", lambda: linkedin.fetch_jobs(s.sample_linkedin[:n], "sample:"))
-            jobs += _fuente_segura("computrabajo", lambda: computrabajo.jobs(s.sample_computrabajo[:n], "sample:"))
+            if cfg.sources.get("linkedin"):
+                jobs += _fuente_segura("linkedin",
+                    lambda: linkedin.fetch_jobs(_rotar(s.sample_linkedin, n), "sample:"))
+            if cfg.sources.get("computrabajo"):
+                jobs += _fuente_segura("computrabajo",
+                    lambda: computrabajo.jobs(_rotar(s.sample_computrabajo, n), "sample:",
+                                              max_pages=mp))
             if cfg.sources.get("indeed"):
                 phase("indeed")
                 jobs += _fuente_segura("indeed",
-                    lambda: indeed.jobs(s.sample_indeed[:n], "muestra:", on_query=qcb("indeed")))
+                    lambda: indeed.jobs(_rotar(s.sample_indeed, n), "muestra:", max_pages=mp,
+                                        on_query=qcb("indeed")))
             if cfg.sources.get("glassdoor") and _is_premium_tick(cfg):
                 jobs += _fuente_segura("glassdoor",
-                    lambda: glassdoor.jobs(s.sample_glassdoor[:2], "muestra:", on_query=qcb("glassdoor")))
+                    lambda: glassdoor.jobs(_rotar(s.sample_glassdoor, 2), "muestra:",
+                                           on_query=qcb("glassdoor")))
         if cfg.sources.get("indeed") and _is_premium_tick(cfg):
             phase("indeed")
             jobs += _fuente_segura("indeed",
-                lambda: indeed.jobs(s.queries_indeed, "perfil:", on_query=qcb("indeed")))
+                lambda: indeed.jobs(s.queries_indeed, "perfil:", max_pages=mp,
+                                    on_query=qcb("indeed")))
         if cfg.sources.get("glassdoor") and _is_premium_tick(cfg):
             phase("glassdoor (perfil)")
             jobs += _fuente_segura("glassdoor",
                 lambda: glassdoor.jobs(s.queries_glassdoor, "perfil:", on_query=qcb("glassdoor")))
 
+        # salud por fuente: una fuente habilitada que rinde 0 (o falla) casi siempre
+        # es bloqueo/cambio de API, no "no hay ofertas" — se deja en el log y en scan_log
+        for nombre, h in salud.items():
+            if h["n"] == 0:
+                log.warning("fuente %s: 0 ofertas (errores=%d) — posible bloqueo o cambio de API",
+                            nombre, h["err"])
+        log.info("salud de fuentes: %s", ", ".join(f"{k}={v['n']}" for k, v in salud.items()))
+
         log.info("barrido iniciado: %d ofertas crudas (mode=%s)", len(jobs), s.mode)
 
         # dedup + index + score al indexar (commit cada 25 filas: el lock de
         # SQLite se retiene <1s por vez — batches IA / comandos no quedan fuera)
-        seen_urls, new_jobs, total_seen = set(), [], 0
+        seen_urls, new_jobs, total_seen, descartadas = set(), [], 0, 0
         now = _now()
         for n, j in enumerate(jobs, 1):
             from .db import url_key
@@ -164,6 +197,11 @@ def cmd_run(cfg, notify: bool = True, on_phase=None, stop_event: threading.Event
                 continue
             if uk:
                 seen_urls.add(uk)
+            # gate de entrada para TODAS las fuentes (antes solo AIRA): cargos
+            # obviamente no-tech ni se indexan ni gastan IA local
+            if cfg.relevance.mode != "off" and title_is_obvious_nontech(j.get("title") or "", cfg):
+                descartadas += 1
+                continue
             j["uid"] = ""
             gid, is_new = database.upsert(conn, j, now)
             j["uid"] = gid
@@ -175,18 +213,22 @@ def cmd_run(cfg, notify: bool = True, on_phase=None, stop_event: threading.Event
                 new_jobs.append({**j, "score": score, "group_id": gid})
             if n % 25 == 0:
                 conn.commit()
+        if descartadas:
+            log.info("gate de entrada: %d ofertas no-tech descartadas por título", descartadas)
         conn.execute("""INSERT INTO scan_log (ts, total_seen, new_count,
-            lots_done, ia_failures, breaker_trips, channel_posts)
-            VALUES (?,?,?,?,?,?,?)""",
+            lots_done, ia_failures, breaker_trips, channel_posts, sources_summary)
+            VALUES (?,?,?,?,?,?,?,?)""",
                      (now, total_seen, len(new_jobs), lots_done, ia_failures,
-                      breaker_trips, channel_posts))
+                      breaker_trips, channel_posts, json.dumps(salud, ensure_ascii=False)))
         conn.commit()
         row_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
 
         # PIPELINE POR LOTES con IA paralela (spec v4.1 §2):
         # lotes de IA_BATCH_SIZE, dentro de cada lote IA_CONCURRENCY workers HTTP
         # (sin SQLite — conexión única en este hilo), publish incremental por lote.
-        new_sorted = sorted(new_jobs, key=lambda j: -j.get("score", 0))  # mejores primero (aprox)
+        # score 0 = descartada por red keyword/ubicación del perfil → no gasta IA
+        new_sorted = sorted((j for j in new_jobs if j.get("score", 0) > 0),
+                            key=lambda j: -j.get("score", 0))  # mejores primero (aprox)
         total_new = len(new_sorted)
         presupuesto_canal = cfg.channel.max_posts_per_sweep if (
             cfg.channel.enabled and cfg.channel.chat_id) else 0
