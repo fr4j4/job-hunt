@@ -354,8 +354,8 @@ def _send_digest(cfg: Config, tg_api, kind: str, text: str, conn, now: datetime,
     automático (force=False, sin chat_id) conserva la idempotencia por bucket.
     """
     if len(text) > 4096:
-        cut = text.rfind("\n\n", 0, 4000)
-        text = (text[:cut] if cut > 0 else text[:4000]) + "\n…"
+        from .telegram.render import recortar_html
+        text = recortar_html(text, 4000)
     if chat_id is not None or force:
         cid = int(chat_id) if chat_id is not None else int(cfg.channel.chat_id)
         try:

@@ -166,3 +166,176 @@ def test_probar_variantes_no_corta_en_la_primera():
         return {"ok": True}
     res = probar_variantes(tg, 1, _OFS)
     assert [ok for _, ok, _ in res] == [True, False, True] and "mala" in res[1][2]
+
+
+# ---------- HTML válido y bajo el límite de Telegram (bug 'Unclosed start tag') ----------
+
+class _Estricto(HTMLParser):
+    """Falla ante etiquetas sin cerrar/desbalanceadas (lo que Telegram rechaza con 400)."""
+    PERMITIDAS = {"b", "i", "u", "s", "code", "pre", "a", "blockquote"}
+    def __init__(self):
+        super().__init__(convert_charrefs=False)
+        self.pila = []
+    def handle_starttag(self, t, a):
+        assert t in self.PERMITIDAS, f"tag no soportada por Telegram: {t}"
+        self.pila.append(t)
+    def handle_endtag(self, t):
+        assert self.pila and self.pila.pop() == t, f"cierre desbalanceado: {t}"
+    def close(self):
+        super().close()
+        assert not self.pila, f"etiquetas sin cerrar: {self.pila}"
+
+
+def _html_ok(texto):
+    p = _Estricto()
+    p.feed(texto)
+    p.close()
+    assert "<" not in re.sub(r"<[^<>]*>", "", texto), "'<' suelto sin escapar"
+    assert len(texto) <= 4096, len(texto)
+
+
+import re
+
+
+def _ofertas_feas(n):
+    return [{"score": 90 - i % 40, "group_id": f"g{i}",
+             "title": f"Desarrollador <Senior> & Líder Técnico Full Stack Python/Java/AWS #{i} " * 3,
+             "company": "Empresa & <Hijos> S.A. " * 3, "modality": "híbrido",
+             "salary": "CLP 3200000", "techs": "Py;AWS;Docker", "seniority_real": "senior",
+             "date_posted": "2026-10-07", "location": "Santiago, Chile",
+             "url": "https://www.linkedin.com/jobs/view/" + "x" * 150 + f"{i}?id={i}&ref=a\"b",
+             "ai_idiomas": '[{"idioma":"inglés","excluyente":true}]', "ai_encaje": "alto",
+             "ai_fit_reason": "Encaje <alto> & stack coincide " * 8, "ia_model": "m"}
+            for i in range(n)]
+
+
+def test_render_page_siempre_html_valido_y_bajo_el_limite():
+    c = _cfg()
+    ofertas = _ofertas_feas(60)
+    for page_size in (1, 5, 10, 20, 50):
+        total_vistas = 0
+        pag = 0
+        while True:
+            r = bot.render_page(ofertas, pag, page_size, c)
+            _html_ok(r["text"])
+            total_vistas += r["text"].count("<a href=")
+            nav = [b["callback_data"] for b in r["keyboard"][0]]
+            if not any(cb.endswith(f":page:{pag + 1}") for cb in nav):
+                break
+            pag += 1
+        # nada se pierde: cada oferta aparece en alguna página (la 'Mejor match' no es enlace)
+        assert total_vistas == len(ofertas), (page_size, total_vistas)
+
+
+def test_digest_y_post_html_validos():
+    from jobhunt.telegram.render import build_digest_text
+    c = _cfg()
+    c.alerts.max_per_digest = 40
+    _html_ok(build_digest_text(_ofertas_feas(40), c))
+    from jobhunt.channel import render_offer_post
+    texto, _ = render_offer_post({**_ofertas_feas(1)[0], "market_score": 80,
+                                  "ai_opinion": "o <x> & y " * 30, "ai_resumen": "r & <z> " * 20,
+                                  "ai_red_flags": '["a <b>","c & d"]'})
+    _html_ok(texto)
+
+
+def test_recortar_html_no_corta_tags_ni_entidades():
+    from jobhunt.telegram.render import recortar_html
+    base = '<b>' + 'a&amp;b ' * 200 + '</b>'
+    for lim in (50, 51, 53, 100, 777):
+        out = recortar_html(base, lim)
+        _html_ok(out)
+    sin_saltos = '<a href="https://x/' + "y" * 300 + '">texto largo</a> ' * 5
+    _html_ok(recortar_html(sin_saltos, 120))
+
+
+# ---------- reintento sin formato ante 400 de parseo ----------
+
+def test_html_a_texto():
+    from jobhunt.telegram.render import html_a_texto
+    assert html_a_texto('<b>Hola</b> &amp; <a href="https://x/?a=1&amp;b=2">ver</a> <code>x</code>') == \
+        "Hola & ver (https://x/?a=1&b=2) x"
+
+
+def test_tg_api_reintenta_como_texto_plano(monkeypatch):
+    llamadas = []
+    class _Cli:
+        def call(self, method, retries=2, **p):
+            llamadas.append((method, p))
+            if len(llamadas) == 1:
+                raise RuntimeError('HTTP 400 {"description":"Bad Request: can\'t parse entities: Unclosed start tag"}')
+            return {"ok": True}
+    monkeypatch.setattr(bot, "_tg_client", lambda cfg: _Cli())
+    r = bot._tg_api(_cfg(), "sendMessage", {"chat_id": 1, "parse_mode": "HTML",
+                                            "text": '<b>Hola</b> <a href="https://x/1">ver', "reply_markup": "{}"})
+    assert r == {"ok": True} and len(llamadas) == 2
+    assert "parse_mode" not in llamadas[1][1] and llamadas[1][1]["text"].startswith("Hola")
+    assert llamadas[1][1]["reply_markup"] == "{}"           # los botones se conservan
+
+
+def test_tg_api_no_reintenta_otros_errores(monkeypatch):
+    class _Cli:
+        def call(self, method, retries=2, **p):
+            raise RuntimeError("HTTP 403 bot was blocked")
+    monkeypatch.setattr(bot, "_tg_client", lambda cfg: _Cli())
+    import pytest
+    with pytest.raises(RuntimeError):
+        bot._tg_api(_cfg(), "sendMessage", {"chat_id": 1, "parse_mode": "HTML", "text": "x"})
+
+
+# ---------- TODOS los mensajes de los comandos son HTML válido (datos hostiles) ----------
+
+class _ConnSinClose:
+    def __init__(self, c): self._c = c
+    def __getattr__(self, n): return getattr(self._c, n)
+    def close(self): pass
+
+
+def _db_hostil():
+    import sqlite3
+    from jobhunt import db as database
+    conn = sqlite3.connect(":memory:", check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    database.init_db(conn)
+    for i, o in enumerate(_ofertas_feas(40)):
+        # títulos/empresas distintos entre sí: si no, la deduplicación fusiona todo en 1 oferta
+        unico = " ".join(f"pal{i}x{j}" for j in range(14))
+        gid, _ = database.upsert(conn, {"title": f"<Dev> & {unico}", "company": f"Emp{i} & <S.A.>", "url": o["url"],
+                                        "source": "linkedin:x", "date": "2026-10-07",
+                                        "location": "Santiago <RM> & Chile"}, "2026-10-07T00:00:00")
+        conn.execute("""UPDATE ofertas SET score=?, market_score=?, salary=?, modality='remoto',
+            techs='Py;AWS', seniority_real='senior', ai_encaje='alto', ia_model='m', rol_categoria='Backend',
+            ai_idiomas=?, ai_fit_reason=?, ai_opinion=?, ai_resumen=?, description=? WHERE group_id=?""",
+                     (90 - i % 30, 80, o["salary"], o["ai_idiomas"], o["ai_fit_reason"],
+                      "op <x> & y " * 20, "res & <z> " * 10, "d " * 300, gid))
+    conn.commit()
+    return conn
+
+
+def test_todos_los_comandos_envian_html_valido(monkeypatch):
+    conn = _db_hostil()
+    c = _cfg()
+    c.channel.enabled, c.channel.chat_id = True, "-100"
+    monkeypatch.setattr(bot.database, "connect", lambda cfg: _ConnSinClose(conn))
+    enviados = []
+    def api(cfg, method, payload, retries=2):
+        enviados.append((method, payload))
+        return {"ok": True, "result": {"message_id": 1}}
+    monkeypatch.setattr(bot, "_tg_api", api)
+    comandos = ["/start", "/help", "/help admin", "/latest", "/latest 30", "/score 50", "/score 50 s",
+                "/jobs remote", '/jobs q"kubernetes terraform ñandú" remote salary2.5', "/jobs sinen",
+                "/stats", "/fuentes", "/config", "/lastest", "/zzz <b>", "/preview", "/channel"]
+    for cmd in comandos:
+        bot._handle_command(c, {"chat": {"id": 1}, "text": cmd}, {})
+    textos = [(m, p) for m, p in enviados if m in ("sendMessage", "editMessageText") and p.get("parse_mode") == "HTML"]
+    assert len(textos) >= len(comandos) - 3
+    for m, p in textos:
+        _html_ok(p["text"])
+        if p.get("reply_markup"):
+            rm = p["reply_markup"]
+            for fila in (json.loads(rm) if isinstance(rm, str) else rm)["inline_keyboard"]:
+                for b in fila:
+                    assert len(b.get("callback_data", "").encode()) <= 64, b   # límite de Telegram
+    # y el paginador (callbacks) también
+    prefijo = [p for m, p in textos if "fk" in str(p.get("reply_markup") or "")]
+    assert prefijo
