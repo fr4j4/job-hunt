@@ -2001,6 +2001,11 @@ def _load_pool(cfg: Config) -> list[dict]:
         return [dict(r) for r in conn.execute(
             "SELECT * FROM ofertas WHERE active=1 AND score >= ? ORDER BY score DESC",
             (cfg.alerts.min_score,)).fetchall()]
+    except sqlite3.OperationalError as exc:
+        # DB recién creada/borrada sin tablas: degradar a pool vacío en vez de
+        # tumbar el daemon (init_db del bootstrap o del primer barrido lo recrea).
+        log.warning("_load_pool sin esquema (¿DB vacía?): %s", exc)
+        return []
     finally:
         conn.close()
 
@@ -2030,12 +2035,18 @@ def _sweep_hours_due(cfg: Config, state: dict) -> bool:
     return now.hour in cfg.daemon.sweep_hours_utc and state.get("last_sweep_key") != key
 
 
-def run_daemon(cfg: Config) -> None:
-    """Proceso residente: sin barridos al arrancar (carga pool desde DB) +
-    barridos por horas agendadas (DAEMON_SWEEP_HOURS_UTC) + comandos/callbacks."""
-    log.info("daemon iniciado · barridos agendados %s UTC · callbacks + comandos activos",
-             cfg.daemon.sweep_hours_utc)
-
+def _daemon_bootstrap(cfg: Config) -> dict:
+    """Estado inicial del daemon, en orden seguro para DB inexistente/vacía:
+    init_db PRIMERO (crea archivo + tablas + migraciones), después las lecturas.
+    Un fallo en init_db degrada con warning: el primer barrido lo reintenta."""
+    try:
+        _c = database.connect(cfg)
+        try:
+            database.init_db(_c)
+        finally:
+            _c.close()
+    except Exception as exc:
+        log.warning("init_db al arranque falló (se reintenta en el barrido): %s", exc)
     state: dict = {"offers": _load_pool(cfg), "anchor_id": None, "last_sweep_key": ""}
     # FIX sweep-fantasma: el marcador persiste en DB — un restart no re-barre la hora ya hecha
     try:
@@ -2046,17 +2057,17 @@ def run_daemon(cfg: Config) -> None:
             _c0.close()
     except Exception as exc:
         log.warning("no pude leer last_sweep_key persistente (arranca fresco): %s", exc)
-    _register_commands(cfg)
+    return state
 
-    # H4: migraciones al arranque del daemon (no esperar al primer barrido)
-    try:
-        _c = database.connect(cfg)
-        try:
-            database.init_db(_c)
-        finally:
-            _c.close()
-    except Exception as exc:
-        log.warning("init_db al arranque falló (se reintenta en el barrido): %s", exc)
+
+def run_daemon(cfg: Config) -> None:
+    """Proceso residente: sin barridos al arrancar (carga pool desde DB) +
+    barridos por horas agendadas (DAEMON_SWEEP_HOURS_UTC) + comandos/callbacks."""
+    state: dict = _daemon_bootstrap(cfg)
+    log.info("daemon iniciado · barridos agendados %s UTC · callbacks + comandos activos",
+             cfg.daemon.sweep_hours_utc)
+
+    _register_commands(cfg)
 
     # mensaje de arranque (fancy, con resumen del pool) — SIN lista de jobs;
     # la ancla se crea solo tras un barrido (search agendado o manual)
