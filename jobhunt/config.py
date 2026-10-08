@@ -144,6 +144,7 @@ class Alerts:
     min_score: int
     max_per_digest: int
     worth_it_score: int
+    source_sweeps: int = 3         # avisa al admin si una fuente rinde 0 N barridos seguidos
 
 
 @dataclass
@@ -352,6 +353,7 @@ def load_config(env_file: Path | None = None) -> Config:
         min_score=_env_int("ALERT_MIN_SCORE", 70),
         max_per_digest=_env_int("ALERT_MAX_PER_DIGEST", 10),
         worth_it_score=_env_int("ALERT_WORTH_IT_SCORE", 60),
+        source_sweeps=max(1, _env_int("ALERT_SOURCE_SWEEPS", 3)),
     )
     daemon = Daemon(
         interval_min=_env_int("DAEMON_INTERVAL_MIN", 240),

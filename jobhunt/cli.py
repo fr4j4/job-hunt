@@ -4,6 +4,7 @@
     python -m jobhunt rescore      # re-evalúa todo el pool con el criterio vigente
     python -m jobhunt enrich       # backfill Anillo A (JSON-LD)
     python -m jobhunt ia           # batch IA nocturno (deepseek-v4-flash)
+    python -m jobhunt encaje [N]   # backfill de encaje con el perfil + rescore
     python -m jobhunt report       # stats de mercado del pool completo
 """
 from __future__ import annotations
@@ -19,7 +20,7 @@ from .logging_setup import get_logger
 
 log = get_logger(__name__)
 from . import db as database
-from .scoring import compute_score, compute_market_score
+from .scoring import compute_score, compute_market_score, tiene_senal_perfil
 from .dedup import find_duplicate
 from .notify import send_digest
 import json
@@ -205,12 +206,13 @@ def cmd_run(cfg, notify: bool = True, on_phase=None, stop_event: threading.Event
             j["uid"] = ""
             gid, is_new = database.upsert(conn, j, now)
             j["uid"] = gid
-            score, _ = compute_score(j, cfg)
+            score, bd = compute_score(j, cfg)
             conn.execute("UPDATE ofertas SET score=?, score_version=? WHERE group_id=?",
                          (score, version_id, gid))
             total_seen += 1
             if is_new:
-                new_jobs.append({**j, "score": score, "group_id": gid})
+                new_jobs.append({**j, "score": score, "group_id": gid,
+                                 "_senal": tiene_senal_perfil(bd)})
             if n % 25 == 0:
                 conn.commit()
         if descartadas:
@@ -226,8 +228,12 @@ def cmd_run(cfg, notify: bool = True, on_phase=None, stop_event: threading.Event
         # PIPELINE POR LOTES con IA paralela (spec v4.1 §2):
         # lotes de IA_BATCH_SIZE, dentro de cada lote IA_CONCURRENCY workers HTTP
         # (sin SQLite — conexión única en este hilo), publish incremental por lote.
-        # score 0 = descartada por red keyword/ubicación del perfil → no gasta IA
-        new_sorted = sorted((j for j in new_jobs if j.get("score", 0) > 0),
+        # score 0 = descartada por red keyword/ubicación del perfil → no gasta IA;
+        # sin señal de perfil en el título → IA diferida al batch nocturno (C9)
+        diferidas = sum(1 for j in new_jobs if j.get("score", 0) > 0 and not j.get("_senal", True))
+        if diferidas:
+            log.info("IA diferida al batch nocturno: %d ofertas sin señal de perfil en el título", diferidas)
+        new_sorted = sorted((j for j in new_jobs if j.get("score", 0) > 0 and j.get("_senal", True)),
                             key=lambda j: -j.get("score", 0))  # mejores primero (aprox)
         total_new = len(new_sorted)
         presupuesto_canal = cfg.channel.max_posts_per_sweep if (
@@ -293,6 +299,9 @@ def cmd_run(cfg, notify: bool = True, on_phase=None, stop_event: threading.Event
             conn.commit()
         except Exception as e:
             log.warning("scan_log UPDATE falló (no tumba barrido): %s", e)
+        if notify:
+            from .salud import alertar_admin
+            alertar_admin(conn, cfg, _tg_api_for_channel(cfg))
     except Exception:
         try:
             conn.rollback()      # no dejar transacción abierta → DB locked para otros
@@ -317,6 +326,18 @@ def cmd_rescore(cfg) -> None:
                               market_score_fn=compute_market_score)
     print(f"rescore completado: {updated} ofertas → versión {version_id} "
           f"({database.needs_rescore(conn, version_id)} pendientes)")
+
+
+def cmd_encaje(cfg, max_n: int | None = None) -> None:
+    """Backfill del veredicto de encaje en ofertas ya procesadas + rescore con el criterio vigente."""
+    conn = database.connect(cfg)
+    database.init_db(conn)
+    from .enrich import backfill_encaje
+    hechas, fallidas = backfill_encaje(
+        conn, cfg, max_n,
+        on_progress=lambda i, n: print(f"\rencaje {i}/{n}", end="", flush=True))
+    print(f"\nencaje: {hechas} asignados, {fallidas} fallidos")
+    cmd_rescore(cfg)
 
 
 def cmd_enrich(cfg) -> None:
@@ -385,6 +406,9 @@ def main():
         cmd_rescore(cfg)
     elif cmd == "enrich":
         cmd_enrich(cfg)
+    elif cmd == "encaje":
+        # python -m jobhunt encaje [N]  — backfill de encaje con el perfil + rescore
+        cmd_encaje(cfg, int(sys.argv[2]) if len(sys.argv) > 2 and sys.argv[2].isdigit() else None)
     elif cmd == "market":
         cmd_market(cfg)
     elif cmd == "channel":

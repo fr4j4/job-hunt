@@ -664,6 +664,7 @@ def _help_text() -> str:
         "/report — análisis completo del mercado con gráficos → PDF",
         "/report status · /report list — avance del reporte · historial de PDFs",
         "/stats — cobertura del pool (procesadas IA, datos faltantes)",
+        "/fuentes — salud del scraping: ofertas por fuente en los últimos barridos",
         "/config — configuración actual (tokens enmascarados)",
         "/preview — oferta aleatoria como se vería en el canal (sin marcar publicada)",
         "/preview 80 — aleatoria con market_score >= 80 · /preview java — filtra por texto",
@@ -914,6 +915,14 @@ def _handle_command(cfg: Config, message: dict, state: dict) -> None:
                                          "text": _config_text(cfg)})
         elif cmd == "/preview":
             _preview_offer(cfg, chat_id, arg)
+        elif cmd == "/fuentes":
+            from .salud import texto_fuentes
+            conn = database.connect(cfg)
+            try:
+                txt = texto_fuentes(conn, cfg)
+            finally:
+                conn.close()
+            _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML", "text": txt})
         elif cmd == "/stats":
             _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
                                          "text": _stats_text(cfg)})
