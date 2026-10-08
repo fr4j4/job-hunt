@@ -16,6 +16,7 @@ import time
 from datetime import datetime, timedelta, timezone
 
 from ..logging_setup import get_logger
+from . import errores
 
 log = get_logger(__name__)
 
@@ -101,6 +102,7 @@ def jobs(queries: list[str], found_by_prefix: str = "", max_pages: int = 2, on_q
                 page.wait_for_timeout(7000)
             except Exception as e:
                 log.warning("jooble SERP falló (%s): %s", q[:30], e)
+                errores.registrar("jooble")
                 continue
             # paginación por SCROLL infinito (el &page=N de la URL es cosmético):
             # cada scroll al fondo carga +20, techo observado ~100
@@ -142,6 +144,7 @@ def jobs(queries: list[str], found_by_prefix: str = "", max_pages: int = 2, on_q
             time.sleep(3)
     except Exception as e:
         log.warning("jooble: error en scraping: %s", e)
+        errores.registrar("jooble")
     finally:
         if browser:
             try:

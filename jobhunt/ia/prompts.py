@@ -11,7 +11,7 @@ IA_SCHEMA = ('{"modalidad": "R"|"H"|"P"|"?", "salario_clp_mensual": numero|null,
              '"red_flags": ["..."], "green_flags": ["..."], "benefits": ["..."], '
              '"idiomas": [{"idioma": "inglés|alemán|francés|portugués|chino|japonés|italiano|otro", "nivel": "básico|intermedio|avanzado|nativo|fluido", "excluyente": true|false}], '
              '"rol_categoria": "Full Stack"|"Backend"|"Frontend"|"Data"|"Mobile"|"AI/ML"|"Tech Lead"|"DevOps/Cloud"|"QA"|"Software"|"Seguridad"|"Ingeniería no-software"|"Analista/Empresa"|"Profesor/Formación"|"Soporte/TI"|"No-tech"|"Otro", '
-             '"resumen": "max 200 chars", "fit_reason": "max 200 chars por qué conviene o no al perfil", '
+             '"encaje": "alto"|"medio"|"bajo"|"ninguno", "resumen": "max 200 chars", "fit_reason": "max 200 chars por qué conviene o no al perfil", '
              '"opinion": "max 300 chars — comentario editorial sobre la oferta: contexto de mercado, señal notable (empresa conocida, staffing, nicho escaso), comparación con la mediana salarial o red flag relevante. PROHIBIDO consejos al candidato (nada de destaca/pregunta/no apliques). PROHIBIDO frases genéricas de relleno ("oferta fuera de rango", "falta sueldo para valoración"): di QUÉ falta y QUÉ se infiere de lo disponible. No repitas el resumen"}')
 
 
@@ -77,6 +77,11 @@ _PROMPT_OPINION_LOCAL = (
     "6. Si la oferta tiene nota de anomalía: cita el valor tal cual, señala la anomalía "
     "con la hipótesis provista, compara contra la mediana. NUNCA corrijas ni omitas.\n"
     "7. fit_reason: por qué conviene o no al PERFIL del candidato provisto.\n"
+    "7b. encaje: veredicto estricto de calce con el PERFIL: \"alto\" (rol y stack coinciden), "
+    "\"medio\" (rol de desarrollo/datos afín pero stack o seniority solo parcial), "
+    "\"bajo\" (rol tech pero de otra área o stack ajeno al perfil), "
+    "\"ninguno\" (no es tecnología/desarrollo, o no tiene relación con el perfil). "
+    "Ante duda entre dos niveles elige el MÁS BAJO. Sin stack ni rol tech claros → \"ninguno\".\n"
     "8. Si la descripción es corta o ausente: comenta lo que puedas inferir del título, "
     "empresa, sueldo y datos extraídos. NUNCA inventes detalles de la oferta ni números "
     "fuera del contexto provisto.\n"
@@ -96,25 +101,28 @@ _PROMPT_OPINION_LOCAL = (
     "Contexto de mercado (los ÚNICOS números que puedes citar):\n{mercado}\n\n"
     "Oferta:\nTítulo: {title}\nEmpresa: {company}\nSueldo declarado: {salary}\n"
     "Datos extraídos: {extraidos}\n{nota}\n\n"
-    "Responde SOLO JSON con EXACTAMENTE estas claves: opinion, resumen, fit_reason.\n\n"
+    "Responde SOLO JSON con EXACTAMENTE estas claves: opinion, resumen, fit_reason, encaje.\n\n"
     "Ejemplo de respuesta VÁLIDA (empresa y cifras inventadas — nunca las repitas):\n"
     "{{\"opinion\": \"GlobalLogic Chile publica un rol Go/AWS sin rango salarial; el contexto "
     "muestra una mediana de 4.2M pero sin sueldo declarado no hay comparación posible. "
     "Señal: empresa de staffing con equipo local.\", "
     "\"resumen\": \"Rol Go/AWS en GlobalLogic, sin sueldo declarado.\", "
-    "\"fit_reason\": \"Stack Go/AWS coincide; falta el salario para evaluar.\"}}\n\n"
+    "\"fit_reason\": \"Stack Go/AWS coincide; falta el salario para evaluar.\", "
+    "\"encaje\": \"medio\"}}\n\n"
     "Ejemplo para oferta SIN descripción (imita este patrón, no frases genéricas):\n"
     "{{\"opinion\": \"Rol de ayudante de sondaje (minería) publicado en jooble; sin descripción \"\n"
     "\"ni sueldo disponibles. El título indica operación minera, no desarrollo de software — \"\n"
     "\"no aplica al perfil tech. No hay datos para comparar salario.\", "
     "\"resumen\": \"Ayudante de sondaje, minería; sin descripción ni sueldo.\", "
-    "\"fit_reason\": \"Rol no-tech, sin stack ni modalidad; no coincide con el perfil.\"}}\n\n"
+    "\"fit_reason\": \"Rol no-tech, sin stack ni modalidad; no coincide con el perfil.\", "
+    "\"encaje\": \"ninguno\"}}\n\n"
     "Ejemplo para oferta CON descripción pero SIN sueldo (imita este patrón):\n"
     "{{\"opinion\": \"Backend Java/Spring en empresa de retail, sin rango salarial declarado. \"\n"
     "\"El stack coincide con el perfil; la modalidad híbrida es aceptable. Sin sueldo no hay \"\n"
     "\"comparación contra la mediana del mercado.\", "
     "\"resumen\": \"Backend Java/Spring, retail, híbrido; sin sueldo declarado.\", "
-    "\"fit_reason\": \"Stack y seniority coinciden; falta el dato salarial para evaluar la oferta.\"}}"
+    "\"fit_reason\": \"Stack y seniority coinciden; falta el dato salarial para evaluar la oferta.\", "
+    "\"encaje\": \"alto\"}}"
 )
 
 
@@ -191,10 +199,13 @@ def _lote_prompt(rows: list[dict], profile_desc: str, mercado: str) -> str:
             f"Contexto de mercado (para el campo opinion): {mercado}\n\n"
             + "\n\n".join(bloques) +
             "\n\nResponde un JSON array con UN objeto por oferta (idx 1..N), cada uno con: "
-            "idx, opinion, resumen, fit_reason, seniority_real, rol_categoria, ingles, idiomas, "
+            "idx, opinion, resumen, fit_reason, encaje, seniority_real, rol_categoria, ingles, idiomas, "
             "modalidad, salario_clp_mensual, techs, red_flags, green_flags, benefits. "
             "techs: lista de tecnologías detectadas en la descripción (máx 8, "
             "abreviadas: Py, Java, AWS, React, Angular, K8s, Docker, SQL, Node, TS, "
             "NiFi, Spring, GCP, Azure, Scala, Go, .NET, FastAPI, Kafka, Terraform, "
             "Postgres, Mongo, Redis, Vue, Jenkins, CI/CD). "
+            "encaje: calce estricto con el perfil del candidato — alto (rol y stack coinciden) | "
+            "medio (rol afín, stack/seniority parcial) | bajo (rol tech de otra área o stack ajeno) | "
+            "ninguno (no es tecnología o sin relación con el perfil); ante duda, el nivel más bajo. "
             "Si una oferta no declara salario, salario_clp_mensual = 0 (cero, nunca inventes un monto).")

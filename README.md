@@ -30,6 +30,7 @@ Todo vive en `.env`:
     python -m jobhunt rescore    # re-evaluar con criterio actual
     python -m jobhunt enrich     # backfill descripciones (JSON-LD)
     python -m jobhunt ia         # batch IA (deepseek-v4-flash)
+    python -m jobhunt encaje [N] # backfill del veredicto de encaje con el perfil + rescore
     python -m jobhunt report     # stats de mercado
 
 ## Cron sugerido

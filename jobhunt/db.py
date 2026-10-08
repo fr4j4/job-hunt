@@ -92,6 +92,10 @@ def init_db(conn: sqlite3.Connection) -> None:
         ("salary_note", "ALTER TABLE ofertas ADD COLUMN salary_note TEXT DEFAULT ''"),
         ("ctx_version", "ALTER TABLE ofertas ADD COLUMN ctx_version TEXT DEFAULT ''"),
         ("fetch_fails", "ALTER TABLE ofertas ADD COLUMN fetch_fails INTEGER DEFAULT 0"),
+        ("ai_encaje", "ALTER TABLE ofertas ADD COLUMN ai_encaje TEXT DEFAULT ''"),
+        # auditoría de filas (UTC ISO-8601): los triggers de abajo los mantienen
+        ("created_at", "ALTER TABLE ofertas ADD COLUMN created_at TEXT DEFAULT ''"),
+        ("updated_at", "ALTER TABLE ofertas ADD COLUMN updated_at TEXT DEFAULT ''"),
         ("last_fetch_ok", "ALTER TABLE ofertas ADD COLUMN last_fetch_ok TEXT DEFAULT ''"),
         # metadatos v2: señal de demanda (applicants), seniority oficial del aviso
         ("applicants_hint", "ALTER TABLE ofertas ADD COLUMN applicants_hint TEXT DEFAULT ''"),
@@ -103,6 +107,30 @@ def init_db(conn: sqlite3.Connection) -> None:
     conn.execute("""UPDATE ofertas SET date_canonical =
         COALESCE(NULLIF(date_posted,''), substr(first_seen,1,10))
         WHERE date_canonical = '' AND (date_posted != '' OR first_seen != '')""")
+    # created_at/updated_at: backfill de filas previas (creación ≈ first_seen, última
+    # modificación ≈ last_seen) y triggers que los mantienen para TODO escritor
+    # (upsert, enrich, IA, rescore, marcas del canal) sin tocar cada UPDATE.
+    conn.execute("""UPDATE ofertas SET
+        created_at = CASE WHEN created_at = '' THEN
+            COALESCE(NULLIF(first_seen,''), strftime('%Y-%m-%dT%H:%M:%SZ','now')) ELSE created_at END,
+        updated_at = CASE WHEN updated_at = '' THEN
+            COALESCE(NULLIF(last_seen,''), NULLIF(first_seen,''), strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+            ELSE updated_at END
+        WHERE created_at = '' OR updated_at = ''""")
+    conn.execute("""CREATE TRIGGER IF NOT EXISTS trg_ofertas_created AFTER INSERT ON ofertas
+        WHEN NEW.created_at = '' OR NEW.updated_at = ''
+        BEGIN
+            UPDATE ofertas SET
+                created_at = CASE WHEN NEW.created_at = '' THEN strftime('%Y-%m-%dT%H:%M:%SZ','now') ELSE NEW.created_at END,
+                updated_at = CASE WHEN NEW.updated_at = '' THEN strftime('%Y-%m-%dT%H:%M:%SZ','now') ELSE NEW.updated_at END
+            WHERE group_id = NEW.group_id;
+        END""")
+    conn.execute("""CREATE TRIGGER IF NOT EXISTS trg_ofertas_updated AFTER UPDATE ON ofertas
+        WHEN NEW.updated_at = OLD.updated_at
+        BEGIN
+            UPDATE ofertas SET updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
+            WHERE group_id = NEW.group_id;
+        END""")
     # memoria del canal: idempotencia digests + observabilidad + message_id futuro
     conn.execute("""CREATE TABLE IF NOT EXISTS channel_posts (
         id INTEGER PRIMARY KEY AUTOINCREMENT,

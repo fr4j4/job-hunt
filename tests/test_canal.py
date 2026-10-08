@@ -3,7 +3,7 @@
 Corre: .venv/bin/python -m pytest tests/test_canal.py -v
 """
 import sqlite3
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
@@ -173,7 +173,9 @@ def conn_mem():
 
 
 def _insert(conn, gid, title="Dev Python", ms=80, rol="Backend", company="X Corp",
-            modality="remoto", date_canonical="2026-09-02", notified=""):
+            modality="remoto", date_canonical=None, notified=""):
+    # fecha relativa a hoy: la ventana del canal (14d) usa date('now') y fijarla rompe la suite
+    date_canonical = date_canonical or (date.today() - timedelta(days=1)).isoformat()
     desc = "x" * 2000
     # ¡ojo!: el INSERT tiene 22 columnas pero 21 placeholders → los params van en orden:
     # (gid, title, company, modality, desc, ms, rol, notified, date_canonical)
@@ -191,6 +193,7 @@ def _insert(conn, gid, title="Dev Python", ms=80, rol="Backend", company="X Corp
 def test_publish_orden_tope_dedup(conn_mem):
     cfg = load_config()
     cfg.channel.enabled = True
+    cfg.channel.require_fit = False
     cfg.channel.chat_id = "-1004495706494"
     for i in range(15):
         _insert(conn_mem, f"g{i}", ms=90 - i)
@@ -227,6 +230,7 @@ def test_publish_noop_sin_chat_id(conn_mem):
 def test_publish_notified_solo_si_ok(conn_mem):
     cfg = load_config()
     cfg.channel.enabled = True
+    cfg.channel.require_fit = False
     cfg.channel.chat_id = "-1004495706494"
     _insert(conn_mem, "g_fail")
 
@@ -243,6 +247,7 @@ def test_publish_notified_solo_si_ok(conn_mem):
 def test_publish_dry_run_no_api(conn_mem):
     cfg = load_config()
     cfg.channel.enabled = True
+    cfg.channel.require_fit = False
     cfg.channel.chat_id = "-1004495706494"
     _insert(conn_mem, "g_dry", ms=95)
     called = []
@@ -255,13 +260,14 @@ def test_publish_dry_run_no_api(conn_mem):
     stats = publish_channel(cfg, conn_mem, spy, dry_run=True)
     assert called == []
     assert len(stats["dry_run_preview"]) == 1
-    assert "🎯" in stats["dry_run_preview"][0]["text"]
+    assert "⭐ 95/100" in stats["dry_run_preview"][0]["text"]
     assert stats["dry_run_preview"][0]["kb"]["inline_keyboard"][0][0]["url"] == "https://x.cl/1"
 
 
 def test_gate_dev_bloquea_cobol(conn_mem):
     cfg = load_config()
     cfg.channel.enabled = True
+    cfg.channel.require_fit = False
     cfg.channel.chat_id = "-1004495706494"
     _insert(conn_mem, "g_cobol", title="Analista Programador Mainframe COBOL $2.5M",
             ms=90, rol="Backend")
@@ -288,10 +294,10 @@ def test_render_omite_lineas_sin_dato():
     assert "&lt;b&gt;" in post          # HTML escapado
     # V3: sin salario → línea explícita "💰 Sin sueldo declarado" (decisión #6:
     # el dato salarial SIEMPRE se muestra, aunque sea ausencia)
-    assert "💰 Sin sueldo declarado" in post
+    assert "💰 Sueldo no declarado" in post
     assert "🧰" not in post
     assert kb is None                   # sin url → sin botón
-    assert "📅 2d" in post
+    assert "📅 Hace 2 días" in post
 
 
 def test_render_con_boton_url():
@@ -320,9 +326,9 @@ def test_render_info_ia_completa():
     post, kb = render_offer_post(r)
     assert "📝 Backend Java/Spring remoto." in post
     assert "💬 Sueldo sobre la mediana del mercado (1,4M) y el P75 (2,4M)." in post
-    assert "⚠️ Proyecto hasta fin de año · Prueba técnica anti-LLM" in post
-    assert "✅ Contrato indefinido · Clientes grandes" in post
-    assert "🎁 Remoto · Seguro" in post
+    assert "A considerar:</b> Proyecto hasta fin de año · Prueba técnica anti-LLM" in post
+    assert "A favor:</b> Contrato indefinido · Clientes grandes" in post
+    assert "Beneficios:</b> Remoto · Seguro" in post
     assert "🧰 Java · Spring · AWS" in post
 
 

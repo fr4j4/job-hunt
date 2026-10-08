@@ -89,6 +89,14 @@ def _staffing(job: dict) -> bool:
     return False
 
 
+def tiene_senal_perfil(breakdown: dict) -> bool:
+    """True si el título trae alguna señal del perfil (tech, rol del perfil o rol-keyword).
+    Sin señal = título genérico: la IA se difiere al batch nocturno en vez de gastarse
+    en el barrido (la oferta sigue indexada)."""
+    return bool(breakdown.get("techs") or breakdown.get("role_profile")
+                or any(k.startswith("role:") for k in breakdown))
+
+
 def compute_score(job: dict, cfg: Config) -> tuple[int, dict]:
     """Calcula el score de compatibilidad de una oferta contra el perfil.
 
@@ -129,6 +137,13 @@ def compute_score(job: dict, cfg: Config) -> tuple[int, dict]:
         if kw in t_title:
             score += pts
             breakdown[f"role:{kw}"] = pts
+
+    # ---- roles del perfil (PROFILE_ROLES) en el título: una sola vez ----
+    for role in p.roles:
+        if role and _kw_hit(role, t_title):
+            score += s.role_profile
+            breakdown["role_profile"] = f"{role} +{s.role_profile}"
+            break
 
     # ---- experiencia (JSON-LD oficial > regex descripción) ----
     years = job.get("years_official") or _years_from_description(desc)

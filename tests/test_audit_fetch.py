@@ -65,7 +65,7 @@ def test_computrabajo_hace_2_semanas(monkeypatch):
             '<span>Hace 2 semanas</span></article>')
     html_ = '<article class="box_offer' + card
 
-    monkeypatch.setattr(computrabajo, "fetch", lambda url: html_)
+    monkeypatch.setattr(computrabajo, "fetch", lambda url, **kw: html_)
     out = computrabajo.jobs(["python"])
     assert len(out) == 1
     esperado = (now - timedelta(days=14)).date().isoformat()
@@ -85,7 +85,7 @@ def test_computrabajo_llama_normalize_date(monkeypatch):
             'oferta-de-trabajo-de-dev-en-santiago-0123456789ABCDEF0123456789ABCDEF#x">x</a>'
             '<span>Hace 3 horas</span></article>')
     html_ = '<article class="box_offer' + card
-    monkeypatch.setattr(computrabajo, "fetch", lambda url: html_)
+    monkeypatch.setattr(computrabajo, "fetch", lambda url, **kw: html_)
     computrabajo.jobs(["python"])
     assert calls and "Hace 3 horas" in calls[0]
 

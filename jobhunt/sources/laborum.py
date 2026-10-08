@@ -19,6 +19,7 @@ from html import unescape as _u
 import requests
 
 from ..logging_setup import get_logger
+from . import errores
 
 log = get_logger(__name__)
 
@@ -67,9 +68,11 @@ def _search(query: str, filtros: list[dict] | None = None, page: int = 0,
                 time.sleep(2 * (attempt + 1))
                 continue
             log.warning("laborum search %s: HTTP %s", query[:30], r.status_code)
+            errores.registrar("laborum")
             time.sleep(2)
         except Exception as e:
             log.warning("laborum fetch falló (%s): %s", query[:30], e)
+            errores.registrar("laborum")
             time.sleep(2 * (attempt + 1))
     return {}
 
@@ -146,11 +149,12 @@ def jobs(queries: list[str], found_by_prefix: str = "", max_pages: int = 3, on_q
 
 
 def fetch_detail(aviso_id: str | int) -> dict:
-    """Ficha completa de un aviso (para el Anillo A). Retorna info estilo extract_structured."""
-    info: dict = {"description": "", "date_posted": "", "valid_through": "",
-                  "employment_type": "", "years_official": None, "remote_official": 0,
-                  "industry": "", "education": "", "applicant_region": "",
-                  "company": "", "modality_badge": "", "salary": "",
-                  "contrato": "", "jornada": "", "techs_desc": []}
-    d = _search("", page=0, size=1)  # placeholder: la ficha individual es otro endpoint
-    return info
+    """Ficha completa de un aviso (Anillo A). NO implementada: el listado ya trae
+    título, empresa, modalidad y descripción resumida (description_source='laborum-api')
+    y el endpoint de ficha individual no está verificado. Devuelve la forma vacía de
+    extract_structured SIN tocar la red (antes disparaba un searchV2 inútil por aviso)."""
+    return {"description": "", "date_posted": "", "valid_through": "",
+            "employment_type": "", "years_official": None, "remote_official": 0,
+            "industry": "", "education": "", "applicant_region": "",
+            "company": "", "modality_badge": "", "salary": "",
+            "contrato": "", "jornada": "", "techs_desc": []}

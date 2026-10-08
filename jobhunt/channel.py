@@ -22,6 +22,7 @@ from .domain.roles import (  # noqa: F401
     _DEV_CATEGORIES,
     _NONDEV_CATEGORIES,
     _categorias_dev,
+    fit_ok,
     is_dev,
 )
 from .logging_setup import get_logger
@@ -59,6 +60,20 @@ _SEP_THIN = "─────────────────────"
 _SEP_THICK = "━━━━━━━━━━━━━━━━━━━━━"
 
 
+_ENCAJE_CHIP = {"alto": "🎯 Encaje alto", "medio": "🎯 Encaje medio"}
+
+
+def _edad_humana(edad: int) -> str:
+    """Antigüedad legible: Hoy · Ayer · Hace N días · Hace más de 2 semanas."""
+    if edad <= 0:
+        return "Hoy"
+    if edad == 1:
+        return "Ayer"
+    if edad < 14:
+        return f"Hace {edad} días"
+    return "Hace más de 2 semanas"
+
+
 def render_offer_post(row: dict) -> tuple[str, dict | None]:
     """Post individual de oferta al canal (spec v3 §5-A) con botón URL.
 
@@ -74,7 +89,7 @@ def render_offer_post(row: dict) -> tuple[str, dict | None]:
 
     lines: list[str] = []
     ms = row.get("market_score") or 0
-    lines.append(f"🎯 [<b>{ms}</b>] {esc(row.get('title') or 'Sin título')}")
+    lines.append(f"<b>{esc(row.get('title') or 'Sin título')}</b>")
     meta: list[str] = []
     if row.get("company"):
         meta.append(f"🏢 {esc(row['company'])}")
@@ -91,16 +106,22 @@ def render_offer_post(row: dict) -> tuple[str, dict | None]:
     mod = (row.get("modality") or "").strip()
     loc = esc((row.get("location") or "").strip())
     if mod:
-        meta.append(f"🧭 {esc(mod)}" + (f" · 📍 {loc}" if loc else ""))
+        meta.append(f"🧭 {esc(mod.capitalize())}" + (f" · 📍 {loc}" if loc else ""))
     elif loc:
         meta.append(f"📍 {loc}")
     # inglés como chip en meta (si hay)
     ing_raw = (row.get("ai_idiomas") or "").strip()
     if ing_raw and "inglés" in ing_raw.lower():
         excl = '"excluyente": true' in ing_raw
-        meta.append("🗣 EN!" if excl else "🗣 EN")
+        meta.append("🗣 Inglés requerido" if excl else "🗣 Inglés deseable")
     if meta:
         lines.append(" · ".join(meta))
+    # chips de calidad: puntaje de la oferta + encaje con el perfil (si la IA lo evaluó)
+    chips = [f"⭐ {ms}/100"]
+    encaje = _ENCAJE_CHIP.get((row.get("ai_encaje") or "").strip().lower())
+    if encaje:
+        chips.append(encaje)
+    lines.append("  ".join(chips))
 
     # ── Bloque 1: Hechos ──
     lines.append(_SEP_THIN)
@@ -119,7 +140,7 @@ def render_offer_post(row: dict) -> tuple[str, dict | None]:
                 sal_note += f" ({esc(note)})"
         elif st == "trusted" and note:
             sal_note = f" · {esc(note)}"
-        lines.append(f"💰 ${sal:,}".replace(",", ".") + sal_note)
+        lines.append(f"💰 ${sal:,}/mes".replace(",", ".") + sal_note)
     elif raw_sal:
         # salario existe pero parser lo rechazó (implausible > techo) → mostrar crudo con alerta
         st = (row.get("salary_status") or "").strip().lower()
@@ -129,7 +150,7 @@ def render_offer_post(row: dict) -> tuple[str, dict | None]:
             sal_note += f" ({esc(note)})" if st == "implausible" else f" · {esc(note)}"
         lines.append(f"💰 {esc(raw_sal)}{sal_note}")
     else:
-        lines.append("💰 Sin sueldo declarado")
+        lines.append("💰 Sueldo no declarado")
 
     # ── Bloque 2: Análisis IA global (sin encaje personal) ──
     resumen = (row.get("ai_resumen") or "").strip()
@@ -151,16 +172,16 @@ def render_offer_post(row: dict) -> tuple[str, dict | None]:
     if red or green or ben:
         lines.append(_SEP_THIN)
         if red:
-            lines.append("⚠️ " + esc(" · ".join(red)))
+            lines.append("⚠️ <b>A considerar:</b> " + esc(" · ".join(red)))
         if green:
-            lines.append("✅ " + esc(" · ".join(green)))
+            lines.append("✅ <b>A favor:</b> " + esc(" · ".join(green)))
         if ben:
-            lines.append("🎁 " + esc(" · ".join(ben)))
+            lines.append("🎁 <b>Beneficios:</b> " + esc(" · ".join(ben)))
 
     tail: list[str] = []
     edad = age_days(row)
     if edad or row.get("date_canonical"):
-        tail.append(f"📅 {edad}d" if edad < 14 else "📅 >2 sem")
+        tail.append(f"📅 {_edad_humana(edad)}")
     tail.append(f"🌐 {_fuente(row)}")
     if tail:
         lines.append(_SEP_THIN)
@@ -201,6 +222,8 @@ def select_channel_offers(conn, cfg: Config, require_ia: bool = False) -> list[d
         if cfg.channel.require_dev and not is_dev(d.get("rol_categoria"), d.get("title") or "", cfg,
                                                   d.get("description") or ""):
             continue
+        if not fit_ok(d, cfg):
+            continue
         if cfg.channel.max_first_seen_hours:
             fs = str(d.get("first_seen") or "")
             try:
@@ -231,7 +254,7 @@ def publish_channel(cfg: Config, conn, tg_api, dry_run: bool = False,
     require_ia=True: solo ofertas revisadas por IA (ia_model != '').
     """
     stats: dict = {"candidates": 0, "posted": 0, "skipped_age": 0, "skipped_score": 0,
-                   "skipped_notified": 0, "skipped_dev": 0}
+                   "skipped_notified": 0, "skipped_dev": 0, "skipped_fit": 0}
     if not cfg.channel.enabled or not cfg.channel.chat_id:
         return stats
 
@@ -257,6 +280,9 @@ def publish_channel(cfg: Config, conn, tg_api, dry_run: bool = False,
         if cfg.channel.require_dev and not is_dev(r.get("rol_categoria"), r.get("title") or "", cfg,
                                                   r.get("description") or ""):
             stats["skipped_dev"] += 1
+            continue
+        if not fit_ok(r, cfg):
+            stats["skipped_fit"] += 1
             continue
         if len(posteadas) >= tope:
             break
@@ -296,9 +322,10 @@ def publish_channel(cfg: Config, conn, tg_api, dry_run: bool = False,
                 log.warning("canal: sendMessage sin ok → %s", str(resp)[:120])
         except Exception as e:
             log.warning("canal: post falló (%.40s): %s", r.get("title") or "", e)
-    log.info("canal: %d/%d publicadas (dev-skip %d, sobrantes por tope %d)",
+    log.info("canal: %d/%d publicadas (dev-skip %d, fit-skip %d, sobrantes por tope %d)",
              stats["posted"], stats["candidates"], stats["skipped_dev"],
-             stats["candidates"] - stats["skipped_dev"] - stats["posted"])
+             stats["skipped_fit"],
+             stats["candidates"] - stats["skipped_dev"] - stats["skipped_fit"] - stats["posted"])
     return stats
 
 
@@ -433,6 +460,8 @@ def publish_daily_digest(cfg: Config, conn, tg_api, dry_run: bool = False,
         if cfg.channel.require_dev and not is_dev(r.get("rol_categoria"), r.get("title") or "", cfg,
                                                   r.get("description") or ""):
             continue
+        if not fit_ok(r, cfg):
+            continue
         rol = (r.get("rol_categoria") or "Otro").strip() or "Otro"
         cur = por_rol.get(rol)
         if cur is None or (r.get("market_score") or 0) > (cur.get("market_score") or 0):
@@ -538,6 +567,8 @@ def publish_weekly_rol(cfg: Config, conn, tg_api, dry_run: bool = False,
     for r in rows:
         if cfg.channel.require_dev and not is_dev(r.get("rol_categoria"), r.get("title") or "", cfg,
                                                   r.get("description") or ""):
+            continue
+        if not fit_ok(r, cfg):
             continue
         rol = (r.get("rol_categoria") or "Otro").strip() or "Otro"
         cur = por_rol.get(rol)
@@ -825,7 +856,8 @@ def channel_status(conn, cfg: Config) -> str:
     last = conn.execute("""SELECT posted_at, kind FROM channel_posts ORDER BY id DESC LIMIT 1""").fetchone()
     cola = [dict(r) for r in conn.execute(
         _GATE_SQL, {"min_score": ch.min_score, "max_age": ch.max_age_days}).fetchall()]
-    dev_ok = [r for r in cola if is_dev(r["rol_categoria"], r["title"], cfg, r.get("description") or "")]
+    dev_ok = [r for r in cola if is_dev(r["rol_categoria"], r["title"], cfg, r.get("description") or "")
+              and fit_ok(r, cfg)]
     dist = Counter()
     for (ms,) in conn.execute("SELECT market_score FROM ofertas WHERE active=1"):
         dist[(ms or 0) // 10 * 10] += 1
