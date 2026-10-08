@@ -710,6 +710,8 @@ def _help_admin_text() -> str:
         "/report status · /report list — avance del reporte · historial de PDFs",
         "/stats — cobertura del pool (procesadas IA, datos faltantes)",
         "/encaje [N] — asigna el encaje con el perfil a ofertas ya procesadas por IA y recalcula scores",
+        "/web — enlace personal (un solo uso) a la web con tablas, filtros y detalle de cada oferta",
+        "/web_salir — cierra todas las sesiones de la web",
         "/tabla [N] — últimas ofertas en tabla nativa de Telegram (experimental; si falla, muestra tarjetas + el error)",
         "/fuentes — salud del scraping: ofertas por fuente en los últimos barridos",
         "/config — configuración actual (tokens enmascarados)",
@@ -1036,6 +1038,18 @@ def _handle_command(cfg: Config, message: dict, state: dict) -> None:
             else:
                 max_n = int(arg) if arg.strip().isdigit() else None
                 threading.Thread(target=_encaje_async, args=(cfg, chat_id, max_n), daemon=True).start()
+        elif cmd == "/web":
+            _web_enlace(cfg, chat_id)
+        elif cmd == "/web_salir":
+            from .web import auth as _wauth
+            conn = database.connect(cfg)
+            try:
+                n = _wauth.revocar_todo(conn)
+            finally:
+                conn.close()
+            _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
+                                         "text": f"🔒 Listo: cerré {n} sesión(es) de la web e invalidé "
+                                                 f"los enlaces pendientes."})
         elif cmd == "/tabla":
             _tabla_nativa(cfg, chat_id, arg)
         elif cmd == "/fuentes":
@@ -1600,6 +1614,29 @@ def _ia_batch_async(cfg: Config, chat_id: int | None, scheduled: bool = False,
                 pass
 
 
+def _web_enlace(cfg: Config, chat_id: int) -> None:
+    """/web — enlace personal de un solo uso a la web (solo chats del allowlist llegan aquí)."""
+    from .telegram.render import _attr_esc
+    from .web import auth as _wauth
+    from .web.app import url_base
+    conn = database.connect(cfg)
+    try:
+        token = _wauth.crear_token_login(conn, cfg.web.token_minutes)
+    finally:
+        conn.close()
+    url = f"{url_base(cfg)}/login?t={token}"
+    nota = "" if cfg.web.enabled else (
+        "\n\n⚠️ La web no está activada en el bot: pon <code>WEB_ENABLED=true</code> en el .env "
+        "y reinicia, o córrela aparte con <code>python -m jobhunt web</code>.")
+    _tg_api(cfg, "sendMessage", {
+        "chat_id": chat_id, "parse_mode": "HTML",
+        # sin vista previa: Telegram no debe abrir el enlace por su cuenta
+        "disable_web_page_preview": True, "link_preview_options": {"is_disabled": True},
+        "text": (f"🔐 <b>Tu acceso a la web</b>\n<a href=\"{_attr_esc(url)}\">Abrir jobhunt</a>\n\n"
+                 f"Enlace personal: sirve <b>una sola vez</b> y vence en {cfg.web.token_minutes} min. "
+                 f"No lo reenvíes.\nPara cerrar todas las sesiones: /web_salir{nota}")})
+
+
 def _tabla_nativa(cfg: Config, chat_id: int, arg: str = "") -> None:
     """/tabla [N] — últimas N ofertas en TABLA NATIVA de Telegram (mensajes enriquecidos,
     experimental). Si Telegram la rechaza, manda las tarjetas y el error exacto."""
@@ -1926,6 +1963,8 @@ _MENU_COMANDOS = [
     {"command": "report", "description": "Informe de mercado en PDF"},
     {"command": "stop", "description": "Detener lo que esté corriendo"},
     {"command": "help", "description": "Ayuda (/help admin para el resto)"},
+    {"command": "web", "description": "Abrir la web (enlace personal de un solo uso)"},
+    {"command": "web_salir", "description": "Cerrar todas las sesiones de la web"},
     {"command": "tabla", "description": "Últimas ofertas en tabla nativa (experimental)"},
     {"command": "encaje", "description": "Evaluar el encaje con tu perfil de ofertas ya analizadas"},
     {"command": "enrich", "description": "Corre el batch IA ahora (rellena datos faltantes)"},
@@ -2092,6 +2131,14 @@ def run_daemon(cfg: Config) -> None:
     except Exception as exc:
         log.warning("no pude leer last_sweep_key persistente (arranca fresco): %s", exc)
     _register_commands(cfg)
+
+    # web opcional en un hilo (WEB_ENABLED=true). Si faltan dependencias, el bot sigue igual.
+    if cfg.web.enabled:
+        try:
+            from .web.app import servir
+            threading.Thread(target=servir, args=(cfg,), daemon=True, name="web").start()
+        except Exception as exc:
+            log.warning("web no arrancó (pip install fastapi uvicorn jinja2): %s", exc)
 
     # H4: migraciones al arranque del daemon (no esperar al primer barrido)
     try:

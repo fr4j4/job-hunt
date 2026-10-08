@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% set sin_nav = not logueado %}
+{% block titulo %}Acceso · jobhunt{% endblock %}
+{% block contenido %}
+<section class="tarjeta centro">
+  <h1>🔐 Acceso privado</h1>
+  {% if motivo %}<p class="aviso">{{ motivo }}</p>{% endif %}
+  {% if not logueado %}
+  <p>Esta web solo la puede ver quien usa el bot.</p>
+  <p>Escribe <code>/web</code> en el bot de Telegram y abre el enlace que te envía.
+     Sirve una sola vez y vence en pocos minutos.</p>
+  {% else %}
+  <p><a href="/">Volver a las ofertas</a></p>
+  {% endif %}
+</section>
+{% endblock %}

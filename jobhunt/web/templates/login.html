@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% set sin_nav = true %}
+{% block titulo %}Entrar · jobhunt{% endblock %}
+{% block contenido %}
+<section class="tarjeta centro">
+  <h1>🔐 Entrar a jobhunt</h1>
+  {% if token %}
+  <p>Este enlace es personal y de un solo uso.</p>
+  <form method="post" action="/login">
+    <input type="hidden" name="t" value="{{ token }}">
+    <button class="boton" type="submit">Entrar</button>
+  </form>
+  {% else %}
+  <p>Escribe <code>/web</code> en el bot de Telegram para recibir tu enlace de acceso.</p>
+  {% endif %}
+</section>
+{% endblock %}
