@@ -49,7 +49,7 @@ def jobs(queries: list[str], found_by_prefix: str = "", max_pages: int = 2, on_q
         s, token = _session()
     except Exception as e:
         log.warning("glassdoor sesión falló: %s", e)
-        return out
+        return []
 
     for q in queries:
         for pag in range(1, max_pages + 1):

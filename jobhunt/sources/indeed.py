@@ -12,7 +12,8 @@ _HEADERS = {
 }
 _QUERY = """query GetJobData {
   jobSearch(what: "%(what)s" location: {where: "Chile", radius: 50, radiusUnit: MILES}
-            limit: 20 sort: RELEVANCE filters: {date: {field: "dateOnIndeed", start: "168h"}}) {
+            limit: 20 %(cursor)ssort: RELEVANCE filters: {date: {field: "dateOnIndeed", start: "168h"}}) {
+    pageInfo { nextCursor }
     results { job { key title datePublished description { html }
       location { countryName formatted { short long } }
       compensation { baseSalary { unitOfWork range { ... on Range { min max } } } currencyCode }
@@ -33,38 +34,76 @@ def _iso(v):
         except Exception: return ""
     return str(v)[:10]
 
-def jobs(queries, found_by_prefix="", on_query=None):
-    out = []
-    for q in queries:
-        if on_query:
-            try:
-                on_query(q, 1)
-            except Exception:
-                pass
-        body = {"query": _QUERY % {"what": q}}
+def _page(q, cursor=""):
+    """Una página del GraphQL; None si falla (la 1ª página sin cursor = query original)."""
+    cur = f'cursor: "{cursor}" ' if cursor else ""
+    body = {"query": _QUERY % {"what": q, "cursor": cur}}
+    req = urllib.request.Request("https://apis.indeed.com/graphql",
+        data=json.dumps(body).encode(), headers=_HEADERS, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=25, context=_CTX) as r:
+            d = json.loads(r.read())
+    except Exception as e:
+        log.warning("indeed query '%s' falló: %s", q, e)
+        return None
+    if d.get("errors") and not (d.get("data") or {}).get("jobSearch") and not cursor:
+        # la API rechazó pageInfo: reintenta con la query original (sin paginar)
+        log.warning("indeed: pageInfo rechazado (%s) — sin paginación", str(d["errors"])[:100])
+        body = {"query": (_QUERY % {"what": q, "cursor": ""}).replace("pageInfo { nextCursor }", "")}
         req = urllib.request.Request("https://apis.indeed.com/graphql",
             data=json.dumps(body).encode(), headers=_HEADERS, method="POST")
         try:
             with urllib.request.urlopen(req, timeout=25, context=_CTX) as r:
                 d = json.loads(r.read())
         except Exception as e:
-            log.warning("indeed query '%s' falló: %s", q, e); continue
-        for r2 in (d.get("data", {}).get("jobSearch", {}) or {}).get("results", []):
-            j = r2.get("job") or {}
-            if not j.get("title"): continue
-            loc = j.get("location") or {}
-            comp = j.get("compensation") or {}
-            base = comp.get("baseSalary") or {}
-            rng = base.get("range") or {}
-            salary = ""
-            if rng.get("min") or rng.get("max"):
-                salary = f"{comp.get('currencyCode','')} {rng.get('min','?')}-{rng.get('max','?')} {(base.get('unitOfWork') or '').lower()}".strip()[:40]
-            desc = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", (j.get("description") or {}).get("html") or "")).strip()
-            fb = f"{found_by_prefix}{q}"
-            out.append({"title": re.sub(r"\s+", " ", j["title"])[:150],
-                        "company": (j.get("employer") or {}).get("name") or "",
-                        "location": (loc.get("formatted") or {}).get("long") or loc.get("countryName") or "",
-                        "date": _iso(j.get("datePublished")), "url": f"https://cl.indeed.com/viewjob?jk={j.get('key','')}",
-                        "source": f"indeed:{q}", "salary": salary, "_desc": desc[:4000], "found_by": fb})
+            log.warning("indeed query '%s' falló: %s", q, e)
+            return None
+    return d
+
+
+def jobs(queries, found_by_prefix="", on_query=None, max_pages=1):
+    """Pagina por cursor (pageInfo.nextCursor) hasta max_pages; corta sin cursor/sin ofertas.
+    Si una página >1 falla se conserva lo ya obtenido de la query."""
+    out = []
+    for q in queries:
+        cursor, vistos = "", set()
+        for pag in range(1, max_pages + 1):
+            if on_query:
+                try:
+                    on_query(q, pag)
+                except Exception:
+                    pass
+            d = _page(q, cursor)
+            if d is None:
+                break
+            js = d.get("data", {}).get("jobSearch", {}) or {}
+            out += _parse_results(js.get("results", []), q, found_by_prefix, vistos)
+            cursor = ((js.get("pageInfo") or {}).get("nextCursor")) or ""
+            if not cursor or not js.get("results"):
+                break
+            time.sleep(2)
         time.sleep(2)
+    return out
+
+
+def _parse_results(results, q, found_by_prefix, vistos):
+    out = []
+    for r2 in results:
+        j = r2.get("job") or {}
+        if not j.get("title") or j.get("key") in vistos: continue
+        vistos.add(j.get("key"))
+        loc = j.get("location") or {}
+        comp = j.get("compensation") or {}
+        base = comp.get("baseSalary") or {}
+        rng = base.get("range") or {}
+        salary = ""
+        if rng.get("min") or rng.get("max"):
+            salary = f"{comp.get('currencyCode','')} {rng.get('min','?')}-{rng.get('max','?')} {(base.get('unitOfWork') or '').lower()}".strip()[:40]
+        desc = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", (j.get("description") or {}).get("html") or "")).strip()
+        fb = f"{found_by_prefix}{q}"
+        out.append({"title": re.sub(r"\s+", " ", j["title"])[:150],
+                    "company": (j.get("employer") or {}).get("name") or "",
+                    "location": (loc.get("formatted") or {}).get("long") or loc.get("countryName") or "",
+                    "date": _iso(j.get("datePublished")), "url": f"https://cl.indeed.com/viewjob?jk={j.get('key','')}",
+                    "source": f"indeed:{q}", "salary": salary, "_desc": desc[:4000], "found_by": fb})
     return out
