@@ -1,0 +1,69 @@
+{% extends "base.html" %}
+{% block titulo %}Ofertas · jobhunt{% endblock %}
+{% block contenido %}
+<form class="filtros" method="get" action="/">
+  <input type="search" name="q" value="{{ f.q }}" placeholder="Buscar en cargo, empresa o descripción">
+  <label>Puntaje ≥ <input type="number" name="min" value="{{ f.min }}" min="0" max="100" class="corto"></label>
+  <select name="mod">
+    <option value="">Cualquier modalidad</option>
+    {% for v, t in [("remoto","Remoto"),("hibrido","Híbrido"),("presencial","Presencial")] %}
+    <option value="{{ v }}" {% if f.mod == v %}selected{% endif %}>{{ t }}</option>{% endfor %}
+  </select>
+  <select name="encaje">
+    <option value="">Cualquier encaje</option>
+    {% for v, t in [("alto","Alto"),("medio","Medio"),("bajo","Bajo"),("ninguno","Ninguno"),("sin","Sin evaluar")] %}
+    <option value="{{ v }}" {% if f.encaje == v %}selected{% endif %}>{{ t }}</option>{% endfor %}
+  </select>
+  <select name="fuente">
+    <option value="">Todas las fuentes</option>
+    {% for s in fuentes %}<option value="{{ s }}" {% if f.fuente == s %}selected{% endif %}>{{ s }}</option>{% endfor %}
+  </select>
+  <label><input type="checkbox" name="sueldo" value="1" {% if f.sueldo %}checked{% endif %}> Con sueldo</label>
+  <label><input type="checkbox" name="inactivas" value="1" {% if f.inactivas %}checked{% endif %}> Incluir inactivas</label>
+  <input type="hidden" name="orden" value="{{ f.orden }}"><input type="hidden" name="dir" value="{{ f.dir }}">
+  <button class="boton" type="submit">Filtrar</button>
+  <a href="/" class="enlace">Limpiar</a>
+</form>
+
+<p class="meta">{{ total }} ofertas · página {{ page }} de {{ paginas }}</p>
+
+{% macro col(clave, titulo) -%}
+  {%- set activo = f.orden == clave -%}
+  {%- set nuevo = "asc" if (activo and f.dir == "desc") else "desc" -%}
+  <th><a href="/?{{ qs(f, orden=clave, dir=nuevo, page='') }}">{{ titulo }}{% if activo %} {{ "▲" if f.dir == "asc" else "▼" }}{% endif %}</a></th>
+{%- endmacro %}
+
+<div class="tabla-scroll">
+<table class="responsiva">
+  <thead><tr>
+    {{ col("score", "Puntaje") }}<th>Encaje</th>{{ col("cargo", "Cargo") }}{{ col("empresa", "Empresa") }}
+    <th>Modalidad</th><th>Sueldo</th><th>Fuente</th>{{ col("fecha", "Publicada") }}<th></th>
+  </tr></thead>
+  <tbody>
+  {% for o in filas %}
+    <tr{% if not o.active %} class="inactiva"{% endif %}>
+      <td class="num" data-l="Puntaje"><span class="pill p{{ (o.score or 0) // 10 }}">{{ o.score or 0 }}</span></td>
+      <td data-l="Encaje">{% if o.ai_encaje %}<span class="enc enc-{{ o.ai_encaje }}">{{ o.ai_encaje }}</span>{% endif %}</td>
+      <td class="cargo" data-l="Cargo"><a href="/oferta/{{ o.group_id | urlencode }}">{{ o.title }}</a></td>
+      <td data-l="Empresa">{{ o.company }}</td>
+      <td data-l="Modalidad">{{ o.modality }}</td>
+      <td class="num" data-l="Sueldo">{{ o | sueldo }}</td>
+      <td data-l="Fuente">{{ (o.source or "").split(":")[0] }}</td>
+      <td data-l="Publicada">{{ o | edad }}</td>
+      <td data-l="Abrir">{% set u = o.url | url_segura %}{% if u %}<a href="{{ u }}" target="_blank" rel="noopener noreferrer" title="Abrir la oferta original">↗</a>{% endif %}</td>
+    </tr>
+  {% else %}
+    <tr><td colspan="9" class="vacio">Nada con esos filtros.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+
+{% if paginas > 1 %}
+<nav class="paginas">
+  {% if page > 1 %}<a href="/?{{ qs(f, page=page-1) }}">‹ Anterior</a>{% endif %}
+  <span>{{ page }} / {{ paginas }}</span>
+  {% if page < paginas %}<a href="/?{{ qs(f, page=page+1) }}">Siguiente ›</a>{% endif %}
+</nav>
+{% endif %}
+{% endblock %}

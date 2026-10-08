@@ -212,6 +212,17 @@ class Telegram:
 
 
 @dataclass
+class WebCfg:
+    enabled: bool = False             # el daemon levanta la web en un hilo
+    host: str = "127.0.0.1"           # SOLO local por defecto; 0.0.0.0 = toda la red (usar con Tailscale/HTTPS)
+    port: int = 8787
+    public_url: str = ""              # URL con la que TÚ llegas a la web (ej https://jobhunt.tu-tailnet.ts.net)
+    token_minutes: int = 10           # vigencia del enlace de un solo uso que manda /web
+    session_days: int = 7             # vigencia de la sesión del navegador
+    cookie_secure: bool | None = None  # None = auto (Secure si public_url es https)
+
+
+@dataclass
 class Config:
     profile: Profile
     scoring: Scoring
@@ -225,6 +236,7 @@ class Config:
     report: ReportCfg
     relevance: RelevanceCfg
     channel: ChannelCfg
+    web: WebCfg = field(default_factory=WebCfg)
     jooble_api_key: str = ""
     aira_feeds: list[str] = field(default_factory=list)
     project_root: Path = PROJECT_ROOT
@@ -404,6 +416,16 @@ def load_config(env_file: Path | None = None) -> Config:
         silence_sweeps=_env_int("CHANNEL_SILENCE_SWEEPS", 6),
         max_posts_per_sweep=_env_int("CHANNEL_MAX_POSTS_PER_SWEEP", 15),
     )
+    web = WebCfg(
+        enabled=_env_bool("WEB_ENABLED", False),
+        host=_env("WEB_HOST", "127.0.0.1").strip() or "127.0.0.1",
+        port=_env_int("WEB_PORT", 8787),
+        public_url=_env("WEB_PUBLIC_URL", "").strip().rstrip("/"),
+        token_minutes=max(1, min(60, _env_int("WEB_TOKEN_MINUTES", 10))),
+        session_days=max(1, min(90, _env_int("WEB_SESSION_DAYS", 7))),
+        cookie_secure=(None if _env("WEB_COOKIE_SECURE", "").strip() == ""
+                       else _env_bool("WEB_COOKIE_SECURE", False)),
+    )
     cfg = Config(
         profile=profile,
         scoring=scoring,
@@ -417,6 +439,7 @@ def load_config(env_file: Path | None = None) -> Config:
         report=report,
         relevance=relevance,
         channel=channel,
+        web=web,
         jooble_api_key=jooble_key,
         aira_feeds=_env_list("AIRA_FEEDS", "walmart,cencosud_scotiabank,tottus,entel,ripley,itau,bancoestado,wom,codelco,copec,cencosud"),
     )
