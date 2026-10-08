@@ -37,6 +37,23 @@ def _categorias_dev(rc: str) -> set[str]:
     return {cat for cat, pat in _CAT_RULES if re.search(pat, r)}
 
 
+_ENCAJE_NO = {"bajo", "ninguno"}   # veredicto IA de encaje con el perfil que bloquea el canal
+
+
+def fit_ok(row: dict, cfg: Config) -> bool:
+    """Gate de encaje con el perfil (canal): score de perfil >= piso Y la IA no
+    dijo encaje bajo/ninguno. score=0 = descartada por red keyword/ubicación.
+    Sin veredicto IA (campo vacío) no bloquea: manda el score determinista."""
+    if not cfg.channel.require_fit:
+        return True
+    if (row.get("ai_encaje") or "").strip().lower() in _ENCAJE_NO:
+        return False
+    score = row.get("score")
+    if score is None:
+        return True
+    return int(score or 0) > 0 and int(score or 0) >= cfg.channel.min_fit_score
+
+
 _NONDEV_CATEGORIES = {"Ingeniería no-software", "Analista/Empresa", "Profesor/Formación",
                       "Soporte/TI", "No-tech", "Otro"}
 

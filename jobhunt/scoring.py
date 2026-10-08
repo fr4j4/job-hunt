@@ -130,6 +130,13 @@ def compute_score(job: dict, cfg: Config) -> tuple[int, dict]:
             score += pts
             breakdown[f"role:{kw}"] = pts
 
+    # ---- roles del perfil (PROFILE_ROLES) en el título: una sola vez ----
+    for role in p.roles:
+        if role and _kw_hit(role, t_title):
+            score += s.role_profile
+            breakdown["role_profile"] = f"{role} +{s.role_profile}"
+            break
+
     # ---- experiencia (JSON-LD oficial > regex descripción) ----
     years = job.get("years_official") or _years_from_description(desc)
     if years is not None:

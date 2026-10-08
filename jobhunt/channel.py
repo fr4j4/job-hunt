@@ -22,6 +22,7 @@ from .domain.roles import (  # noqa: F401
     _DEV_CATEGORIES,
     _NONDEV_CATEGORIES,
     _categorias_dev,
+    fit_ok,
     is_dev,
 )
 from .logging_setup import get_logger
@@ -201,6 +202,8 @@ def select_channel_offers(conn, cfg: Config, require_ia: bool = False) -> list[d
         if cfg.channel.require_dev and not is_dev(d.get("rol_categoria"), d.get("title") or "", cfg,
                                                   d.get("description") or ""):
             continue
+        if not fit_ok(d, cfg):
+            continue
         if cfg.channel.max_first_seen_hours:
             fs = str(d.get("first_seen") or "")
             try:
@@ -231,7 +234,7 @@ def publish_channel(cfg: Config, conn, tg_api, dry_run: bool = False,
     require_ia=True: solo ofertas revisadas por IA (ia_model != '').
     """
     stats: dict = {"candidates": 0, "posted": 0, "skipped_age": 0, "skipped_score": 0,
-                   "skipped_notified": 0, "skipped_dev": 0}
+                   "skipped_notified": 0, "skipped_dev": 0, "skipped_fit": 0}
     if not cfg.channel.enabled or not cfg.channel.chat_id:
         return stats
 
@@ -257,6 +260,9 @@ def publish_channel(cfg: Config, conn, tg_api, dry_run: bool = False,
         if cfg.channel.require_dev and not is_dev(r.get("rol_categoria"), r.get("title") or "", cfg,
                                                   r.get("description") or ""):
             stats["skipped_dev"] += 1
+            continue
+        if not fit_ok(r, cfg):
+            stats["skipped_fit"] += 1
             continue
         if len(posteadas) >= tope:
             break
@@ -296,9 +302,10 @@ def publish_channel(cfg: Config, conn, tg_api, dry_run: bool = False,
                 log.warning("canal: sendMessage sin ok → %s", str(resp)[:120])
         except Exception as e:
             log.warning("canal: post falló (%.40s): %s", r.get("title") or "", e)
-    log.info("canal: %d/%d publicadas (dev-skip %d, sobrantes por tope %d)",
+    log.info("canal: %d/%d publicadas (dev-skip %d, fit-skip %d, sobrantes por tope %d)",
              stats["posted"], stats["candidates"], stats["skipped_dev"],
-             stats["candidates"] - stats["skipped_dev"] - stats["posted"])
+             stats["skipped_fit"],
+             stats["candidates"] - stats["skipped_dev"] - stats["skipped_fit"] - stats["posted"])
     return stats
 
 
@@ -433,6 +440,8 @@ def publish_daily_digest(cfg: Config, conn, tg_api, dry_run: bool = False,
         if cfg.channel.require_dev and not is_dev(r.get("rol_categoria"), r.get("title") or "", cfg,
                                                   r.get("description") or ""):
             continue
+        if not fit_ok(r, cfg):
+            continue
         rol = (r.get("rol_categoria") or "Otro").strip() or "Otro"
         cur = por_rol.get(rol)
         if cur is None or (r.get("market_score") or 0) > (cur.get("market_score") or 0):
@@ -538,6 +547,8 @@ def publish_weekly_rol(cfg: Config, conn, tg_api, dry_run: bool = False,
     for r in rows:
         if cfg.channel.require_dev and not is_dev(r.get("rol_categoria"), r.get("title") or "", cfg,
                                                   r.get("description") or ""):
+            continue
+        if not fit_ok(r, cfg):
             continue
         rol = (r.get("rol_categoria") or "Otro").strip() or "Otro"
         cur = por_rol.get(rol)
@@ -825,7 +836,8 @@ def channel_status(conn, cfg: Config) -> str:
     last = conn.execute("""SELECT posted_at, kind FROM channel_posts ORDER BY id DESC LIMIT 1""").fetchone()
     cola = [dict(r) for r in conn.execute(
         _GATE_SQL, {"min_score": ch.min_score, "max_age": ch.max_age_days}).fetchall()]
-    dev_ok = [r for r in cola if is_dev(r["rol_categoria"], r["title"], cfg, r.get("description") or "")]
+    dev_ok = [r for r in cola if is_dev(r["rol_categoria"], r["title"], cfg, r.get("description") or "")
+              and fit_ok(r, cfg)]
     dist = Counter()
     for (ms,) in conn.execute("SELECT market_score FROM ofertas WHERE active=1"):
         dist[(ms or 0) // 10 * 10] += 1

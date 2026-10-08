@@ -717,6 +717,11 @@ def apply_ia_result(conn, cfg: Config, r: dict, parsed: dict | None,
             sets.append(f"ai_{field}=?")
             params.append(_clean_text(parsed[field], 300))
             ia_fields.append(field)
+    encaje = _clean_text(parsed.get("encaje"), 10, lower=True)
+    if encaje in ("alto", "medio", "bajo", "ninguno"):
+        sets.append("ai_encaje=?")
+        params.append(encaje)
+        ia_fields.append("encaje")
     if parsed.get("opinion"):
         sets.append("ai_opinion=?")
         params.append(_clean_text(parsed["opinion"], 300))
