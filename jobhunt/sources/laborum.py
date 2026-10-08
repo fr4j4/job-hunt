@@ -146,11 +146,12 @@ def jobs(queries: list[str], found_by_prefix: str = "", max_pages: int = 3, on_q
 
 
 def fetch_detail(aviso_id: str | int) -> dict:
-    """Ficha completa de un aviso (para el Anillo A). Retorna info estilo extract_structured."""
-    info: dict = {"description": "", "date_posted": "", "valid_through": "",
-                  "employment_type": "", "years_official": None, "remote_official": 0,
-                  "industry": "", "education": "", "applicant_region": "",
-                  "company": "", "modality_badge": "", "salary": "",
-                  "contrato": "", "jornada": "", "techs_desc": []}
-    d = _search("", page=0, size=1)  # placeholder: la ficha individual es otro endpoint
-    return info
+    """Ficha completa de un aviso (Anillo A). NO implementada: el listado ya trae
+    título, empresa, modalidad y descripción resumida (description_source='laborum-api')
+    y el endpoint de ficha individual no está verificado. Devuelve la forma vacía de
+    extract_structured SIN tocar la red (antes disparaba un searchV2 inútil por aviso)."""
+    return {"description": "", "date_posted": "", "valid_through": "",
+            "employment_type": "", "years_official": None, "remote_official": 0,
+            "industry": "", "education": "", "applicant_region": "",
+            "company": "", "modality_badge": "", "salary": "",
+            "contrato": "", "jornada": "", "techs_desc": []}

@@ -3,7 +3,7 @@
 Corre: .venv/bin/python -m pytest tests/test_canal.py -v
 """
 import sqlite3
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
@@ -173,7 +173,9 @@ def conn_mem():
 
 
 def _insert(conn, gid, title="Dev Python", ms=80, rol="Backend", company="X Corp",
-            modality="remoto", date_canonical="2026-09-02", notified=""):
+            modality="remoto", date_canonical=None, notified=""):
+    # fecha relativa a hoy: la ventana del canal (14d) usa date('now') y fijarla rompe la suite
+    date_canonical = date_canonical or (date.today() - timedelta(days=1)).isoformat()
     desc = "x" * 2000
     # ¡ojo!: el INSERT tiene 22 columnas pero 21 placeholders → los params van en orden:
     # (gid, title, company, modality, desc, ms, rol, notified, date_canonical)

@@ -89,6 +89,14 @@ def _staffing(job: dict) -> bool:
     return False
 
 
+def tiene_senal_perfil(breakdown: dict) -> bool:
+    """True si el título trae alguna señal del perfil (tech, rol del perfil o rol-keyword).
+    Sin señal = título genérico: la IA se difiere al batch nocturno en vez de gastarse
+    en el barrido (la oferta sigue indexada)."""
+    return bool(breakdown.get("techs") or breakdown.get("role_profile")
+                or any(k.startswith("role:") for k in breakdown))
+
+
 def compute_score(job: dict, cfg: Config) -> tuple[int, dict]:
     """Calcula el score de compatibilidad de una oferta contra el perfil.
 

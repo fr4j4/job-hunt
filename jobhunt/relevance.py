@@ -41,7 +41,7 @@ def build_keywords(cfg: Config) -> list[str]:
     for q in (cfg.search.queries_linkedin + cfg.search.queries_computrabajo +
               cfg.search.queries_indeed + cfg.search.queries_glassdoor +
               cfg.search.queries_laborum + cfg.search.queries_jooble +
-              cfg.search.queries_accenture + cfg.search.queries_jooble):
+              cfg.search.queries_accenture):
         add(q)
     return kw
 
@@ -53,7 +53,7 @@ def _frase_match(texto: str, frase: str) -> bool:
 
 def title_is_relevant(title: str, keywords: list[str]) -> bool:
     t = title.lower()
-    return any(_frase_match := (re.search(rf"\b{re.escape(k)}\b", t) is not None) for k in keywords)
+    return any(_frase_match(t, k) for k in keywords)
 
 
 def area_is_tech(area: str, cfg: Config) -> bool | None:
