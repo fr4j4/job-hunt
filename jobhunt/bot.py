@@ -665,6 +665,7 @@ def _help_admin_text() -> str:
         "/report status · /report list — avance del reporte · historial de PDFs",
         "/stats — cobertura del pool (procesadas IA, datos faltantes)",
         "/encaje [N] — asigna el encaje con el perfil a ofertas ya procesadas por IA y recalcula scores",
+        "/tabla [N] — últimas ofertas en tabla nativa de Telegram (experimental; si falla, muestra tarjetas + el error)",
         "/fuentes — salud del scraping: ofertas por fuente en los últimos barridos",
         "/config — configuración actual (tokens enmascarados)",
         "/preview — oferta aleatoria como se vería en el canal (sin marcar publicada)",
@@ -990,6 +991,8 @@ def _handle_command(cfg: Config, message: dict, state: dict) -> None:
             else:
                 max_n = int(arg) if arg.strip().isdigit() else None
                 threading.Thread(target=_encaje_async, args=(cfg, chat_id, max_n), daemon=True).start()
+        elif cmd == "/tabla":
+            _tabla_nativa(cfg, chat_id, arg)
         elif cmd == "/fuentes":
             from .salud import texto_fuentes
             conn = database.connect(cfg)
@@ -1552,6 +1555,28 @@ def _ia_batch_async(cfg: Config, chat_id: int | None, scheduled: bool = False,
                 pass
 
 
+def _tabla_nativa(cfg: Config, chat_id: int, arg: str = "") -> None:
+    """/tabla [N] — últimas N ofertas en TABLA NATIVA de Telegram (mensajes enriquecidos,
+    experimental). Si Telegram la rechaza, manda las tarjetas y el error exacto."""
+    from .telegram.rich import enviar_tabla
+    n = max(1, min(int(arg), 15)) if arg.strip().isdigit() else 10
+    offers = _latest_offers(cfg, n)
+    if not offers:
+        _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "text": "ℹ️ Aún no hay ofertas para mostrar."})
+        return
+    ok, errores = enviar_tabla(lambda m, p: _tg_api(cfg, m, p, retries=0), chat_id, offers)
+    if ok:
+        return
+    log.warning("tabla nativa rechazada: %s", errores)
+    _tg_api(cfg, "sendMessage", {
+        "chat_id": chat_id, "parse_mode": "HTML", "disable_web_page_preview": True,
+        "text": "📋 <b>Últimas ofertas</b>\n\n" + table_block(offers)})
+    _tg_api(cfg, "sendMessage", {
+        "chat_id": chat_id, "parse_mode": "HTML",
+        "text": "⚠️ Telegram no aceptó la tabla nativa (experimental). Error de cada variante:\n"
+                + "\n".join(f"• <code>{esc(e)}</code>" for e in errores)})
+
+
 def _encaje_async(cfg: Config, chat_id: int | None, max_n: int | None = None) -> None:
     """Backfill de ai_encaje + rescore en background (comparte el lock _IA_STATE con /enrich).
     Nunca tumba el daemon; reporta inicio y fin al chat."""
@@ -1856,6 +1881,7 @@ _MENU_COMANDOS = [
     {"command": "report", "description": "Informe de mercado en PDF"},
     {"command": "stop", "description": "Detener lo que esté corriendo"},
     {"command": "help", "description": "Ayuda (/help admin para el resto)"},
+    {"command": "tabla", "description": "Últimas ofertas en tabla nativa (experimental)"},
     {"command": "encaje", "description": "Evaluar el encaje con tu perfil de ofertas ya analizadas"},
     {"command": "enrich", "description": "Corre el batch IA ahora (rellena datos faltantes)"},
     {"command": "enrich_all", "description": "TODAS las activas sin IA con descripción"},
