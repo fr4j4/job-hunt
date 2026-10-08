@@ -393,3 +393,54 @@ def test_callback_sc_prefix_con_sufijo_s():
     assert pat.fullmatch("sc60s:page:2")
     assert pat.fullmatch("sc60:page:2")
     assert not pat.fullmatch("sc60x:page:2")
+
+
+def test_parse_filters_q_y_score():
+    """_parse_filters: búsqueda entre comillas + score min/max."""
+    from jobhunt.bot import _parse_filters
+    f = _parse_filters('q"python aws"')
+    assert f["q"] == "python aws"
+    f = _parse_filters('remoto Q"Kubernetes" score80')
+    assert f["q"] == "kubernetes" and f["min_score"] == 80 and "remoto" in f["modality"]
+    f = _parse_filters("score<=60")
+    assert f["max_score"] == 60 and f["min_score"] is None
+    f = _parse_filters("sc>=85 salary")
+    assert f["min_score"] == 85 and f["has_salary"]
+    # sin q ni score: no rompe
+    f = _parse_filters("remoto stgo")
+    assert f["q"] == "" and f["min_score"] is None and "remoto" in f["modality"]
+
+
+def test_enc_dec_filters_q_score_roundtrip():
+    """Encode/decode de callback_data preserva q + score (paginación)."""
+    from jobhunt.bot import _enc_filters, _dec_filters, _parse_filters
+    f = _parse_filters('q"kubernetes" score>=75 remote')
+    enc = _enc_filters(f)
+    assert len("f" + enc) <= 64                      # límite callback_data Telegram
+    d = _dec_filters(enc)
+    assert d["q"] == f["q"] and d["min_score"] == 75 and "remoto" in d["modality"]
+
+
+def test_callback_regex_acepta_base64_mayusculas():
+    """Regresión: el base64 del texto buscado produce mayúsculas — el regex
+    del callback (que era solo minúsculas) debe aceptarlas."""
+    import re
+    from jobhunt.bot import _parse_filters, _enc_filters
+    pat = re.compile(r"(jobs|latest|sc\d+s?|f[a-zA-Z0-9._\-]*):page:(\d+)")
+    f = _parse_filters('q"spring boot" score>=70')
+    enc = _enc_filters(f)
+    assert pat.fullmatch(f"f{enc}:page:2"), f"regex no matchea f{enc}"
+
+
+def test_help_text_html_valido():
+    """Regresión: /help se envía con parse_mode HTML — un '<' crudo (ej:
+    'score<=60') rompe el envío con Telegram 400. Todo el texto debe
+    parsear limpio."""
+    from html.parser import HTMLParser
+    from jobhunt.bot import _help_text
+
+    class _V(HTMLParser):
+        pass
+
+    _V().feed(_help_text())   # error si hay tags malformados
+    assert "score≤" in _help_text() or "score<=" not in _help_text()

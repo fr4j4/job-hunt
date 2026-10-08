@@ -300,11 +300,34 @@ def get_salary_pool(conn) -> list[int]:
 
 def _fetch_ficha(r: dict) -> dict:
     """Solo HTTP — NUNCA toca la DB (spec-enrich-lotes §3.1.2, patrón P0-3).
-    Retorna info (con _access) o {"_access": "error"}."""
+    Retorna info (con _access) o {"_access": "error"}.
+    LinkedIn: la ficha normal está auth-walled (fetch_page → blocked); se usa el
+    endpoint guest de detalle (sources.linkedin.fetch_description), que responde
+    200 con la desc completa (verificado 30-09-2026)."""
     try:
-        if "airavirtual.com" in (r.get("url") or ""):
-            return _extract_aira_spa(r["url"])
-        return extract_structured(r["url"])
+        url = r.get("url") or ""
+        if "airavirtual.com" in url:
+            return _extract_aira_spa(url)
+        if "linkedin.com/jobs/view/" in url:
+            from .sources.linkedin import fetch_description
+            meta = fetch_description(url)
+            desc = meta.get("description") or ""
+            if desc:
+                info = {"_access": "ok", "description": desc,
+                        "description_source": "linkedin-guest",
+                        "employment_type": meta.get("employment_type", ""),
+                        "industry": meta.get("industry", "")}
+                if meta.get("seniority_oficial"):
+                    # mapeo a los niveles que usa seniority_real/IA
+                    sen = meta["seniority_oficial"].lower()
+                    if "intern" in sen or "trainee" in sen:
+                        info["years_official"] = 0
+                    info["seniority_oficial"] = meta["seniority_oficial"]
+                if meta.get("applicants_hint"):
+                    info["applicants_hint"] = meta["applicants_hint"]
+                return info
+            return {"_access": "blocked", "error": "linkedin guest sin desc"}
+        return extract_structured(url)
     except Exception as e:
         log.warning("enrich falló para %s (%s): %s", r["group_id"], (r.get("title") or "")[:40], e)
         return {"_access": "error"}
@@ -379,7 +402,10 @@ def _aplicar_ficha(conn, r: dict, info: dict, pool: list[int], cfg: Config | Non
         employment_type=COALESCE(NULLIF(employment_type,''), ?),
         years_official=COALESCE(years_official, ?),
         remote_official=COALESCE(remote_official, ?),
-        description_source=?
+        description_source=?,
+        industry=COALESCE(NULLIF(industry,''), ?),
+        applicants_hint=COALESCE(NULLIF(applicants_hint,''), ?),
+        seniority_oficial=COALESCE(NULLIF(seniority_oficial,''), ?)
         WHERE group_id=?""",
         (desc, info.get("company") or "", info.get("modality_badge") or "", arb_salary,
          arb_source, arb_status, arb_note,
@@ -387,6 +413,9 @@ def _aplicar_ficha(conn, r: dict, info: dict, pool: list[int], cfg: Config | Non
          info.get("valid_through") or "", info.get("employment_type") or "",
          info.get("years_official"), info.get("remote_official"),
          "jsonld" if info.get("description") else "section",
+         info.get("industry") or "",
+         info.get("applicants_hint") or "",
+         info.get("seniority_oficial") or "",
          r["group_id"]))
     conn.commit()
     return "ok"

@@ -28,6 +28,15 @@ def jobs(queries, found_by_prefix="", on_query=None):
             if not title: continue
             sal_m = re.search(r'<span class="icon i_salary"></span>\s*([^<]+)<', card)
             salary = _u(sal_m.group(1)).strip()[:40] if sal_m else ""
+            # badge de empresa verificada (v2): señal de confianza del aviso
+            verificada = 1 if 'i_verificada' in card else 0
+            # modalidad: chip "Remoto"/"Híbrido" en la card (v2)
+            modality = ""
+            mmod = re.search(r'>\s*(Remoto|Híbrido|Hibrido|Presencial|Teletrabajo)\s*<', card)
+            if mmod:
+                modality = mmod.group(1).strip().lower()
+                if modality == "teletrabajo":
+                    modality = "remoto"
             # F6: delega el parseo relativo a channel.normalize_date (única fuente
             # de verdad — entiende minutos/horas/días/semanas/meses/Hoy/Ayer)
             hace = re.search(r'Hace\s+[\d\s]+\s*\w+|Hoy|Ayer', card)
@@ -35,6 +44,8 @@ def jobs(queries, found_by_prefix="", on_query=None):
             fb = f"{found_by_prefix}{q}"
             out.append({"title": title, "company": "", "location": location, "date": date,
                         "salary": salary, "url": "https://www.computrabajo.cl" + path,
-                        "source": f"computrabajo:{q}", "found_by": fb})
+                        "source": f"computrabajo:{q}", "found_by": fb,
+                        "modality": modality,
+                        "_cb_verificada": verificada})
         time.sleep(2)
     return out

@@ -80,6 +80,10 @@ def _parse_offer(a: dict, feed: str) -> dict | None:
         "_desc": _clean(a.get("description") or a.get("snippet") or "")[:2000],
         "description_source": "aira-feed",
         "_aira_area": _clean(a.get("area") or a.get("area_text") or ""),
+        # metadatos estructurados del feed (v2): contrato/jornada oficiales
+        "employment_type": " ".join(
+            x for x in [_clean(a.get("hire_mode") or ""), _clean(a.get("contract_type") or "")] if x
+        ).replace("FULL_TIME", "Full-time").replace("PART_TIME", "Part-time")[:60],
     }
 
 

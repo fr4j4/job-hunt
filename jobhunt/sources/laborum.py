@@ -104,14 +104,22 @@ def jobs(queries: list[str], found_by_prefix: str = "", max_pages: int = 3, on_q
                     aid = a.get("id")
                     if not aid or aid in out:
                         continue
-                    # fecha: "02-09-2026" (DD-MM-YYYY)
+                    # fecha: priorizar fechaHoraPublicacion ("07-09-2026 16:08:17")
+                    # sobre fechaPublicacion ("07-09-2026") — precisión al día igual,
+                    # pero el datetime verifica que el aviso es reciente de verdad
                     fecha = ""
-                    try:
-                        fecha = datetime.strptime(a.get("fechaPublicacion", ""), "%d-%m-%Y").date().isoformat()
-                    except Exception:
+                    for fmt_campo in ("fechaHoraPublicacion", "fechaPublicacion"):
+                        raw = (a.get(fmt_campo) or "").split(" ")[0]
+                        try:
+                            fecha = datetime.strptime(raw, "%d-%m-%Y").date().isoformat()
+                            break
+                        except Exception:
+                            continue
+                    if not fecha:
                         fecha = (now - timedelta(days=1)).date().isoformat()
                     # desc: el detalle del listado es resumido; descripción completa la trae el Anillo A
                     desc = _clean(a.get("detalle") or "")[:2000]
+                    vacantes = a.get("cantidadVacantes")
                     out[aid] = {
                         "title": _clean(a.get("titulo") or "")[:150],
                         "company": (a.get("empresa") or "").strip(),
@@ -124,6 +132,8 @@ def jobs(queries: list[str], found_by_prefix: str = "", max_pages: int = 3, on_q
                     "salary": "",          # el API no expone salario en el listado
                     "_desc": desc,
                     "description_source": "laborum-api",
+                    "employment_type": (a.get("tipoTrabajo") or "").strip() or "",
+                    "_laborum_vacantes": vacantes if isinstance(vacantes, int) else None,
                     }
                 # cortar si ya cubrimos el total de esta combinación query+filtro
                 if total is not None and (pag + 1) * 20 >= int(total):

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+import base64
 import re
 import sqlite3
 import threading
@@ -43,12 +44,15 @@ def _score_row(j: dict) -> int:
 
 
 def render_page(offers: list[dict], page: int, page_size: int, cfg: Config,
-                label: str | None = None, cb_prefix: str = "jobs") -> dict:
+                label: str | None = None, cb_prefix: str = "jobs",
+                filtros_txt: str = "") -> dict:
     """Renderiza página N: texto con títulos numerados + botones compactos (≤64 chars).
 
     La fila N del texto = botón N. El pago va después del porcentaje.
     label = encabezado alternativo (ej: "🎯 Ofertas ≥60"); cb_prefix = namespace
     de callback_data para la navegación (jobs = ancla, sc<umbral> = /score).
+    filtros_txt: descripción de filtros activos — se muestra SIEMPRE (header +
+    cada página navegada) para que se sepa qué búsqueda está paginando.
     """
     total = len(offers)
     pages = max(1, (total + page_size - 1) // page_size)
@@ -61,6 +65,8 @@ def render_page(offers: list[dict], page: int, page_size: int, cfg: Config,
         f"{head} · <i>{total} activas</i> · {stamp}",
         f"Página <b>{page + 1}/{pages}</b>",
     ]
+    if filtros_txt:
+        lines.insert(2, f"🔍 <b>Filtros:</b> {esc(filtros_txt)}")
     if chunk:
         best = chunk[0]
         lines += [
@@ -230,7 +236,7 @@ def handle_callback(cfg: Config, query: dict, state: dict) -> None:
         if data == "noop":
             _tg_api(cfg, "answerCallbackQuery", {"callback_query_id": qid})
             return
-        m = re.fullmatch(r"(jobs|latest|sc\d+s?|f[a-z0-9.\-]*):page:(\d+)", data)
+        m = re.fullmatch(r"(jobs|latest|sc\d+s?|f[a-zA-Z0-9._\-]*):page:(\d+)", data)
         if not m:
             _tg_api(cfg, "answerCallbackQuery", {"callback_query_id": qid})
             return
@@ -243,7 +249,9 @@ def handle_callback(cfg: Config, query: dict, state: dict) -> None:
         elif prefix.startswith("f"):
             f = _dec_filters(prefix[1:])
             rendered = render_page(_filter_offers(cfg, f), page, cfg.telegram.digest_page_size, cfg,
-                                   label=f"🔎 <b>Ofertas — {_describe_filters(f)}</b>", cb_prefix=prefix)
+                                   label=f"🔎 <b>Ofertas</b>",
+                                   filtros_txt=_describe_filters(f),
+                                   cb_prefix=prefix)
         else:
             sc = prefix[2:]  # ej: "60s" → th=60, solo_sueldo=True
             solo_s = sc.endswith("s")
@@ -310,10 +318,12 @@ def _salary_clp(cfg: Config, j: dict) -> float | None:
     return val
 
 
-def _parse_filters(tokens: list[str]) -> dict:
-    """'remoto sueldo2.5 stgo' → {'modality': {...}, 'min_salary': 2.5e6, 'has_salary': False, 'loc': ['santiago']}"""
+def _parse_filters(arg: str) -> dict:
+    """'remoto sueldo2.5 stgo q\"python aws\" score80' → filtros.
+    q\"...\" busca la frase (case-insensitive) en título+descripción;
+    score80 / score>=80 / score<=80 filtran por score mínimo/máximo."""
     f: dict = {"modality": set(), "min_salary": None, "has_salary": False, "loc": [],
-               "no_excluyente": False, "lang": ""}
+               "no_excluyente": False, "lang": "", "q": "", "min_score": None, "max_score": None}
     _MOD = {"remote": "remoto", "remoto": "remoto", "remota": "remoto",
             "hybrid": "híbrido", "hibrido": "híbrido", "hibrida": "híbrido",
             "onsite": "presencial", "presencial": "presencial"}
@@ -323,7 +333,12 @@ def _parse_filters(tokens: list[str]) -> dict:
             "araucania": "araucania", "temuco": "temuco"}
     _LANG = {"en": "inglés", "ingles": "inglés", "english": "inglés",
              "aleman": "alemán", "frances": "francés", "portugues": "portugués"}
-    for t in tokens:
+    # búsqueda entre comillas: q"texto a buscar" (q o Q) — extraer ANTES del split
+    m_q = re.search(r'[qQ]"([^"]+)"', arg)
+    if m_q:
+        f["q"] = m_q.group(1).strip().lower()
+        arg = arg.replace(m_q.group(0), " ")
+    for t in arg.split():
         tl = _norm_txt(t).replace(":", "")
         if tl in _MOD:
             f["modality"].add(_MOD[tl])
@@ -333,6 +348,15 @@ def _parse_filters(tokens: list[str]) -> dict:
             continue
         if tl in _LANG:
             f["lang"] = _LANG[tl]
+            continue
+        # score: score80 / score>=80 / score<=80 / sc80 / sc<80
+        m_sc = re.fullmatch(r"(?:score|sc)(>=|<=|>|<)?(\d{1,3})", tl)
+        if m_sc:
+            v = max(0, min(100, int(m_sc.group(2))))
+            if m_sc.group(1) in ("<=", "<"):
+                f["max_score"] = v
+            else:                      # sin operador o >= / > → mínimo
+                f["min_score"] = v
             continue
         m_num = re.fullmatch(r"(?:salary|sueldo|min|pay|pago|>|>=)?([\d.,]+)\s*([mk]?)", tl)
         if m_num and any(ch.isdigit() for ch in tl) and tl not in ("min",):
@@ -363,6 +387,12 @@ def _parse_filters(tokens: list[str]) -> dict:
 
 def _describe_filters(f: dict) -> str:
     parts = []
+    if f["q"]:
+        parts.append(f'buscar "{f["q"]}"')
+    if f["min_score"] is not None:
+        parts.append(f"score≥{f['min_score']}")
+    if f["max_score"] is not None:
+        parts.append(f"score≤{f['max_score']}")
     if f["modality"]:
         parts.append("/".join(sorted(f["modality"])))
     if f["has_salary"]:
@@ -393,6 +423,14 @@ def _filter_offers(cfg: Config, f: dict) -> list[dict]:
         if f["modality"] and not (
                 mod in f["modality"]
                 or ("remoto" in f["modality"] and j.get("remote_official") == 1)):
+            continue
+        if f["q"]:
+            hay = f"{(j.get('title') or '')} {(j.get('description') or '')}".lower()
+            if f["q"] not in hay:
+                continue
+        if f["min_score"] is not None and (j.get("score") or 0) < f["min_score"]:
+            continue
+        if f["max_score"] is not None and (j.get("score") or 0) > f["max_score"]:
             continue
         if f["has_salary"] and not (j.get("salary") or "").strip():
             continue
@@ -439,8 +477,16 @@ def _score_offers(cfg: Config, threshold: int, solo_sueldo: bool = False) -> lis
 
 
 def _enc_filters(f: dict) -> str:
-    """Serializa filtros para callback_data: {'remoto', ≥2.5M, santiago} → 'r-s2.5-lstgo'."""
+    """Serializa filtros para callback_data (máx 64 bytes): texto → base64 't…',
+    score → 'n80' (min) / 'x80' (max)."""
     parts = []
+    if f["q"]:
+        b64 = base64.urlsafe_b64encode(f["q"].encode()).decode().rstrip("=")
+        parts.append("t" + b64[:22])          # 22 b64 chars ≈ 16 chars de texto
+    if f["min_score"] is not None:
+        parts.append(f"n{f['min_score']}")
+    if f["max_score"] is not None:
+        parts.append(f"x{f['max_score']}")
     for m in sorted(f["modality"]):
         parts.append({"remoto": "r", "híbrido": "h", "presencial": "p"}.get(m, ""))
     if f["min_salary"] is not None:
@@ -459,11 +505,21 @@ def _enc_filters(f: dict) -> str:
 def _dec_filters(enc: str) -> dict:
     """Inverso de _enc_filters (fallback si el daemon se reinició entre páginas)."""
     f: dict = {"modality": set(), "min_salary": None, "has_salary": False, "loc": [],
-               "no_excluyente": False, "lang": ""}
+               "no_excluyente": False, "lang": "", "q": "", "min_score": None, "max_score": None}
     for p in (enc or "").split("-"):
         if not p:
             continue
-        if p in ("r", "h", "p"):
+        if p.startswith("t"):
+            try:
+                b64 = p[1:] + "=" * (-len(p[1:]) % 4)
+                f["q"] = base64.urlsafe_b64decode(b64.encode()).decode().lower()
+            except Exception:
+                pass
+        elif p.startswith("n") and p[1:].isdigit():
+            f["min_score"] = int(p[1:])
+        elif p.startswith("x") and p[1:].isdigit():
+            f["max_score"] = int(p[1:])
+        elif p in ("r", "h", "p"):
             f["modality"].add({"r": "remoto", "h": "híbrido", "p": "presencial"}[p])
         elif p == "q":
             f["has_salary"] = True
@@ -591,6 +647,8 @@ def _help_text() -> str:
         "/score N — ofertas con score ≥ N (ej: /score 60 · /score 60 s solo con sueldo)",
         "/jobs [filtros] — filtra el pool (combinables):",
         "    remote · hybrid · onsite · salary (con sueldo publicado) ·",
+        "    q\"texto\" — busca la frase en título y descripción (ej: q\"kubernetes\") ·",
+        "    score80 / score>=80 — score mínimo · score≤60 — score máximo ·",
         "    salary2.5 (≥$2.5M) · 2.5 / 500k / 2.500.000 ·",
         "    sinen (sin idioma excluyente) · en (pide inglés)",
         "    ubicación: stgo, temuco, valpo, conce, araucania o texto libre",
@@ -1232,7 +1290,7 @@ def _handle_command(cfg: Config, message: dict, state: dict) -> None:
                 "disable_web_page_preview": True,
                 "reply_markup": _kb_json(kb)})
         elif cmd == "/jobs":
-            f = _parse_filters(parts[1:])
+            f = _parse_filters(arg)
             offers = _filter_offers(cfg, f)
             if not offers:
                 _tg_api(cfg, "sendMessage", {
@@ -1241,7 +1299,8 @@ def _handle_command(cfg: Config, message: dict, state: dict) -> None:
                 return
             prefix = "f" + _enc_filters(f)
             rendered = render_page(offers, 0, cfg.telegram.digest_page_size, cfg,
-                                   label=f"🔎 <b>Ofertas — {_describe_filters(f)}</b>",
+                                   label=f"🔎 <b>Ofertas</b>",
+                                   filtros_txt=_describe_filters(f),
                                    cb_prefix=prefix)
             kb = [[{k: v for k, v in b.items() if k != "style"} for b in row]
                   for row in rendered["keyboard"]]
