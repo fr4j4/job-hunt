@@ -79,9 +79,9 @@ def render_page(offers: list[dict], page: int, page_size: int, cfg: Config,
         ]
         if best.get("ai_fit_reason"):
             lines.append(f"   🎯 <i>{esc(best['ai_fit_reason'][:140])}</i>")
-        lines += ["", "<b>Esta página</b> (toca el 🔗 para abrir):", table_block(chunk)]
+        lines += ["", "<b>Esta página</b> (toca el título para abrir la oferta):", table_block(chunk)]
     lines.append("")
-    lines.append("<i>⭐ ≥85 · 🟢 ≥70 · 🟡 ≥55 · ⚪ resto · * = IA · toca el 🔗 para abrir</i>")
+    lines.append("<i>⭐ ≥85 · 🟢 ≥70 · 🟡 ≥55 · ⚪ resto (puntaje de afinidad) · EN! = inglés excluyente · 🎯 = encaje con tu perfil</i>")
     text = "\n".join(lines)[:4000]
 
     kb = []   # solo navegación — el link está en el título de cada fila
