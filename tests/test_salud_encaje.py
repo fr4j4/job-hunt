@@ -161,3 +161,45 @@ def _conn_enc():
         def __getattr__(self, n): return getattr(self._c, n)
         def close(self): pass
     return _SinClose(conn)
+
+
+def test_created_at_updated_at_se_mantienen():
+    conn = _conn()
+    gid, _ = database.upsert(conn, {"title": "Dev", "company": "X", "url": "https://x/ts",
+                                    "source": "t", "date": "2026-10-01"}, "2026-10-01T00:00:00")
+    ca, ua = conn.execute("SELECT created_at, updated_at FROM ofertas WHERE group_id=?", (gid,)).fetchone()
+    assert ca.endswith("Z") and ua.endswith("Z")           # rellenados por trigger al insertar
+    conn.execute("UPDATE ofertas SET created_at='2020-01-01T00:00:00Z', updated_at='2020-01-01T00:00:00Z' "
+                 "WHERE group_id=?", (gid,))
+    conn.execute("UPDATE ofertas SET score=77 WHERE group_id=?", (gid,))   # cualquier escritor
+    ca2, ua2 = conn.execute("SELECT created_at, updated_at FROM ofertas WHERE group_id=?", (gid,)).fetchone()
+    assert ca2 == "2020-01-01T00:00:00Z"                    # created_at no cambia
+    assert ua2 > "2020-01-01T00:00:00Z"                     # updated_at se refrescó
+    conn.execute("UPDATE ofertas SET score=78, updated_at='2021-01-01T00:00:00Z' WHERE group_id=?", (gid,))
+    assert conn.execute("SELECT updated_at FROM ofertas WHERE group_id=?", (gid,)).fetchone()[0] == "2021-01-01T00:00:00Z"
+
+
+def test_backfill_de_timestamps_en_base_existente():
+    conn = sqlite3.connect(":memory:")
+    database.init_db(conn)
+    conn.execute("INSERT INTO ofertas (group_id,title,first_seen,last_seen,created_at,updated_at) "
+                 "VALUES ('g','T','2026-09-01T10:00:00+00:00','2026-09-05T10:00:00+00:00','','x')")
+    # simula una DB anterior a la migración: sin triggers y con las columnas vacías
+    conn.execute("DROP TRIGGER trg_ofertas_created")
+    conn.execute("DROP TRIGGER trg_ofertas_updated")
+    conn.execute("UPDATE ofertas SET created_at='', updated_at='' WHERE group_id='g'")
+    database.init_db(conn)                                  # migración: backfill + triggers
+    assert conn.execute("SELECT created_at, updated_at FROM ofertas").fetchone() == (
+        "2026-09-01T10:00:00+00:00", "2026-09-05T10:00:00+00:00")
+
+
+def test_tarjetas_latest_titulo_completo_y_sin_tabla():
+    from jobhunt.telegram.render import table_block
+    o = {"score": 82, "title": "Desarrollador Backend Senior Python/AWS para equipo de pagos digitales",
+         "company": "Acme", "modality": "remoto", "salary": "CLP 3200000", "techs": "Py;AWS",
+         "seniority_real": "senior", "date_posted": "2026-10-07", "url": "https://x/1",
+         "ai_idiomas": '[{"idioma":"inglés","excluyente":true}]', "ai_encaje": "alto"}
+    out = table_block([o, {**o, "url": "", "title": "Dev"}])
+    assert "│" not in out and '<a href="https://x/1">Desarrollador Backend Senior' in out
+    assert "…" in out and "🏢 Acme" in out and "🗣 EN!" in out and "🎯 alto" in out
+    assert "<b>Dev</b>" in out                              # sin url: título en negrita

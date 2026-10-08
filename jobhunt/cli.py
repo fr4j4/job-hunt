@@ -5,6 +5,7 @@
     python -m jobhunt enrich       # backfill Anillo A (JSON-LD)
     python -m jobhunt ia           # batch IA nocturno (deepseek-v4-flash)
     python -m jobhunt encaje [N]   # backfill de encaje con el perfil + rescore
+    python -m jobhunt tabla        # prueba de tabla nativa de Telegram (manda una muestra)
     python -m jobhunt report       # stats de mercado del pool completo
 """
 from __future__ import annotations
@@ -343,6 +344,28 @@ def cmd_encaje(cfg, max_n: int | None = None) -> None:
     cmd_rescore(cfg)
 
 
+def cmd_tabla(cfg) -> None:
+    """Prueba de la tabla nativa: manda una tabla de muestra a TELEGRAM_CHAT_ID con cada
+    variante de formato e imprime la respuesta de Telegram. No toca la DB."""
+    from .telegram.rich import probar_variantes
+    chat = cfg.telegram.chat_id
+    if not (cfg.telegram.bot_token and chat):
+        print("Falta TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID en el .env")
+        return
+    muestra = [
+        {"score": 88, "title": "Senior Backend Developer Python/AWS", "company": "Acme Chile",
+         "modality": "remoto", "salary": "CLP 3200000", "date_posted": _now()},
+        {"score": 71, "title": "Ingeniero Full Stack (React / Node)", "company": "Banco Austral",
+         "modality": "híbrido", "salary": "", "date_posted": _now()},
+        {"score": 58, "title": "Analista Programador", "company": "", "modality": "",
+         "salary": "", "date_posted": ""},
+    ]
+    call = _tg_api_for_channel(cfg)
+    for nombre, ok, detalle in probar_variantes(call, int(chat), muestra):
+        print(f"{'OK  ' if ok else 'FAIL'} {nombre}: {detalle}")
+    print("Revisa tu Telegram: cada variante OK debió llegar como una tabla.")
+
+
 def cmd_enrich(cfg) -> None:
     conn = database.connect(cfg)
     n = database.init_db(conn) or 0
@@ -409,6 +432,8 @@ def main():
         cmd_rescore(cfg)
     elif cmd == "enrich":
         cmd_enrich(cfg)
+    elif cmd == "tabla":
+        cmd_tabla(cfg)          # python -m jobhunt tabla — prueba de tabla nativa
     elif cmd == "encaje":
         # python -m jobhunt encaje [N]  — backfill de encaje con el perfil + rescore
         cmd_encaje(cfg, int(sys.argv[2]) if len(sys.argv) > 2 and sys.argv[2].isdigit() else None)
