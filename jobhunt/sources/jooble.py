@@ -16,6 +16,7 @@ import time
 from datetime import datetime, timedelta, timezone
 
 from ..logging_setup import get_logger
+from ..salarios.stats import FLOOR, CEILING
 from . import errores
 
 log = get_logger(__name__)
@@ -62,10 +63,17 @@ def _parse_card(texto: str) -> dict:
     if msnip:
         snippet = msnip.group(1)[:1500]
     # salario en el texto de la card (formato $X.XXX.XXX o "sin sueldo")
+    # solo con contexto de sueldo mensual y dentro de la banda física: el regex
+    # anterior tomaba cualquier "$" (presupuestos, USD, 15.000 de bonos…)
     salary = ""
-    msal = re.search(r"\$\s?([\d.]{5,12})", texto)
-    if msal:
-        salary = f"CLP {msal.group(1)}"
+    for msal in re.finditer(r"\$\s?(\d{1,3}(?:\.\d{3}){1,2})(?!\d)", texto):
+        ctx = texto[max(0, msal.start() - 40): msal.end() + 40].lower()
+        monto = int(msal.group(1).replace(".", ""))
+        if (FLOOR <= monto <= CEILING and re.search(
+                r"sueldo|salario|renta|remuneraci|l[ií]quid|brut|mensual|al mes|por mes", ctx)
+                and not re.search(r"usd|us\$|d[oó]lar|anual|bono|comisi", ctx)):
+            salary = f"CLP {monto}"
+            break
     return {"company": "", "date": fecha, "snippet": snippet, "salary": salary}
 
 
@@ -132,7 +140,7 @@ def jobs(queries: list[str], found_by_prefix: str = "", max_pages: int = 2, on_q
                     "title": (c.get("titulo") or "")[:150],
                     "company": parsed["company"],
                     "location": "",
-                    "date": parsed["date"] or now.date().isoformat(),
+                    "date": parsed["date"],   # sin fecha real → vacío (antes: hoy, falseaba la frescura)
                     "url": c.get("url") or "",
                     "source": f"jooble:{q}",
                     "found_by": fb,

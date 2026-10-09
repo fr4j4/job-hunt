@@ -45,3 +45,15 @@ def test_descripcion_jsonld_larga_no_se_trunca_y_conserva_parrafos():
     d = parse_jobposting(html, "https://x.cl/o")["description"]
     assert len(d) > 5000 and "Tarea 399 detallada" in d
     assert "\n• Tarea 1 detallada" in d
+
+
+def test_jooble_sueldo_solo_con_contexto():
+    from jobhunt.sources.jooble import _parse_card
+    assert _parse_card("Dev\n\xa0..." + "x" * 90 + " Sueldo $2.500.000 mensual")["salary"] == "CLP 2500000"
+    assert _parse_card("Dev\n\xa0..." + "x" * 90 + " presupuesto de $15.000 en equipo")["salary"] == ""
+    assert _parse_card("Dev\n\xa0..." + "x" * 90 + " sueldo anual $66.496.000 bono")["salary"] == ""
+
+
+def test_html_a_texto_quita_copilot():
+    from jobhunt.fetch.page import _html_a_texto
+    assert _html_a_texto("<p>Copilot said: Buscamos dev</p>").startswith("Buscamos")

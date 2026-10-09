@@ -335,8 +335,8 @@ def upsert(conn: sqlite3.Connection, job: dict, now_iso: str) -> tuple[str, bool
             (group_id, title, company, location, url, source, sources, found_by,
              date_posted, valid_through, employment_type, years_official, remote_official,
              salary, modality, techs, description, description_source,
-             first_seen, last_seen, occurrences, active, score_version)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,1,'')""",
+             first_seen, last_seen, occurrences, active, score_version, salary_source)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,1,'',?)""",
             (job["uid"], job["title"], job.get("company", ""), job.get("location", ""),
              job.get("url", ""), job.get("source", ""),
              (job.get("source") or "").split(":")[0], job.get("found_by", ""),
@@ -344,7 +344,7 @@ def upsert(conn: sqlite3.Connection, job: dict, now_iso: str) -> tuple[str, bool
              job.get("years_official"), job.get("remote_official"),
              job.get("salary", ""), job.get("modality", ""), job.get("techs", ""),
              (job.get("_desc") or "")[:MAX_DESC], job.get("description_source", ""),
-             now_iso, now_iso))
+             now_iso, now_iso, "feed" if job.get("salary") else ""))
         return job["uid"], True
     except sqlite3.IntegrityError:
         conn.execute("""UPDATE ofertas SET last_seen=?, occurrences=occurrences+1 WHERE group_id=?""",

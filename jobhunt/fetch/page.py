@@ -55,7 +55,8 @@ def _html_a_texto(h: str) -> str:
     h = re.sub(r"(?i)<\s*li[^>]*>", "• ", h)
     t = _u(re.sub(r"<[^>]+>", " ", h))
     t = re.sub(r"[ \t\r\f\v\xa0]+", " ", t)
-    return re.sub(r"\n\s*(?:\n\s*)+", "\n\n", re.sub(r" ?\n ?", "\n", t)).strip()
+    t = re.sub(r"\n\s*(?:\n\s*)+", "\n\n", re.sub(r" ?\n ?", "\n", t)).strip()
+    return re.sub(r"^(?:Copilot said:|Copilot dijo:)\s*", "", t)   # resto de UI en fichas CB
 
 
 def _jsonld_blocks(html: str) -> list[dict]:

@@ -24,7 +24,7 @@ _PROMPT_EXTRACT_LOCAL = (
     "\"benefits\": [], \"salario_clp_mensual\": 0, \"salario_evidencia\": \"\"}}\n\n"
     "REGLAS:\n"
     "- techs: SOLO tecnologias escritas literalmente en el titulo o la descripcion de la oferta. "
-    "NUNCA agregues otras, aunque sean obvias o tipicas del rol. Maximo 8 elementos. "
+    "NUNCA agregues otras, aunque sean obvias o tipicas del rol. Solo herramientas, lenguajes, frameworks, bases de datos o plataformas con nombre propio; NO frases genericas (\"aplicaciones web\", \"soluciones digitales\", \"ecommerce\", \"backend\"). Maximo 8 elementos. "
     "Usa la abreviatura corta estandar si existe (ej: Py, K8s, TS, JS, TF); si no, usa el nombre "
     "tal como aparece en el texto.\n"
     "- modalidad: solo \"R\" (remoto), \"H\" (hibrido), \"P\" (presencial), \"?\" (no determinable).\n"
