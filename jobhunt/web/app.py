@@ -55,14 +55,25 @@ def _cookie_segura(cfg: Config) -> bool:
 
 
 def _misma_origen(request: Request) -> bool:
-    """POST aceptado solo si viene de esta misma web (anti-CSRF)."""
+    """POST aceptado solo si viene de esta misma web (anti-CSRF).
+
+    Defensa en profundidad: SameSite=Lax ya impide que un POST cross-site mande la
+    cookie. Sobre HTTP en LAN los navegadores NO mandan Sec-Fetch-* (solo en
+    orígenes "trustworthy" = HTTPS/localhost); se cae a Origin/Referer y, si no
+    hay ninguno, se acepta: un POST cross-site de navegador SIEMPRE trae Origin,
+    así que su ausencia es un cliente no-navegador o same-origin.
+    """
     sfs = request.headers.get("sec-fetch-site")
-    if sfs is not None:
-        return sfs in ("same-origin", "none")
-    origen = request.headers.get("origin")
-    if origen:
-        return origen.split("://", 1)[-1] == request.headers.get("host", "")
-    return False
+    host = request.headers.get("host", "")
+    if sfs in ("same-origin", "none"):
+        return True
+    for cab in ("origin", "referer"):
+        valor = request.headers.get(cab)
+        if valor and valor != "null":   # 'null' (origen opaco) no aporta host que comparar
+            return valor.split("://", 1)[-1].split("/", 1)[0] == host
+    # Sin cabeceras de origen: no es un POST cross-site de navegador (esos SIEMPRE
+    # traen Origin). Se rechaza solo si el navegador declaró explícitamente cross-site.
+    return sfs != "cross-site"
 
 
 class _Limitador:
@@ -196,6 +207,9 @@ def crear_app(cfg: Config) -> FastAPI:
         if not limitador.permitir(ip):
             return _sin_acceso(request, "Demasiados intentos. Espera unos minutos.", 429)
         if not _misma_origen(request):
+            log.warning("web: login rechazado por origen · sfs=%r origin=%r host=%r",
+                        request.headers.get("sec-fetch-site"), request.headers.get("origin"),
+                        request.headers.get("host"))
             return _sin_acceso(request, "Solicitud no válida.", 403)
         conn = _conn()
         try:

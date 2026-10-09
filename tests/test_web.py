@@ -88,6 +88,28 @@ def test_login_cross_site_rechazado(entorno):
     assert r.status_code == 403
 
 
+def test_login_sin_sec_fetch_ni_origin(entorno):
+    """HTTP en LAN: el navegador no manda Sec-Fetch-* ni siempre Origin.
+    Sin ninguna cabecera de origen el POST debe entrar (no 403)."""
+    _, conn, cli, _, _ = entorno
+    token = auth.crear_token_login(conn)
+    r = cli.post("/login", data={"t": token}, follow_redirects=False)
+    assert r.status_code == 303
+
+
+def test_login_con_referer_mismo_host(entorno):
+    """Fallback a Referer: mismo host → entra; host ajeno → 403."""
+    _, conn, cli, _, _ = entorno
+    t1 = auth.crear_token_login(conn)
+    r = cli.post("/login", data={"t": t1},
+                 headers={"Referer": "http://testserver/login"}, follow_redirects=False)
+    assert r.status_code == 303
+    t2 = auth.crear_token_login(conn)
+    r = cli.post("/login", data={"t": t2},
+                 headers={"Referer": "https://atacante.com/x"}, follow_redirects=False)
+    assert r.status_code == 403
+
+
 def test_db_no_guarda_secretos_en_claro(entorno):
     _, conn, cli, _, _ = entorno
     token = _entrar(conn, cli)
