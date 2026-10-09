@@ -57,6 +57,11 @@ def _parse_card(texto: str) -> dict:
         if mes:
             anio = int(mfecha.group(3) or datetime.now(timezone.utc).year)
             fecha = f"{anio}-{mes:02d}-{int(mfecha.group(1)):02d}"
+    if not fecha:   # "Publicado hace 3 días" → texto relativo; db.upsert lo resuelve al capturar
+        mrel = re.search(r"(?:hace|publicad[oa] hace)\s+(?:\d+|un[ao]?)\s+(?:minutos?|horas?|d[ií]as?|semanas?|mes(?:es)?)",
+                         texto, re.I)
+        if mrel:
+            fecha = mrel.group(0)
     # snippet: texto después del título
     snippet = ""
     msnip = re.search(r"\xa0\.\.\.(.{80,})", texto)

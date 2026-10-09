@@ -74,3 +74,42 @@ def test_tablas_viejas_siguen_accesibles_por_nombre_viejo():
     assert "No-tech" in enrich._NONDEV_CATEGORIES
     # db.py
     assert db._norm_text("Ingeniería") == "ingenieria"
+
+
+# ---------- fecha de publicación: relativa → exacta ----------
+import pytest as _pytest
+from datetime import datetime as _dt, timezone as _tz
+from jobhunt.domain.fechas import resolver_fecha
+
+_NOW = _dt(2026, 10, 9, 15, 0, tzinfo=_tz.utc)
+
+
+@_pytest.mark.parametrize("txt,iso,prec", [
+    ("hace 3 días", "2026-10-06", "dia"), ("Hace un día", "2026-10-08", "dia"),
+    ("hace una semana", "2026-10-02", "aprox"), ("2 weeks ago", "2026-09-25", "aprox"),
+    ("hace 1 mes", "2026-09-09", "aprox"), ("hace más de 30 días", "2026-09-09", "aprox"),
+    ("hoy", "2026-10-09", "dia"), ("Ayer", "2026-10-08", "dia"),
+    ("hace 20 horas", "2026-10-08", "dia"), ("06-10-2026", "2026-10-06", "exact"),
+    ("Publicado el 21 de Jul, 2026", "2026-07-21", "exact"),
+    ("2026-10-06T10:00:00Z", "2026-10-06", "exact"),
+])
+def test_resolver_fecha(txt, iso, prec):
+    assert resolver_fecha(txt, _NOW) == (iso, prec)
+
+
+def test_resolver_fecha_basura():
+    assert resolver_fecha("sin fecha", _NOW) == ("", "")
+    assert resolver_fecha("", _NOW) == ("", "")
+
+
+def test_upsert_resuelve_fecha_relativa_contra_captura(tmp_path):
+    import sqlite3
+    from jobhunt import db
+    conn = sqlite3.connect(":memory:"); conn.row_factory = sqlite3.Row
+    db.init_db(conn)
+    gid, _ = db.upsert(conn, {"title": "Dev", "company": "X", "url": "http://x/1",
+                              "date": "Hace 2 semanas", "source": "computrabajo:q"},
+                       "2026-10-09T15:00:00Z")
+    r = conn.execute("SELECT date_posted, date_posted_raw, date_precision, date_canonical "
+                     "FROM ofertas WHERE group_id=?", (gid,)).fetchone()
+    assert tuple(r) == ("2026-09-25", "Hace 2 semanas", "aprox", "2026-09-25")

@@ -124,6 +124,10 @@ def fetch_description(url: str) -> dict:
     if md:
         out["description"] = _html_a_texto(md.group(1))[:MAX_DESC]
 
+    mt = re.search(r'posted-time-ago__text[^>]*>\s*([^<]+?)\s*<', html)
+    if mt:
+        out["date_text"] = clean(mt.group(1))   # "2 weeks ago" / "hace 2 semanas"
+
     def _criteria(label: str) -> str:
         mc = re.search(label + r"\s*</h3>\s*<span[^>]*>\s*([^<]+)", html)
         return mc.group(1).strip() if mc else ""

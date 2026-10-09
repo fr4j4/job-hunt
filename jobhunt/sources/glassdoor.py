@@ -99,7 +99,7 @@ def jobs(queries: list[str], found_by_prefix: str = "", max_pages: int = 2, on_q
                         "title": (hdr.get("jobTitleText") or "")[:150],
                         "company": hdr.get("employerNameFromSearch") or "",
                         "location": hdr.get("locationName") or "",
-                        "date": date,
+                        "date": date, "date_precision": "dia" if date else "",
                         "url": f"https://www.glassdoor.com/job-listing/j?jl={lid}",
                         "source": f"glassdoor:{q}",
                         "found_by": f"{found_by_prefix}{q}",

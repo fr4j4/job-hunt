@@ -4,6 +4,7 @@ from html import unescape as _u
 from datetime import datetime, timezone
 from .linkedin import fetch
 from ..channel import normalize_date
+from ..domain.fechas import resolver_fecha
 
 def jobs(queries, found_by_prefix="", on_query=None, max_pages=1):
     """Pagina con ?p=N hasta max_pages; corta si la página no trae ofertas nuevas."""
@@ -55,12 +56,16 @@ def _parse_cards(html_, q, found_by_prefix, now, vistos):
                 modality = "remoto"
         # F6: delega el parseo relativo a channel.normalize_date (única fuente
         # de verdad — entiende minutos/horas/días/semanas/meses/Hoy/Ayer)
-        hace = re.search(r'Hace\s+[\d\s]+\s*\w+|Hoy|Ayer', card)
+        # fecha exacta = captura − offset; se conserva el texto original y la precisión
+        # (date_posted_raw / date_precision) para mostrar "≈" en fechas gruesas
+        hace = re.search(r'Hace\s+(?:\d+|un[ao]?|unos?|m[aá]s de\s+\d+)\s*\w+|\bHoy\b|\bAyer\b', card)
         date = normalize_date(hace.group(0), now) if hace else ""
+        date_raw = hace.group(0) if hace else ""
         fb = f"{found_by_prefix}{q}"
         out.append({"title": title, "company": "", "location": location, "date": date,
                     "salary": salary, "url": "https://www.computrabajo.cl" + path,
                     "source": f"computrabajo:{q}", "found_by": fb,
+                    "date_raw": date_raw, "date_precision": resolver_fecha(date_raw, now)[1],
                     "modality": modality,
                     "_cb_verificada": verificada})
     return out

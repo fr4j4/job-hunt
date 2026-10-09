@@ -87,7 +87,9 @@ def parse_jobposting(html: str, url: str) -> dict:
                   "employment_type": "", "years_official": None, "remote_official": 0,
                   "industry": "", "education": "", "applicant_region": "",
                   "company": "", "company_linkedin_url": "", "modality_badge": "", "salary": "",
-                  "contrato": "", "jornada": "", "techs_desc": []}
+                  "contrato": "", "jornada": "", "techs_desc": [],
+                  "location": "", "job_benefits": "", "skills_official": "",
+                  "direct_apply": None, "date_text": ""}
 
     # CB: oferta expirada redirige a un listado genérico — fetch_page no expone la URL final,
     # así que re-petición con requests para leer la URL efectiva
@@ -140,6 +142,33 @@ def parse_jobposting(html: str, url: str) -> dict:
             if val.get("value"):
                 unit = {"MONTH": "/mes", "YEAR": "/año"}.get(val.get("unitText", ""), "")
                 info["salary"] = f"{sal.get('currencyCode','') if isinstance(sal, dict) else ''} {val.get('value','')}{unit}".strip()[:40]
+        # --- metadatos oficiales adicionales del JSON-LD ---
+        org = jp.get("hiringOrganization")
+        nom = org.get("name") if isinstance(org, dict) else org if isinstance(org, str) else ""
+        if nom:
+            info["company"] = _u(str(nom)).strip()[:80]
+        locs = jp.get("jobLocation")
+        locs = locs if isinstance(locs, list) else [locs] if locs else []
+        partes_loc = []
+        for lo in locs:
+            ad = lo.get("address") if isinstance(lo, dict) else None
+            if isinstance(ad, dict):
+                partes_loc.append(", ".join(str(ad[k]) for k in ("addressLocality", "addressRegion")
+                                            if ad.get(k)))
+        if any(partes_loc):
+            info["location"] = " | ".join(p for p in partes_loc if p)[:120]
+        ben = jp.get("jobBenefits")
+        if ben:
+            info["job_benefits"] = _html_a_texto(ben if isinstance(ben, str) else "; ".join(map(str, ben)))[:500]
+        sk = jp.get("skills")
+        if sk:
+            info["skills_official"] = (sk if isinstance(sk, str) else ", ".join(map(str, sk)))[:300]
+        da = jp.get("directApply")
+        if isinstance(da, bool) or str(da).lower() in ("true", "false"):
+            info["direct_apply"] = 1 if str(da).lower() == "true" else 0
+        wh = jp.get("workHours")
+        if wh and not info["jornada"]:
+            info["jornada"] = str(wh)[:60]
         desc_html = jp.get("description") or ""
         if desc_html:
             info["description"] = _html_a_texto(desc_html)[:MAX_DESC]

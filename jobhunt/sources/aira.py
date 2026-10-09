@@ -65,7 +65,7 @@ def _parse_offer(a: dict, feed: str) -> dict | None:
     fecha = ""
     pdays = a.get("publication_days")
     if isinstance(pdays := pdays, int) and pdays >= 0:
-        fecha = (datetime.now(timezone.utc) - timedelta(days=pdays)).date().isoformat()
+        fecha = (datetime.now(timezone.utc) - timedelta(days=pdays)).date().isoformat()   # precisión: día
     url = a.get("link") or ""
     if not url and a.get("id"):
         url = f"https://login.airavirtual.com/postula/{a['id']}"
@@ -73,7 +73,7 @@ def _parse_offer(a: dict, feed: str) -> dict | None:
         "title": name[:150],
         "company": company or "Confidencial",
         "location": location[:120],
-        "date": fecha,
+        "date": fecha, "date_precision": "dia" if fecha else "",
         "url": url,
         "source": f"aira:{feed}",
         "found_by": f"{feed}",

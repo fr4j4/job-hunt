@@ -34,7 +34,7 @@ log = get_logger(__name__)
 COOKIE = "jh_sesion"
 _DIR = Path(__file__).parent
 _POR_PAGINA = 50
-_ORDENES = {"score": "score", "market": "market_score", "fecha": "first_seen",
+_ORDENES = {"score": "score", "market": "market_score", "fecha": "date_canonical",
             "cargo": "title", "empresa": "company", "actualizada": "updated_at"}
 _MODALIDADES = {"remoto": "remot", "hibrido": "brid", "presencial": "presencial"}
 _HEADERS = {
