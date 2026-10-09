@@ -37,6 +37,38 @@ Todo vive en `.env`:
 
     0 */4 * * *  cd /mnt/data2/projects/jobhunt && .venv/bin/python -m jobhunt run
 
+## Daemon (systemd user)
+
+Corre como unit `jobhunt.service` (habilitada, `Restart=on-failure`):
+
+    systemctl --user status jobhunt.service
+    systemctl --user restart jobhunt.service   # / stop / start
+    journalctl --user -u jobhunt -f            # logs en vivo
+
+Arranque manual (sin systemd):
+
+    xvfb-run -a .venv/bin/python -m jobhunt watch   # xvfb es para Jooble
+
+IA local hermana: `jobhunt-llama.service` (llama-server en 127.0.0.1:8081).
+
+## Backup de la DB
+
+La DB vive en `data/ofertas.sqlite` y el daemon escribe de forma constante,
+así que **no copies con `cp`**: usa el modo backup de sqlite3 (copia
+consistente sin detener nada):
+
+    sqlite3 data/ofertas.sqlite ".backup data/ofertas.sqlite.bak-$(date +%Y%m%d%H%M%S)"
+
+Verificar:
+
+    sqlite3 data/ofertas.sqlite.bak-<ts> "PRAGMA integrity_check; SELECT COUNT(*) FROM ofertas;"
+
+Restaurar (con el daemon detenido):
+
+    systemctl --user stop jobhunt.service
+    cp data/ofertas.sqlite.bak-<ts> data/ofertas.sqlite
+    systemctl --user start jobhunt.service
+
 ## Fuentes
 
 LinkedIn · Computrabajo · Indeed · Glassdoor · Laborum (API searchV2) · Accenture (findjobs) · Jooble (scraping headless).
