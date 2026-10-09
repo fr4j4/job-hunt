@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block titulo %}Fuentes · jobhunt{% endblock %}
+{% block contenido %}
+<h1>Estado de las fuentes</h1>
+{% if not filas %}
+<p>Todavía no hay datos por fuente. Se llenan después del próximo barrido.</p>
+{% else %}
+<p class="meta">Ofertas por barrido, del más reciente (izquierda) al más antiguo. Entre paréntesis, errores de conexión.</p>
+<div class="tabla-scroll">
+<table>
+  <thead><tr><th>Fuente</th><th>Estado</th>{% for ts in barridos %}<th class="num">{{ ts[5:16].replace("T", " ") }}</th>{% endfor %}</tr></thead>
+  <tbody>
+  {% for f in filas %}
+    <tr>
+      <td>{{ f.nombre }}</td>
+      <td>{% if f.estado == "ok" %}🟢 funcionando{% elif f.estado == "vigilar" %}🟡 a vigilar{% else %}🔴 caída ({{ f.racha }} barridos en 0){% endif %}</td>
+      {% for c in f.serie %}<td class="num">{% if c is none %}–{% else %}{{ c.n }}{% if c.err %} <span class="err">({{ c.err }})</span>{% endif %}{% endif %}</td>{% endfor %}
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endif %}
+{% endblock %}

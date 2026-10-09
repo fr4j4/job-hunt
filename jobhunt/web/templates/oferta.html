@@ -1,0 +1,68 @@
+{% extends "base.html" %}
+{% block titulo %}{{ o.title }} · jobhunt{% endblock %}
+{% block contenido %}
+<p><a href="/">‹ Volver</a></p>
+<section class="tarjeta">
+  <h1>{{ o.title }}</h1>
+  <p class="meta">
+    {% if o.company %}🏢 {{ o.company }} · {% endif %}{% if o.location %}📍 {{ o.location }} · {% endif %}
+    {% if o.modality %}🧭 {{ o.modality }} · {% endif %}🌐 {{ (o.source or "").split(":")[0] }} · 📅 {{ o | edad }}
+  </p>
+  <p class="chips">
+    <span class="pill p{{ (o.score or 0) // 10 }}">Puntaje {{ o.score or 0 }}/100</span>
+    <span class="pill">Mercado {{ o.market_score or 0 }}/100</span>
+    {% if o.ai_encaje %}<span class="enc enc-{{ o.ai_encaje }}">Encaje {{ o.ai_encaje }}</span>{% endif %}
+    {% if pasa_fit and es_dev %}<span class="ok">✔ Pasa el filtro del canal</span>
+    {% else %}<span class="no">✖ No pasa el filtro del canal{% if not es_dev %} (no es rol de desarrollo){% elif (o.score or 0) < min_fit %} (puntaje bajo {{ min_fit }}){% else %} (encaje IA){% endif %}</span>{% endif %}
+  </p>
+  {% set u = o.url | url_segura %}{% if u %}<p><a class="boton" href="{{ u }}" target="_blank" rel="noopener noreferrer">Ver y postular ↗</a></p>{% endif %}
+</section>
+
+<div class="columnas">
+<section class="tarjeta">
+  <h2>Datos</h2>
+  <dl>
+    <dt>Sueldo</dt><dd>{{ (o | sueldo) or "No declarado" }}</dd>
+    {% if o.techs %}<dt>Tecnologías</dt><dd>{{ o.techs.replace(";", " · ") }}</dd>{% endif %}
+    {% if o.rol_categoria %}<dt>Rol</dt><dd>{{ o.rol_categoria }}{% if o.seniority_real %} · {{ o.seniority_real }}{% endif %}</dd>{% endif %}
+    {% if idiomas %}<dt>Idiomas</dt><dd>{% for i in idiomas %}{{ i.idioma }}{% if i.nivel %} {{ i.nivel }}{% endif %}{% if i.excluyente %} (excluyente){% endif %}{% if not loop.last %}, {% endif %}{% endfor %}</dd>{% endif %}
+    <dt>Vista por primera vez</dt><dd>{{ o.first_seen | fecha }}</dd>
+    <dt>Última modificación</dt><dd>{{ o.updated_at | fecha }}</dd>
+    {% if o.sources %}<dt>Fuentes</dt><dd>{{ o.sources }}</dd>{% endif %}
+  </dl>
+</section>
+
+<section class="tarjeta">
+  <h2>Por qué tiene ese puntaje</h2>
+  <p class="meta">Calculado con tu perfil actual: <b>{{ score }}</b>/100.
+    {% if score != (o.score or 0) %}El guardado ({{ o.score or 0 }}) es de un criterio anterior: corre
+    <code>python -m jobhunt rescore</code> para actualizarlo.{% endif %}</p>
+  <table class="desglose">
+    {% for k, v in desglose.items() %}<tr><td>{{ k | etiqueta }}</td><td class="num">{{ v }}</td></tr>{% endfor %}
+  </table>
+  <h3>Puntaje de mercado (calidad de la publicación): {{ mscore }}/100</h3>
+  <table class="desglose">
+    {% for k, v in mdesglose.items() %}<tr><td>{{ k | etiqueta }}</td><td class="num">{{ v }}</td></tr>{% endfor %}
+  </table>
+</section>
+</div>
+
+{% if o.ai_resumen or o.ai_opinion or o.ai_fit_reason %}
+<section class="tarjeta">
+  <h2>Análisis IA</h2>
+  {% if o.ai_resumen %}<p>📝 {{ o.ai_resumen }}</p>{% endif %}
+  {% if o.ai_opinion %}<p>💬 {{ o.ai_opinion }}</p>{% endif %}
+  {% if o.ai_fit_reason %}<p>🎯 {{ o.ai_fit_reason }}</p>{% endif %}
+  {% if rojas %}<p>⚠️ <b>A considerar:</b> {{ rojas | join(" · ") }}</p>{% endif %}
+  {% if verdes %}<p>✅ <b>A favor:</b> {{ verdes | join(" · ") }}</p>{% endif %}
+  {% if beneficios %}<p>🎁 <b>Beneficios:</b> {{ beneficios | join(" · ") }}</p>{% endif %}
+</section>
+{% endif %}
+
+{% if o.description %}
+<section class="tarjeta">
+  <h2>Descripción</h2>
+  <div class="descripcion">{{ o.description }}</div>
+</section>
+{% endif %}
+{% endblock %}

@@ -5,3 +5,6 @@ tls-client>=0.2
 matplotlib>=3.8        # solo /report (gráficos del análisis de mercado)
 reportlab>=4.0         # solo /report (composición del PDF)
 playwright>=1.62        # solo jooble (scraping headless, requiere: playwright install chromium + xvfb)
+fastapi>=0.110         # solo web (python -m jobhunt web / WEB_ENABLED)
+uvicorn>=0.29          # solo web
+jinja2>=3.1            # solo web

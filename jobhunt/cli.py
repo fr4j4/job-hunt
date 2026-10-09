@@ -6,6 +6,7 @@
     python -m jobhunt ia           # batch IA nocturno (deepseek-v4-flash)
     python -m jobhunt encaje [N]   # backfill de encaje con el perfil + rescore
     python -m jobhunt tabla        # prueba de tabla nativa de Telegram (manda una muestra)
+    python -m jobhunt web          # web privada (acceso con /web en el bot)
     python -m jobhunt report       # stats de mercado del pool completo
 """
 from __future__ import annotations
@@ -438,6 +439,9 @@ def main():
         cmd_rescore(cfg)
     elif cmd == "enrich":
         cmd_enrich(cfg)
+    elif cmd == "web":
+        from .web.app import servir
+        servir(cfg)             # python -m jobhunt web — acceso con /web en el bot
     elif cmd == "tabla":
         cmd_tabla(cfg)          # python -m jobhunt tabla — prueba de tabla nativa
     elif cmd == "encaje":

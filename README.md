@@ -96,3 +96,24 @@ y lanza headed automáticamente). Sin playwright la fuente se salta con warning.
 | Glassdoor | 1 (20/query) | `pageNumber` y `paginationCursors` ignorados por el API en búsquedas COUNTRY |
 
 Compensación en fuentes de 20/query: más queries distintas en `QUERIES_*`/`SAMPLE_*`.
+
+## Web privada
+
+Vista de escritorio del pool: tabla con filtros y orden, detalle de cada oferta con el
+desglose del puntaje y estado de las fuentes.
+
+    pip install fastapi uvicorn jinja2
+    WEB_ENABLED=true                # en .env: el bot la levanta junto al daemon
+    python -m jobhunt web           # o córrela aparte
+
+**Acceso:** escribe `/web` en el bot. Te manda un enlace personal que sirve **una sola vez**
+y vence en `WEB_TOKEN_MINUTES` (10). Sin ese enlace la web no muestra nada.
+`/web_salir` cierra todas las sesiones.
+
+**Seguridad:**
+- Escucha solo en `127.0.0.1` por defecto. Para entrar desde el celular u otro equipo,
+  usa Tailscale/VPN o un proxy HTTPS, y define `WEB_PUBLIC_URL=https://…`. No la expongas
+  a internet con `WEB_HOST=0.0.0.0` sin HTTPS.
+- En la base solo se guardan hashes del enlace y de la sesión.
+- Cookie `HttpOnly` + `SameSite=Lax` (+ `Secure` con HTTPS), CSP estricta sin JavaScript,
+  `no-referrer`, límite de intentos de login y POST solo desde la misma web.

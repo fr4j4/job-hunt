@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>{% block titulo %}jobhunt{% endblock %}</title>
+<link rel="stylesheet" href="/static/app.css">
+<link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+</head>
+<body>
+<header class="barra">
+  <a class="marca" href="/">jobhunt</a>
+  {% if not sin_nav %}
+  <nav>
+    <a href="/">Ofertas</a>
+    <a href="/fuentes">Fuentes</a>
+    <form method="post" action="/salir" class="en-linea"><button class="enlace" type="submit">Salir</button></form>
+  </nav>
+  {% endif %}
+</header>
+<main>
+{% block contenido %}{% endblock %}
+</main>
+</body>
+</html>
