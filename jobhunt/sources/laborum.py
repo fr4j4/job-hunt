@@ -18,6 +18,7 @@ from html import unescape as _u
 
 import requests
 
+from ..domain.texto import MAX_DESC
 from ..logging_setup import get_logger
 from . import errores
 
@@ -121,7 +122,7 @@ def jobs(queries: list[str], found_by_prefix: str = "", max_pages: int = 3, on_q
                     if not fecha:
                         fecha = (now - timedelta(days=1)).date().isoformat()
                     # desc: el detalle del listado es resumido; descripción completa la trae el Anillo A
-                    desc = _clean(a.get("detalle") or "")[:2000]
+                    desc = _clean(a.get("detalle") or "")[:MAX_DESC]
                     vacantes = a.get("cantidadVacantes")
                     out[aid] = {
                         "title": _clean(a.get("titulo") or "")[:150],

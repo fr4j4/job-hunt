@@ -17,6 +17,7 @@ from datetime import datetime, timedelta, timezone
 
 import requests
 
+from ..domain.texto import MAX_DESC
 from ..logging_setup import get_logger
 from . import errores
 
@@ -78,7 +79,7 @@ def _parse_offer(a: dict, feed: str) -> dict | None:
         "found_by": f"{feed}",
         "salary": "",
         "modality": modality,
-        "_desc": _clean(a.get("description") or a.get("snippet") or "")[:2000],
+        "_desc": _clean(a.get("description") or a.get("snippet") or "")[:MAX_DESC],
         "description_source": "aira-feed",
         "_aira_area": _clean(a.get("area") or a.get("area_text") or ""),
         # metadatos estructurados del feed (v2): contrato/jornada oficiales

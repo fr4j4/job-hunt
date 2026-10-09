@@ -34,3 +34,14 @@ def test_enrich_viejo_sigue_reexportando():
     assert en.fetch_page is not None
     assert callable(en.parse_jobposting)
     assert callable(en._extract_techs)
+
+
+def test_descripcion_jsonld_larga_no_se_trunca_y_conserva_parrafos():
+    import json
+    from jobhunt.fetch.page import parse_jobposting
+    cuerpo = "<p>Responsabilidades</p><ul>" + "".join(f"<li>Tarea {i} detallada</li>" for i in range(400)) + "</ul>"
+    html = ('<script type="application/ld+json">' + json.dumps(
+        {"@type": "JobPosting", "description": cuerpo}) + "</script>")
+    d = parse_jobposting(html, "https://x.cl/o")["description"]
+    assert len(d) > 5000 and "Tarea 399 detallada" in d
+    assert "\n• Tarea 1 detallada" in d

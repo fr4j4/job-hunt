@@ -155,7 +155,7 @@ def _prompt_extract_local(job: dict) -> str:
         location=job.get("location", ""),
         salary=job.get("salary") or "(no declarado)",
         modality=job.get("modality") or "(no declarada)",
-        description=(job.get("description") or "")[:2000])
+        description=(job.get("description") or "")[:6000])
 
 
 def _prompt_opinion_local(job: dict, perfil: str, mercado: str,
@@ -217,7 +217,7 @@ def _lote_prompt(rows: list[dict], profile_desc: str, mercado: str) -> str:
             f"Ubicación: {r.get('location', '')}\n"
             f"Sueldo declarado: {r.get('salary') or '(no declarado)'}\n"
             f"Modalidad declarada: {r.get('modality') or '(no declarada)'}\n"
-            f"Descripción: {(r.get('description') or '')[:2400]}{nota}")
+            f"Descripción: {(r.get('description') or '')[:6000]}{nota}")
     return (f"Perfil del candidato: {profile_desc}\n\n"
             f"Contexto de mercado (para el campo opinion): {mercado}\n\n"
             + "\n\n".join(bloques) +

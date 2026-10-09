@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 
 UA = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120 Safari/537.36"}
 
+from ..domain.texto import MAX_DESC
 from ..logging_setup import get_logger
 from . import errores
 
@@ -120,7 +121,7 @@ def fetch_description(url: str) -> dict:
     out: dict = {}
     md = re.search(r'<div class="show-more-less-html__markup[^"]*"[^>]*>(.*?)</div>', html, re.S)
     if md:
-        out["description"] = clean(md.group(1))[:4000]
+        out["description"] = clean(md.group(1))[:MAX_DESC]
 
     def _criteria(label: str) -> str:
         mc = re.search(label + r"\s*</h3>\s*<span[^>]*>\s*([^<]+)", html)

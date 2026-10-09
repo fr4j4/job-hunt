@@ -13,6 +13,7 @@ from pathlib import Path
 
 import tls_client
 
+from ..domain.texto import MAX_DESC
 from ..logging_setup import get_logger
 from . import errores
 
@@ -102,7 +103,7 @@ def jobs(queries: list[str], found_by_prefix: str = "", max_pages: int = 2, on_q
                         "url": f"https://www.glassdoor.com/job-listing/j?jl={lid}",
                         "source": f"glassdoor:{q}",
                         "found_by": f"{found_by_prefix}{q}",
-                        "_desc": desc[:4000],
+                        "_desc": desc[:MAX_DESC],
                     }
             except Exception as e:
                 log.warning("glassdoor query '%s' p%s falló: %s", q, pag, e)

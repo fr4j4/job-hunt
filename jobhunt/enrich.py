@@ -37,6 +37,7 @@ from .ia.schemas import _LOTE_SCHEMA  # noqa: F401 (compat)
 from .logging_setup import get_logger
 from .salarios.arbiter import SalaryArbitrator
 from .salarios.texto import sueldo_respaldado
+from .domain.texto import MAX_DESC
 
 log = get_logger(__name__)
 
@@ -150,7 +151,7 @@ def ia_extract_detail(cfg: Config, job: dict, profile_desc: str,
               f'Ubicación: {job.get("location","")}\n'
               f'Sueldo declarado: {job.get("salary") or "(no declarado)"}\n'
               f'Modalidad declarada: {job.get("modality") or "(no declarada)"}\n'
-              f'Descripción: {(job.get("description") or "")[:2400]}'
+              f'Descripción: {(job.get("description") or "")[:6000]}'
               f'{nota_anomalia}\n\n'
               f'Responde SOLO JSON: {IA_SCHEMA}')
     messages = [{"role": "system",
@@ -338,7 +339,7 @@ def _extract_aira_spa(url: str) -> dict:
                     ".filter(e => e.innerText && e.innerText.length > 200)"
                     ".map(e => e.innerText.trim())"
                     ".sort((a, b) => b.length - a.length).slice(0, 2).join(' ')")
-                info["description"] = re.sub(r"\s+", " ", ps or "").strip()[:2000]
+                info["description"] = re.sub(r"\s+", " ", ps or "").strip()[:MAX_DESC]
             finally:
                 br.close()
         finally:
@@ -414,10 +415,10 @@ def _aplicar_ficha(conn, r: dict, info: dict, pool: list[int], cfg: Config | Non
         return "blocked"
     conn.execute("UPDATE ofertas SET fetch_fails=0, last_fetch_ok=datetime('now') WHERE group_id=?",
                  (r["group_id"],))
-    new_desc = (info.get("description") or "")[:1800]
+    new_desc = (info.get("description") or "")[:MAX_DESC]
     extra = (f" · {info['contrato']}" if info.get("contrato") else "") + \
             (f" · {info['jornada']}" if info.get("jornada") else "")
-    desc = ((new_desc + extra) if new_desc else r.get("description") or "")[:2000]
+    desc = ((new_desc + extra) if new_desc else r.get("description") or "")[:MAX_DESC]
     # ---- árbitro de salario (§1.3, ACCESO_OK únicamente) ----
     sal_fila = conn.execute(
         "SELECT salary, salary_raw, salary_source, salary_status FROM ofertas WHERE group_id=?",

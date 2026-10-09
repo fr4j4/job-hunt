@@ -13,6 +13,7 @@ from pathlib import Path
 
 from .config import Config
 from .domain.fechas import canonical_date
+from .domain.texto import MAX_DESC
 from .logging_setup import get_logger
 
 log = get_logger("jobhunt.db")
@@ -323,7 +324,7 @@ def upsert(conn: sqlite3.Connection, job: dict, now_iso: str) -> tuple[str, bool
             (now_iso, src0, src0, src0,
              fb, fb, fb,
              job.get("salary", ""), job.get("modality", ""),
-             (job.get("_desc") or job.get("description") or "")[:2000],
+             (job.get("_desc") or job.get("description") or "")[:MAX_DESC],
              job.get("valid_through", ""), job.get("years_official"),
              1 if job.get("remote_official") else None,
              job.get("employment_type", ""),
@@ -342,7 +343,7 @@ def upsert(conn: sqlite3.Connection, job: dict, now_iso: str) -> tuple[str, bool
              job.get("date", ""), job.get("valid_through", ""), job.get("employment_type", ""),
              job.get("years_official"), job.get("remote_official"),
              job.get("salary", ""), job.get("modality", ""), job.get("techs", ""),
-             (job.get("_desc") or "")[:2000], job.get("description_source", ""),
+             (job.get("_desc") or "")[:MAX_DESC], job.get("description_source", ""),
              now_iso, now_iso))
         return job["uid"], True
     except sqlite3.IntegrityError:
