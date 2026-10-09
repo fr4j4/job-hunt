@@ -36,6 +36,7 @@ from .ia.prompts import (  # noqa: F401 (compat: los tests leen estos nombres en
 from .ia.schemas import _LOTE_SCHEMA  # noqa: F401 (compat)
 from .logging_setup import get_logger
 from .salarios.arbiter import SalaryArbitrator
+from .salarios.texto import sueldo_respaldado
 
 log = get_logger(__name__)
 
@@ -147,7 +148,7 @@ def ia_extract_detail(cfg: Config, job: dict, profile_desc: str,
               f'Contexto de mercado (para el campo opinion): {mercado}\n\n'
               f'Oferta:\nTítulo: {job.get("title","")}\nEmpresa: {job.get("company","")}\n'
               f'Ubicación: {job.get("location","")}\n'
-              f'Sueldo declarado: {job.get("salary") or "(no declarado — infiere rango de mercado solo si el texto lo permite)"}\n'
+              f'Sueldo declarado: {job.get("salary") or "(no declarado)"}\n'
               f'Modalidad declarada: {job.get("modality") or "(no declarada)"}\n'
               f'Descripción: {(job.get("description") or "")[:2400]}'
               f'{nota_anomalia}\n\n'
@@ -744,10 +745,11 @@ def apply_ia_result(conn, cfg: Config, r: dict, parsed: dict | None,
     # vez aquí — todos los callers quedan cubiertos sin tocar la firma.
     fila = conn.execute(
         "SELECT salary, salary_source, modality, ia_model, ai_opinion, ai_resumen, "
-        "ai_fit_reason FROM ofertas WHERE group_id=?", (r["group_id"],)).fetchone()
+        "ai_fit_reason, title, description FROM ofertas WHERE group_id=?",
+        (r["group_id"],)).fetchone()
     if fila is not None:
         cols = ("salary", "salary_source", "modality", "ia_model", "ai_opinion",
-                "ai_resumen", "ai_fit_reason")
+                "ai_resumen", "ai_fit_reason", "title", "description")
         r = {**dict(r), **dict(zip(cols, tuple(fila)))}
     model = model or parsed.get("_ia_model") or None
     mod = {"R": "remoto", "H": "híbrido", "P": "presencial"}.get(parsed.get("modalidad"), "")
@@ -763,6 +765,14 @@ def apply_ia_result(conn, cfg: Config, r: dict, parsed: dict | None,
         sets.append("modality=?"); params.append(mod); ia_fields.append("modality")
     # guard A3: la IA propone salary SOLO si no hay procedencia ya establecida
     sal_ia = _coerce_salario(parsed.get("salario_clp_mensual"))
+    # anti-invención: el monto DEBE aparecer en el texto de la oferta; un LLM local
+    # rellena con valores plausibles cuando no hay dato (ver salarios/texto.py)
+    if sal_ia and "salario_evidencia" in parsed and not str(parsed.get("salario_evidencia") or "").strip():
+        sal_ia = 0   # monto sin cita literal = inventado
+    if sal_ia and not sueldo_respaldado(sal_ia, r.get("title") or "", r.get("description") or ""):
+        log.warning("sueldo IA descartado (no figura en el texto) %s: %s",
+                    r.get("group_id"), sal_ia)
+        sal_ia = 0
     if not r.get("salary") and not r.get("salary_source") and sal_ia:
         sets.append("salary=?"); params.append(f"CLP {sal_ia}")
         sets.append("salary_source=?"); params.append("ia")

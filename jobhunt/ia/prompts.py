@@ -4,7 +4,7 @@ from __future__ import annotations
 from ..salarios.stats import annual_likely, parse_salary_clp
 
 
-IA_SCHEMA = ('{"modalidad": "R"|"H"|"P"|"?", "salario_clp_mensual": numero|null, '
+IA_SCHEMA = ('{"modalidad": "R"|"H"|"P"|"?", "salario_clp_mensual": numero|null, "salario_evidencia": "cita LITERAL del texto con el monto, o vacío", '
              '"ingles": "no"|"deseable"|"requerido"|"desconocido", "years_exp": numero|null, '
              '"seniority_real": "junior"|"semi"|"senior"|"lead", '
              '"techs": ["Py","Java","AWS","React","Angular","K8s","Docker","SQL","Node","TS","NiFi","Spring"], '
@@ -21,7 +21,7 @@ _PROMPT_EXTRACT_LOCAL = (
     "FORMATO EXACTO DE SALIDA:\n"
     "{{\"techs\": [], \"modalidad\": \"\", \"seniority_real\": \"\", \"rol_categoria\": \"\", "
     "\"ingles\": \"\", \"idiomas\": [], \"red_flags\": [], \"green_flags\": [], "
-    "\"benefits\": [], \"salario_clp_mensual\": 0}}\n\n"
+    "\"benefits\": [], \"salario_clp_mensual\": 0, \"salario_evidencia\": \"\"}}\n\n"
     "REGLAS:\n"
     "- techs: SOLO tecnologias escritas literalmente en el titulo o la descripcion de la oferta. "
     "NUNCA agregues otras, aunque sean obvias o tipicas del rol. Maximo 8 elementos. "
@@ -35,7 +35,13 @@ _PROMPT_EXTRACT_LOCAL = (
     "\"Ingeniería no-software\", \"Analista/Empresa\", \"Profesor/Formación\", \"Soporte/TI\", "
     "\"No-tech\", \"Otro\".\n"
     "- ingles: solo \"no\", \"deseable\", \"requerido\", \"desconocido\".\n"
-    "- salario_clp_mensual: numero entero, 0 si no se declara.\n"
+    "- salario_clp_mensual: SOLO un monto que aparezca ESCRITO en 'Sueldo declarado' o en la "
+    "Descripcion. Entero en CLP por MES (2,5 millones -> 2500000; USD se deja en 0). "
+    "Si hay rango, usa el minimo. Si el monto es anual, divide por 12. NO cuentan bonos, "
+    "comisiones, presupuestos ni cifras de la empresa. NUNCA estimes ni uses 'lo tipico del "
+    "mercado': sin monto escrito -> 0.\n"
+    "- salario_evidencia: copia LITERAL (maximo 120 caracteres) de la frase del texto donde "
+    "aparece el monto; \"\" si salario_clp_mensual es 0. Sin cita literal el sueldo se descarta.\n"
     "- idiomas, red_flags, green_flags, benefits: arrays de strings; vacios si no aplica.\n"
     "- Dato ausente: nunca inventes.\n\n"
     "EJEMPLOS (imita el FORMATO, no el contenido):\n"
@@ -47,14 +53,31 @@ _PROMPT_EXTRACT_LOCAL = (
     "{{\"techs\": [\"Java\", \"Spring\", \"Postgres\", \"Kafka\", \"AWS\", \"K8s\"], "
     "\"modalidad\": \"R\", \"seniority_real\": \"senior\", \"rol_categoria\": \"Backend\", "
     "\"ingles\": \"desconocido\", \"idiomas\": [], \"red_flags\": [], \"green_flags\": [], "
-    "\"benefits\": [], \"salario_clp_mensual\": 3000000}}\n\n"
+    "\"benefits\": [], \"salario_clp_mensual\": 3000000, "
+    "\"salario_evidencia\": \"Sueldo declarado: 3000000\"}}\n\n"
+    "Oferta 3:\nTitulo: Desarrollador Python\nEmpresa: Beta\nUbicacion: Santiago\n"
+    "Sueldo declarado: (no declarado)\nModalidad declarada: (no declarada)\n"
+    "Descripcion: Ofrecemos renta liquida de 2,2 millones, trabajo hibrido, bono anual. Python y Django.\n"
+    "Respuesta:\n"
+    "{{\"techs\": [\"Py\", \"Django\"], \"modalidad\": \"H\", \"seniority_real\": \"\", "
+    "\"rol_categoria\": \"Backend\", \"ingles\": \"desconocido\", \"idiomas\": [], \"red_flags\": [], "
+    "\"green_flags\": [], \"benefits\": [\"bono anual\"], \"salario_clp_mensual\": 2200000, "
+    "\"salario_evidencia\": \"renta liquida de 2,2 millones\"}}\n\n"
+    "Oferta 4:\nTitulo: Analista de datos\nEmpresa: Gamma\nUbicacion: Santiago\n"
+    "Sueldo declarado: (no declarado)\nModalidad declarada: (no declarada)\n"
+    "Descripcion: Buscamos analista con SQL y Power BI. Renta acorde al mercado y bono por desempeno.\n"
+    "Respuesta:\n"
+    "{{\"techs\": [\"SQL\", \"Power BI\"], \"modalidad\": \"?\", \"seniority_real\": \"\", "
+    "\"rol_categoria\": \"Data\", \"ingles\": \"desconocido\", \"idiomas\": [], \"red_flags\": [], "
+    "\"green_flags\": [], \"benefits\": [\"bono por desempeno\"], \"salario_clp_mensual\": 0, "
+    "\"salario_evidencia\": \"\"}}\n\n"
     "Oferta 2:\nTitulo: Ayudante de cocina\nEmpresa: Rest\nUbicacion: Valparaiso\n"
     "Sueldo declarado: (no declarado)\nModalidad declarada: (no declarada)\n"
     "Descripcion: Sin descripcion disponible.\n"
     "Respuesta:\n"
     "{{\"techs\": [], \"modalidad\": \"?\", \"seniority_real\": \"\", \"rol_categoria\": "
     "\"No-tech\", \"ingles\": \"desconocido\", \"idiomas\": [], \"red_flags\": [], "
-    "\"green_flags\": [], \"benefits\": [], \"salario_clp_mensual\": 0}}\n\n"
+    "\"green_flags\": [], \"benefits\": [], \"salario_clp_mensual\": 0, \"salario_evidencia\": \"\"}}\n\n"
     "=====\n"
     "Oferta actual:\n"
     "Titulo: {title}\nEmpresa: {company}\nUbicacion: {location}\n"
@@ -192,7 +215,7 @@ def _lote_prompt(rows: list[dict], profile_desc: str, mercado: str) -> str:
             f"--- OFERTA {i} ---\n"
             f"Título: {r.get('title', '')}\nEmpresa: {r.get('company', '')}\n"
             f"Ubicación: {r.get('location', '')}\n"
-            f"Sueldo declarado: {r.get('salary') or '(no declarado — infiere rango de mercado solo si el texto lo permite)'}\n"
+            f"Sueldo declarado: {r.get('salary') or '(no declarado)'}\n"
             f"Modalidad declarada: {r.get('modality') or '(no declarada)'}\n"
             f"Descripción: {(r.get('description') or '')[:2400]}{nota}")
     return (f"Perfil del candidato: {profile_desc}\n\n"
@@ -200,7 +223,7 @@ def _lote_prompt(rows: list[dict], profile_desc: str, mercado: str) -> str:
             + "\n\n".join(bloques) +
             "\n\nResponde un JSON array con UN objeto por oferta (idx 1..N), cada uno con: "
             "idx, opinion, resumen, fit_reason, encaje, seniority_real, rol_categoria, ingles, idiomas, "
-            "modalidad, salario_clp_mensual, techs, red_flags, green_flags, benefits. "
+            "modalidad, salario_clp_mensual, salario_evidencia, techs, red_flags, green_flags, benefits. "
             "techs: lista de tecnologías detectadas en la descripción (máx 8, "
             "abreviadas: Py, Java, AWS, React, Angular, K8s, Docker, SQL, Node, TS, "
             "NiFi, Spring, GCP, Azure, Scala, Go, .NET, FastAPI, Kafka, Terraform, "
@@ -208,4 +231,6 @@ def _lote_prompt(rows: list[dict], profile_desc: str, mercado: str) -> str:
             "encaje: calce estricto con el perfil del candidato — alto (rol y stack coinciden) | "
             "medio (rol afín, stack/seniority parcial) | bajo (rol tech de otra área o stack ajeno) | "
             "ninguno (no es tecnología o sin relación con el perfil); ante duda, el nivel más bajo. "
-            "Si una oferta no declara salario, salario_clp_mensual = 0 (cero, nunca inventes un monto).")
+            "salario_clp_mensual: SOLO un monto escrito en 'Sueldo declarado' o en la Descripción (CLP/mes; "
+            "anual÷12; rango→mínimo; bonos y estimaciones no cuentan); si no hay monto escrito = 0 (cero, nunca "
+            "inventes ni estimes). salario_evidencia: cita LITERAL del texto con ese monto (\"\" si es 0).")

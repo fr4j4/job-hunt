@@ -82,6 +82,7 @@ def test_apply_ia_result_sanitiza_fosil(mem_db):
 def test_apply_ia_result_coerce_salario(mem_db, val, expected):
     gid = f"g3-{val}"
     _insert(mem_db, gid, salary="", salary_source="")
+    mem_db.execute("UPDATE ofertas SET description='Renta $2.500.000 liquidos' WHERE group_id=?", (gid,))
     r = {"group_id": gid, "title": f"Titulo {gid}"}
     parsed = {"salario_clp_mensual": val}
     ok = en.apply_ia_result(mem_db, _cfg(), r, parsed)
@@ -263,3 +264,12 @@ def test_cmd_run_no_rebindea_stop_event_global():
     src_batch = inspect.getsource(BatchRunner.run)
     assert "stop_event = threading.Event()" not in src_batch
     assert "lote_stop" in src_batch
+
+
+def test_apply_ia_descarta_sueldo_inventado(mem_db):
+    _insert(mem_db, "inv1")
+    mem_db.execute("UPDATE ofertas SET description='Buscamos dev Python. Renta competitiva.' WHERE group_id='inv1'")
+    r = {"group_id": "inv1", "title": "Dev"}
+    en.apply_ia_result(mem_db, _cfg(), r,
+                       {"salario_clp_mensual": 2500000, "salario_evidencia": "", "seniority_real": "semi"})
+    assert mem_db.execute("SELECT salary FROM ofertas WHERE group_id='inv1'").fetchone()["salary"] == ""
