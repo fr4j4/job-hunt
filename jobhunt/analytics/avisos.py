@@ -20,12 +20,12 @@ def avisar_cierres(conn, cfg: Config, tg_api) -> int:
     try:
         if not cfg.analytics.avisos_estado or not cfg.telegram.bot_token or not cfg.telegram.chat_id:
             return 0
-        filas = conn.execute(f"""SELECT e.group_id, e.title, e.company, s.estado
-            FROM oferta_eventos e JOIN estado_oferta s ON s.group_id = e.group_id
+        filas = conn.execute(f"""SELECT e.oferta_id, e.title, e.company, s.estado
+            FROM oferta_eventos e JOIN estado_oferta s ON s.oferta_id = e.oferta_id
             WHERE e.tipo='cerrada' AND s.estado IN ({','.join('?' * len(SEGUIDAS))})
-              AND NOT EXISTS (SELECT 1 FROM aviso_estado a WHERE a.group_id = e.group_id AND a.tipo='cerrada')
-              AND NOT EXISTS (SELECT 1 FROM oferta_eventos r WHERE r.group_id = e.group_id AND r.tipo='reaparecida' AND r.id > e.id)
-            GROUP BY e.group_id ORDER BY e.id DESC LIMIT ?""", (*SEGUIDAS, MAX_POR_MENSAJE)).fetchall()
+              AND NOT EXISTS (SELECT 1 FROM aviso_estado a WHERE a.oferta_id = e.oferta_id AND a.tipo='cerrada')
+              AND NOT EXISTS (SELECT 1 FROM oferta_eventos r WHERE r.oferta_id = e.oferta_id AND r.tipo='reaparecida' AND r.id > e.id)
+            GROUP BY e.oferta_id ORDER BY e.id DESC LIMIT ?""", (*SEGUIDAS, MAX_POR_MENSAJE)).fetchall()
         if not filas:
             return 0
         lineas = [f"• <b>{html.escape(r['title'] or '')}</b>" + (f" — {html.escape(r['company'])}" if r['company'] else "")
@@ -36,7 +36,7 @@ def avisar_cierres(conn, cfg: Config, tg_api) -> int:
         if not resp.get("ok"):
             return 0
         ahora = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        conn.executemany("INSERT OR IGNORE INTO aviso_estado VALUES (?,?,?)", [(r["group_id"], "cerrada", ahora) for r in filas])
+        conn.executemany("INSERT OR IGNORE INTO aviso_estado VALUES (?,?,?)", [(r["oferta_id"], "cerrada", ahora) for r in filas])
         conn.commit()
         return len(filas)
     except Exception as e:

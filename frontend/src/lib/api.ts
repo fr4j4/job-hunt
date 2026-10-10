@@ -21,17 +21,18 @@ export const api = {
   snapshot: () => pedir<Snapshot>('/api/snapshot'),
   semantica: () => pedir<Semantica>('/api/semantica'),
   perfil: () => pedir<Perfil>('/api/perfil'),
-  oferta: (id: string) => pedir<DetalleOferta>(`/api/oferta/${encodeURIComponent(id)}`),
-  buscar: (q: string) => pedir<{ ids: string[] }>(`/api/buscar?q=${encodeURIComponent(q)}`),
+  // `ref` = id numérico (preferido) o el group_id viejo de un enlace antiguo
+  oferta: (ref: number | string) => pedir<DetalleOferta>(`/api/oferta/${encodeURIComponent(String(ref))}`),
+  buscar: (q: string) => pedir<{ ids: number[] }>(`/api/buscar?q=${encodeURIComponent(q)}`),
   fuentes: () => pedir<FuentesResp>('/api/fuentes'),
   diaria: (m: string, por = '*') => pedir<HistoriaDiaria>(`/api/historia/diaria?m=${m}&por=${por}`),
   techsSemanal: (techs: string[], rol = '*') =>
     pedir<HistoriaTechs>(`/api/historia/techs?techs=${encodeURIComponent(techs.join(','))}&rol_familia=${encodeURIComponent(rol)}`),
   eventos: (tipo = '', limite = 100) => pedir<{ eventos: EventoHist[] }>(`/api/historia/eventos?tipo=${tipo}&limite=${limite}`),
   supervivencia: (rolFamilia = '') => pedir<Supervivencia>(`/api/historia/supervivencia?rol_familia=${encodeURIComponent(rolFamilia)}`),
-  ponerEstado: (id: string, estado: string, nota = '') =>
-    pedir<{ estado: string }>(`/api/estado/${encodeURIComponent(id)}`, escritura('PUT', { estado, nota })),
-  quitarEstado: (id: string) => pedir<void>(`/api/estado/${encodeURIComponent(id)}`, escritura('DELETE')),
+  ponerEstado: (id: number, estado: string, nota = '') =>
+    pedir<{ estado: string }>(`/api/estado/${id}`, escritura('PUT', { estado, nota })),
+  quitarEstado: (id: number) => pedir<void>(`/api/estado/${id}`, escritura('DELETE')),
   vistas: () => pedir<{ vistas: Vista[] }>('/api/vistas'),
   crearVista: (nombre: string, tipo: string, spec: Record<string, unknown>) =>
     pedir<Vista>('/api/vistas', escritura('POST', { nombre, tipo, spec })),

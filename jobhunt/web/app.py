@@ -307,7 +307,9 @@ def crear_app(cfg: Config) -> FastAPI:
             return _sin_acceso(request)
         conn = _conn()
         try:
-            fila = conn.execute("SELECT * FROM ofertas WHERE group_id = ?", (gid[:100],)).fetchone()
+            ref = gid.strip()
+            fila = (conn.execute("SELECT * FROM ofertas WHERE id = ?", (int(ref),)).fetchone() if ref.isdigit()
+                    else conn.execute("SELECT * FROM ofertas WHERE group_id = ?", (ref[:300],)).fetchone())
         finally:
             conn.close()
         if not fila:

@@ -36,6 +36,16 @@ class VistaIn(BaseModel):
     spec: dict
 
 
+def resolver_id(conn, ref: str) -> int | None:
+    """Referencia de una oferta → su id numérico. Acepta el id (preferido) o el group_id viejo (enlaces antiguos)."""
+    ref = (ref or "").strip()
+    if ref.isdigit():
+        fila = conn.execute("SELECT id FROM ofertas WHERE id=?", (int(ref),)).fetchone()
+    else:
+        fila = conn.execute("SELECT id FROM ofertas WHERE group_id=?", (ref[:300],)).fetchone()
+    return fila[0] if fila else None
+
+
 def _json(obj, status: int = 200) -> JSONResponse:
     return JSONResponse(obj, status_code=status, headers={"Cache-Control": "no-store"})
 
@@ -103,21 +113,22 @@ def crear_router(cfg: Config, conn_fn, autenticado_fn, misma_origen_fn) -> APIRo
         from ..app import _etiqueta, _idiomas, _lista_json, _url_segura
         conn = _abrir()
         try:
-            fila = conn.execute("SELECT * FROM ofertas WHERE group_id=?", (gid[:100],)).fetchone()
+            oid = resolver_id(conn, gid)
+            fila = conn.execute("SELECT * FROM ofertas WHERE id=?", (oid,)).fetchone() if oid is not None else None
             if not fila:
                 return _json({"error": "no_existe"}, 404)
             o = dict(fila)
             eventos = [dict(r) for r in conn.execute(
-                "SELECT ts, tipo, antes, despues FROM oferta_eventos WHERE group_id=? ORDER BY id DESC LIMIT 50", (gid,))]
-            est = conn.execute("SELECT estado, nota, actualizado FROM estado_oferta WHERE group_id=?", (gid,)).fetchone()
-            techs = [r[0] for r in conn.execute("SELECT tech FROM oferta_techs WHERE group_id=? ORDER BY tech", (gid,))]
+                "SELECT ts, tipo, antes, despues FROM oferta_eventos WHERE oferta_id=? ORDER BY id DESC LIMIT 50", (oid,))]
+            est = conn.execute("SELECT estado, nota, actualizado FROM estado_oferta WHERE oferta_id=?", (oid,)).fetchone()
+            techs = [r[0] for r in conn.execute("SELECT tech FROM oferta_techs WHERE oferta_id=? ORDER BY tech", (oid,))]
         finally:
             conn.close()
         score, desglose = compute_score(o, cfg)
         mscore, mdesglose = compute_market_score(o)
         fmt = lambda d: [{"clave": k, "etiqueta": _etiqueta(k), "valor": v} for k, v in d.items()]   # noqa: E731
         return _json({
-            "id": o["group_id"], "titulo": o["title"], "empresa": o["company"], "ubicacion": o["location"],
+            "id": o["id"], "ref": o["group_id"], "titulo": o["title"], "empresa": o["company"], "ubicacion": o["location"],
             "url": _url_segura(o["url"]), "fuente": (o["source"] or "").split(":")[0],
             "fuentes": [x for x in (o["sources"] or "").split(",") if x],
             "modalidad": o["modality_norm"], "modalidad_src": o["modality_source"],
@@ -144,7 +155,7 @@ def crear_router(cfg: Config, conn_fn, autenticado_fn, misma_origen_fn) -> APIRo
         conn = conn_fn()
         try:
             ids = [r[0] for r in conn.execute(
-                "SELECT group_id FROM ofertas WHERE active=1 AND (lower(title) LIKE ?1 ESCAPE '\\' OR "
+                "SELECT id FROM ofertas WHERE active=1 AND (lower(title) LIKE ?1 ESCAPE '\\' OR "
                 "lower(company) LIKE ?1 ESCAPE '\\' OR lower(description) LIKE ?1 ESCAPE '\\') LIMIT 5000", (like,))]
         finally:
             conn.close()
@@ -230,7 +241,7 @@ def crear_router(cfg: Config, conn_fn, autenticado_fn, misma_origen_fn) -> APIRo
         conn = _abrir()
         try:
             rows = [dict(r) for r in conn.execute(
-                f"SELECT ts, group_id, title, company, rol_familia, fuente, tipo, antes, despues "
+                f"SELECT ts, oferta_id, title, company, rol_familia, fuente, tipo, antes, despues "
                 f"FROM oferta_eventos WHERE {' AND '.join(filtros)} ORDER BY id DESC LIMIT ?", [*params, limite])]
         finally:
             conn.close()
@@ -248,10 +259,10 @@ def crear_router(cfg: Config, conn_fn, autenticado_fn, misma_origen_fn) -> APIRo
                 filtros.append("a.fuente = ?")
                 params.append(fuente[:30])
             rows = conn.execute(f"""SELECT a.despues AS t0,
-                (SELECT MAX(c.id) FROM oferta_eventos c WHERE c.group_id=a.group_id AND c.tipo='cerrada') AS cid,
-                (SELECT MAX(r.id) FROM oferta_eventos r WHERE r.group_id=a.group_id AND r.tipo='reaparecida') AS rid,
+                (SELECT MAX(c.id) FROM oferta_eventos c WHERE c.oferta_id=a.oferta_id AND c.tipo='cerrada') AS cid,
+                (SELECT MAX(r.id) FROM oferta_eventos r WHERE r.oferta_id=a.oferta_id AND r.tipo='reaparecida') AS rid,
                 (SELECT c.ts FROM oferta_eventos c WHERE c.id = (SELECT MAX(c2.id) FROM oferta_eventos c2
-                    WHERE c2.group_id=a.group_id AND c2.tipo='cerrada')) AS tc
+                    WHERE c2.oferta_id=a.oferta_id AND c2.tipo='cerrada')) AS tc
                 FROM oferta_eventos a WHERE {' AND '.join(filtros)}""", params).fetchall()
         finally:
             conn.close()
@@ -309,23 +320,26 @@ def crear_router(cfg: Config, conn_fn, autenticado_fn, misma_origen_fn) -> APIRo
     def poner_estado(gid: str, cuerpo: EstadoIn):
         conn = _abrir()
         try:
-            if not conn.execute("SELECT 1 FROM ofertas WHERE group_id=?", (gid[:100],)).fetchone():
+            oid = resolver_id(conn, gid)
+            if oid is None:
                 return _json({"error": "no_existe"}, 404)
             ahora = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-            conn.execute("""INSERT INTO estado_oferta (group_id, estado, nota, actualizado) VALUES (?,?,?,?)
-                ON CONFLICT(group_id) DO UPDATE SET estado=excluded.estado, nota=excluded.nota,
-                actualizado=excluded.actualizado""", (gid[:100], cuerpo.estado, cuerpo.nota, ahora))
+            conn.execute("""INSERT INTO estado_oferta (oferta_id, estado, nota, actualizado) VALUES (?,?,?,?)
+                ON CONFLICT(oferta_id) DO UPDATE SET estado=excluded.estado, nota=excluded.nota,
+                actualizado=excluded.actualizado""", (oid, cuerpo.estado, cuerpo.nota, ahora))
             conn.commit()
         finally:
             conn.close()
-        return _json({"id": gid[:100], "estado": cuerpo.estado, "nota": cuerpo.nota, "actualizado": ahora})
+        return _json({"id": oid, "estado": cuerpo.estado, "nota": cuerpo.nota, "actualizado": ahora})
 
     @router.delete("/estado/{gid:path}", dependencies=escribe)
     def quitar_estado(gid: str):
         conn = _abrir()
         try:
-            conn.execute("DELETE FROM estado_oferta WHERE group_id=?", (gid[:100],))
-            conn.commit()
+            oid = resolver_id(conn, gid)
+            if oid is not None:
+                conn.execute("DELETE FROM estado_oferta WHERE oferta_id=?", (oid,))
+                conn.commit()
         finally:
             conn.close()
         return Response(status_code=204)

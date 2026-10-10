@@ -198,7 +198,7 @@ def render_offer_post(row: dict) -> tuple[str, dict | None]:
 
 _GATE_SQL = """SELECT * FROM ofertas
 WHERE active=1 AND market_score >= :min_score
-  AND notified_channel_at = ''
+  AND notified_channel_at = '' AND group_id NOT IN (SELECT group_id FROM channel_posts WHERE kind='offer')
   AND date_canonical >= date('now', '-' || :max_age || ' days')
   ORDER BY market_score DESC, first_seen DESC"""
 
@@ -500,7 +500,7 @@ def _weekly_remote_rows(conn, cfg: Config) -> dict[str, list[dict]]:
     rows = [dict(r) for r in conn.execute("""SELECT * FROM ofertas WHERE active=1
         AND market_score >= :min_score AND date_canonical >= date('now', '-' || :max_age || ' days')
         AND (modality LIKE '%remot%' OR remote_official LIKE '%TELECOMMUTE%')
-        AND seniority_real != '' AND notified_channel_at = ''
+        AND seniority_real != '' AND notified_channel_at = '' AND group_id NOT IN (SELECT group_id FROM channel_posts WHERE kind='offer')
         ORDER BY market_score DESC, first_seen DESC LIMIT 60""",
         {"min_score": cfg.channel.min_score - 5, "max_age": cfg.channel.max_age_days}).fetchall()]
     featured = set()
@@ -560,7 +560,7 @@ def publish_weekly_rol(cfg: Config, conn, tg_api, dry_run: bool = False,
     now = datetime.now(timezone.utc)
     rows = [dict(r) for r in conn.execute("""SELECT * FROM ofertas WHERE active=1
         AND market_score >= :min_score AND date_canonical >= date('now', '-' || :max_age || ' days')
-        AND notified_channel_at = ''
+        AND notified_channel_at = '' AND group_id NOT IN (SELECT group_id FROM channel_posts WHERE kind='offer')
         ORDER BY market_score DESC, first_seen DESC LIMIT 80""",
         {"min_score": cfg.channel.min_score - 5, "max_age": cfg.channel.max_age_days}).fetchall()]
     por_rol: dict[str, dict] = {}
@@ -610,7 +610,7 @@ def publish_weekly_salary(cfg: Config, conn, tg_api, dry_run: bool = False,
     now = datetime.now(timezone.utc)
     rows = [dict(r) for r in conn.execute("""SELECT * FROM ofertas WHERE active=1
         AND market_score >= :min_score AND date_canonical >= date('now', '-' || :max_age || ' days')
-        AND salary != '' AND notified_channel_at = ''
+        AND salary != '' AND notified_channel_at = '' AND group_id NOT IN (SELECT group_id FROM channel_posts WHERE kind='offer')
         ORDER BY market_score DESC, first_seen DESC LIMIT 60""",
         {"min_score": cfg.channel.min_score - 5, "max_age": cfg.channel.max_age_days}).fetchall()]
     sal_rows = []

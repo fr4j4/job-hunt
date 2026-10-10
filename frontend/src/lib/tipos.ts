@@ -5,7 +5,7 @@ export interface Snapshot {
   truncado: boolean;
   dicts: Record<'empresa' | 'fuente' | 'rol' | 'tech' | 'tag' | 'region' | 'comuna', string[]>;
   cols: {
-    id: string[]; titulo: string[]; url: string[];
+    id: number[]; titulo: string[]; url: string[];
     empresa: number[]; empresa_canon: string[]; fuente: number[]; fuentes: number[][]; rol: number[];
     rol_familia: string[]; seniority: string[]; modalidad: string[]; modalidad_src: string[];
     empleo: string[]; region: number[]; comuna: number[];
@@ -35,7 +35,7 @@ export interface Semantica {
 
 export interface Evento { ts: string; tipo: string; antes: string; despues: string }
 export interface DetalleOferta {
-  id: string; titulo: string; empresa: string; ubicacion: string; url: string; fuente: string; fuentes: string[];
+  id: number; ref: string; titulo: string; empresa: string; ubicacion: string; url: string; fuente: string; fuentes: string[];
   modalidad: string; modalidad_src: string; rol: string; rol_familia: string; seniority: string;
   sueldo_texto: string; sueldo: number | null; sueldo_status: string; techs: string[];
   idiomas: { idioma: string; nivel?: string; excluyente?: boolean }[]; exp_anios: number | null;
@@ -66,6 +66,6 @@ export interface Supervivencia {
   oculto: boolean; n: number; cierres: number; mediana?: number | null; t?: number[]; s?: number[];
   minimo_n?: number; minimo_cierres?: number;
 }
-export interface EventoHist { ts: string; group_id: string; title: string; company: string; rol_familia: string;
+export interface EventoHist { ts: string; oferta_id: number; title: string; company: string; rol_familia: string;
                               fuente: string; tipo: string; antes: string; despues: string }
 export interface Vista { id: number; nombre: string; tipo: string; spec: Record<string, unknown>; creada: string }

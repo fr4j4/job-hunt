@@ -26,7 +26,7 @@
     setFiltros(nuevo);
   }
   const verOfertas = () => ir('/ofertas', queryDeFiltros());
-  const abrir = (id: string) => ir(`/ofertas/${encodeURIComponent(id)}`, queryDeFiltros());
+  const abrir = (id: number) => ir(`/ofertas/${id}`, queryDeFiltros());
 
   const ctx = $derived.by<Ctx | null>(() => {
     if (!app.almacen) return null;

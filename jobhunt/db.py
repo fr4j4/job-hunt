@@ -37,9 +37,20 @@ def backup_db(conn: sqlite3.Connection, dest_path) -> None:
         dest_conn.close()
 
 
+class EsquemaAntiguo(RuntimeError):
+    pass
+
+
 def init_db(conn: sqlite3.Connection) -> None:
+    # `id` entero (AUTOINCREMENT: jamás se reutiliza, ni tras borrar filas) es la clave que ven la web/API/historia;
+    # `group_id` (título|empresa) sigue siendo la clave de negocio del dedup.
+    existe = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='ofertas'").fetchone()
+    if existe and "id" not in {r[1] for r in conn.execute("PRAGMA table_info(ofertas)")}:
+        raise EsquemaAntiguo("la tabla `ofertas` es de un esquema anterior (sin `id` numérico) y no se migra: "
+                             "respalda data/ofertas.sqlite y descarta esas tablas con db.reset_ofertas()")
     conn.execute("""CREATE TABLE IF NOT EXISTS ofertas (
-        group_id    TEXT PRIMARY KEY,
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        group_id    TEXT NOT NULL UNIQUE,
         title       TEXT NOT NULL,
         company     TEXT DEFAULT '',
         location    TEXT DEFAULT '',
@@ -140,7 +151,7 @@ def init_db(conn: sqlite3.Connection) -> None:
     # VALOR de alguna columna de contenido. No cuentan los toques de barrido (last_seen,
     # occurrences, found_by) ni lo derivado (scores, date_canonical) ni el marcado del canal.
     # Se recrea en cada init para cubrir columnas añadidas por migraciones futuras.
-    _sin_auditar = {"group_id", "created_at", "updated_at", "last_seen", "occurrences",
+    _sin_auditar = {"id", "group_id", "created_at", "updated_at", "last_seen", "occurrences",
                     "found_by", "score_version", "ctx_version", "last_fetch_ok",
                     # derivadas/operativas: un rescore o el marcado del canal no editan la oferta
                     "score", "market_score", "date_canonical", "staffing",
@@ -473,3 +484,22 @@ def url_key(url: str) -> str:
     if keep:
         return parsed.path + "?" + "&".join(keep)
     return parsed.path
+
+
+TABLAS_DE_OFERTAS = ("ofertas", "oferta_techs", "oferta_tags", "oferta_eventos", "oferta_prev", "estado_oferta", "aviso_estado")
+
+
+def reset_ofertas(conn: sqlite3.Connection) -> list[str]:
+    """Descarta las ofertas y todo lo que las referencia, para estrenar el esquema con `id` numérico.
+
+    Conserva scan_log, mercado_* (agregados sin ids), channel_posts (para no repostear en el canal),
+    sesiones web y score_versions. Sin migración ni backfill: es una limpieza deliberada."""
+    borradas = []
+    for t in TABLAS_DE_OFERTAS:
+        if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (t,)).fetchone():
+            conn.execute(f"DROP TABLE {t}")
+            borradas.append(t)
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE name='sqlite_sequence'").fetchone():
+        conn.execute("DELETE FROM sqlite_sequence WHERE name='ofertas'")
+    conn.commit()
+    return borradas

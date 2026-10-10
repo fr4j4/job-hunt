@@ -29,6 +29,11 @@ def _oferta(conn, titulo, empresa="Acme", fuente="laborum", first_seen="2026-10-
     return gid
 
 
+def _n(conn, gid):
+    """id numérico de una oferta a partir de su group_id."""
+    return conn.execute("SELECT id FROM ofertas WHERE group_id=?", (gid,)).fetchone()[0]
+
+
 def _scan(conn, ts, fuentes):
     conn.execute("INSERT INTO scan_log (ts,total_seen,new_count,sources_summary) VALUES (?,?,?,?)",
                  (ts, 1, 0, json.dumps({f: {"n": n, "err": 0} for f, n in fuentes.items()})))
@@ -126,7 +131,7 @@ def test_cierre_por_no_vista_solo_con_fuente_sana(ent):
     conn.execute("UPDATE ofertas SET last_seen='2026-10-07T02:00:00+00:00' WHERE group_id=?", (fresca,))
     conn.commit()
     materializar(conn, cfg, ahora=AHORA)
-    assert [r[0] for r in conn.execute("SELECT group_id FROM oferta_eventos WHERE tipo='reaparecida'")] == [fresca]
+    assert [r[0] for r in conn.execute("SELECT oferta_id FROM oferta_eventos WHERE tipo='reaparecida'")] == [_n(conn, fresca)]
     # y el analítico NO cambia `active`
     assert conn.execute("SELECT COUNT(*) FROM ofertas WHERE active=1").fetchone()[0] == 2
 
@@ -197,7 +202,7 @@ def test_avisos_de_seguimiento_solo_ofertas_que_sigues_y_una_vez(ent):
     b = _oferta(conn, "Dev Y")
     c = _oferta(conn, "Dev Z")
     for g, est in ((a, "guardada"), (b, "descartada")):
-        conn.execute("INSERT INTO estado_oferta VALUES (?,?,?,?)", (g, est, "", "2026-10-10T00:00:00Z"))
+        conn.execute("INSERT INTO estado_oferta VALUES (?,?,?,?)", (_n(conn, g), est, "", "2026-10-10T00:00:00Z"))
     conn.commit()
     materializar(conn, cfg, ahora=AHORA)
     for g in (a, b, c):

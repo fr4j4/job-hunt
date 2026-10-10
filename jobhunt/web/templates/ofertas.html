@@ -44,7 +44,7 @@
     <tr{% if not o.active %} class="inactiva"{% endif %}>
       <td class="num" data-l="Puntaje"><span class="pill p{{ (o.score or 0) // 10 }}">{{ o.score or 0 }}</span></td>
       <td data-l="Encaje">{% if o.ai_encaje %}<span class="enc enc-{{ o.ai_encaje }}">{{ o.ai_encaje }}</span>{% endif %}</td>
-      <td class="cargo" data-l="Cargo"><a href="/oferta/{{ o.group_id | urlencode }}">{{ o.title }}</a></td>
+      <td class="cargo" data-l="Cargo"><a href="/oferta/{{ o.id }}">{{ o.title }}</a></td>
       <td data-l="Empresa">{{ o.company }}</td>
       <td data-l="Modalidad">{{ o.modality }}</td>
       <td class="num" data-l="Sueldo">{{ o | sueldo }}</td>

@@ -21,7 +21,13 @@
   const vista = $derived((p.get('vista') ?? 'lista') as (typeof VISTAS)[number][0]);
   const orden = $derived(p.get('orden') ?? 'score');
   const dir = $derived(p.get('dir') === 'asc' ? 'asc' : 'desc');
-  const idSel = $derived(subruta() || null);
+  // la URL lleva el id numérico (/ofertas/1234); un enlace viejo con el group_id se traduce y se reescribe
+  const refRuta = $derived.by(() => { void ruta.path; return subruta(); });
+  const idSel = $derived(/^\d+$/.test(refRuta) ? Number(refRuta) : null);
+  $effect(() => {
+    const ref = refRuta;
+    if (ref && !/^\d+$/.test(ref)) api.oferta(ref).then((d) => ir(`/ofertas/${d.id}`, ruta.search, true)).catch(() => ir('/ofertas', ruta.search, true));
+  });
   const a = $derived(app.almacen);
   const f = $derived.by(() => { void ruta.search; return filtrosActuales(); });
 
@@ -45,7 +51,7 @@
   function ordenar(id: string) {
     setParams({ orden: id, dir: orden === id && dir === 'desc' ? 'asc' : 'desc' });
   }
-  function abrir(i: number) { ir(`/ofertas/${encodeURIComponent(a!.ids[i])}`, queryDeFiltros() + (params().get('vista') ? `&vista=${params().get('vista')}` : ''), false); }
+  function abrir(i: number) { ir(`/ofertas/${a!.ids[i]}`, queryDeFiltros() + (params().get('vista') ? `&vista=${params().get('vista')}` : ''), false); }
   function cerrar() { ir('/ofertas', ruta.search.replace(/^\?/, ''), false); }
   const cambiarVista = (v: string) => setParams({ vista: v === 'lista' ? null : v }, true);
 
@@ -75,7 +81,7 @@
     } else if (e.key === 'Escape' && idSel) cerrar();
     else if ((e.key === 's' || e.key === 'x') && idSel) cambiarEstado(idSel, e.key === 's' ? 'guardada' : 'descartada');
   }
-  async function cambiarEstado(id: string, estado: string) {
+  async function cambiarEstado(id: number, estado: string) {
     try { if (estado) await api.ponerEstado(id, estado); else await api.quitarEstado(id); await cargar(true); avisar(estado ? `Marcada como ${etiquetaValor(estado)}` : 'Estado quitado'); }
     catch { avisar('No se pudo cambiar el estado'); }
   }
@@ -91,7 +97,7 @@
   let sobre = $state('');
   function soltar(e: DragEvent, estado: string) {
     e.preventDefault(); sobre = '';
-    const id = e.dataTransfer?.getData('text/plain'); if (id) cambiarEstado(id, estado);
+    const id = Number(e.dataTransfer?.getData('text/plain')); if (id) cambiarEstado(id, estado);
   }
 
   // ---- exportar CSV (anti inyección de fórmulas) ----
@@ -200,7 +206,7 @@
       <div class="kcol" class:sobre={sobre === e} role="list" aria-label={etiquetaValor(e)} ondragover={(ev) => { ev.preventDefault(); sobre = e; }} ondragleave={() => (sobre = '')} ondrop={(ev) => soltar(ev, e)}>
         <h3>{etiquetaValor(e)} <span class="muted tnum">{kanban[e]?.length ?? 0}</span></h3>
         {#each kanban[e] ?? [] as r (r.id)}
-          <div class="tarjeta kcard" role="listitem" draggable="true" ondragstart={(ev) => ev.dataTransfer?.setData('text/plain', r.id)}>
+          <div class="tarjeta kcard" role="listitem" draggable="true" ondragstart={(ev) => ev.dataTransfer?.setData('text/plain', String(r.id))}>
             <button class="btn plano" style:padding="0" style:text-align="left" onclick={() => abrir(r.i)}><b>{r.titulo}</b></button>
             <div class="suave cortar">{r.empresa}</div>
             <div class="chips" style:margin-top="4px">

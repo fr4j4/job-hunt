@@ -16,7 +16,7 @@
   import { avisar } from '../estado/app.svelte';
   import { ir } from '../estado/ruta.svelte';
 
-  let { id, alCerrar }: { id: string; alCerrar?: () => void } = $props();
+  let { id, alCerrar }: { id: number; alCerrar?: () => void } = $props();
   let d = $state<DetalleOferta | null>(null);
   let error = $state('');
   $effect(() => {
