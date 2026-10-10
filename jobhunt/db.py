@@ -12,7 +12,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .config import Config
-from .domain.fechas import canonical_date
+from .domain.fechas import canonical_date, resolver_fecha
+from .domain.texto import MAX_DESC
 from .logging_setup import get_logger
 
 log = get_logger("jobhunt.db")
@@ -100,6 +101,16 @@ def init_db(conn: sqlite3.Connection) -> None:
         # metadatos v2: señal de demanda (applicants), seniority oficial del aviso
         ("applicants_hint", "ALTER TABLE ofertas ADD COLUMN applicants_hint TEXT DEFAULT ''"),
         ("seniority_oficial", "ALTER TABLE ofertas ADD COLUMN seniority_oficial TEXT DEFAULT ''"),
+        # fecha de publicación según la página: texto original ('hace 2 semanas'), precisión
+        # (exact|dia|aprox) — date_posted es SIEMPRE una fecha calendario resuelta al capturar
+        ("date_posted_raw", "ALTER TABLE ofertas ADD COLUMN date_posted_raw TEXT DEFAULT ''"),
+        ("date_precision", "ALTER TABLE ofertas ADD COLUMN date_precision TEXT DEFAULT ''"),
+        # metadatos oficiales de la ficha (JSON-LD / badges)
+        ("contrato", "ALTER TABLE ofertas ADD COLUMN contrato TEXT DEFAULT ''"),
+        ("jornada", "ALTER TABLE ofertas ADD COLUMN jornada TEXT DEFAULT ''"),
+        ("job_benefits", "ALTER TABLE ofertas ADD COLUMN job_benefits TEXT DEFAULT ''"),
+        ("skills_official", "ALTER TABLE ofertas ADD COLUMN skills_official TEXT DEFAULT ''"),
+        ("direct_apply", "ALTER TABLE ofertas ADD COLUMN direct_apply INTEGER"),
     ]:
         if col not in cols:
             conn.execute(ddl)
@@ -134,6 +145,8 @@ def init_db(conn: sqlite3.Connection) -> None:
                     # derivadas/operativas: un rescore o el marcado del canal no editan la oferta
                     "score", "market_score", "date_canonical", "staffing",
                     "notified_channel_at", "fetch_fails"}
+    from .analytics.esquema import COLUMNAS_OFERTAS
+    _sin_auditar |= {c for c, _ in COLUMNAS_OFERTAS}   # derivadas de analytics: no son "edición" de la oferta
     cols_cont = [r[1] for r in conn.execute("PRAGMA table_info(ofertas)") if r[1] not in _sin_auditar]
     cambio = " OR ".join(f'NEW."{c}" IS NOT OLD."{c}"' for c in cols_cont)
     conn.execute("DROP TRIGGER IF EXISTS trg_ofertas_updated")
@@ -178,6 +191,8 @@ def init_db(conn: sqlite3.Connection) -> None:
     for col in ("lots_done", "ia_failures", "breaker_trips", "channel_posts"):
         if col not in cols_sl:
             conn.execute(f"ALTER TABLE scan_log ADD COLUMN {col} INTEGER DEFAULT 0")
+    from .analytics.esquema import asegurar_esquema as _esquema_analitico
+    _esquema_analitico(conn)
     conn.commit()
 
 
@@ -297,10 +312,31 @@ def rescore_ids(conn: sqlite3.Connection, group_ids: list[str], version_id: str,
     return updated
 
 
+def _fecha_oferta(job: dict, now_iso: str) -> tuple[str, str, str]:
+    """(date_posted ISO, texto original si era relativo, precisión). La fecha relativa
+    ('hace 3 días') se resuelve contra el momento de captura (now_iso = created_at)."""
+    try:
+        now = datetime.fromisoformat(str(now_iso).replace("Z", "+00:00"))
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=timezone.utc)
+    except ValueError:
+        now = datetime.now(timezone.utc)
+    raw = job.get("date_raw") or job.get("date")
+    iso, prec = resolver_fecha(job.get("date"), now)
+    if not iso and job.get("date_raw"):
+        iso, prec = resolver_fecha(job["date_raw"], now)
+    if not iso:
+        return "", "", ""
+    prec = job.get("date_precision") or prec
+    es_relativa_texto = isinstance(raw, str) and prec in ("dia", "aprox") and raw.strip()[:10] != iso
+    return iso, (raw.strip()[:60] if es_relativa_texto else ""), prec
+
+
 def upsert(conn: sqlite3.Connection, job: dict, now_iso: str) -> tuple[str, bool]:
     """Inserta o fusiona. job debe traer uid (o lo genera). Retorna (group_id, is_new)."""
     if not job.get("uid"):
         job["uid"] = re_norm_uid(job["title"], job.get("company", ""))
+    fecha_iso, fecha_raw, fecha_prec = _fecha_oferta(job, now_iso)
     gid = db_find_duplicate(conn, job)
     if gid:
         src0 = (job.get("source") or "").split(":")[0]
@@ -318,15 +354,19 @@ def upsert(conn: sqlite3.Connection, job: dict, now_iso: str) -> tuple[str, bool
             years_official=COALESCE(years_official, ?),
             remote_official=COALESCE(remote_official, ?),
             employment_type=CASE WHEN employment_type='' THEN ? ELSE employment_type END,
+            date_posted=CASE WHEN date_posted='' OR date_posted IS NULL THEN ? ELSE date_posted END,
+            date_posted_raw=CASE WHEN date_posted='' OR date_posted IS NULL THEN ? ELSE date_posted_raw END,
+            date_precision=CASE WHEN date_posted='' OR date_posted IS NULL THEN ? ELSE date_precision END,
             active=1
             WHERE group_id=?""",
             (now_iso, src0, src0, src0,
              fb, fb, fb,
              job.get("salary", ""), job.get("modality", ""),
-             (job.get("_desc") or job.get("description") or "")[:2000],
+             (job.get("_desc") or job.get("description") or "")[:MAX_DESC],
              job.get("valid_through", ""), job.get("years_official"),
              1 if job.get("remote_official") else None,
              job.get("employment_type", ""),
+             fecha_iso, fecha_raw, fecha_prec,
              gid))
         return gid, False
     try:
@@ -334,16 +374,19 @@ def upsert(conn: sqlite3.Connection, job: dict, now_iso: str) -> tuple[str, bool
             (group_id, title, company, location, url, source, sources, found_by,
              date_posted, valid_through, employment_type, years_official, remote_official,
              salary, modality, techs, description, description_source,
-             first_seen, last_seen, occurrences, active, score_version)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,1,'')""",
+             first_seen, last_seen, occurrences, active, score_version, salary_source,
+             date_posted_raw, date_precision, date_canonical)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,1,'',?,?,?,?)""",
             (job["uid"], job["title"], job.get("company", ""), job.get("location", ""),
              job.get("url", ""), job.get("source", ""),
              (job.get("source") or "").split(":")[0], job.get("found_by", ""),
-             job.get("date", ""), job.get("valid_through", ""), job.get("employment_type", ""),
+             fecha_iso, job.get("valid_through", ""), job.get("employment_type", ""),
              job.get("years_official"), job.get("remote_official"),
              job.get("salary", ""), job.get("modality", ""), job.get("techs", ""),
-             (job.get("_desc") or "")[:2000], job.get("description_source", ""),
-             now_iso, now_iso))
+             (job.get("_desc") or "")[:MAX_DESC], job.get("description_source", ""),
+             now_iso, now_iso, "feed" if job.get("salary") else "",
+             fecha_raw, fecha_prec,
+             canonical_date({"date_posted": fecha_iso, "first_seen": now_iso})))
         return job["uid"], True
     except sqlite3.IntegrityError:
         conn.execute("""UPDATE ofertas SET last_seen=?, occurrences=occurrences+1 WHERE group_id=?""",

@@ -20,7 +20,9 @@ from pathlib import Path
 from urllib.parse import urlencode
 
 from fastapi import FastAPI, Form, Query, Request
-from fastapi.responses import HTMLResponse, RedirectResponse, Response
+from fastapi.exception_handlers import http_exception_handler
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -34,7 +36,7 @@ log = get_logger(__name__)
 COOKIE = "jh_sesion"
 _DIR = Path(__file__).parent
 _POR_PAGINA = 50
-_ORDENES = {"score": "score", "market": "market_score", "fecha": "first_seen",
+_ORDENES = {"score": "score", "market": "market_score", "fecha": "date_canonical",
             "cargo": "title", "empresa": "company", "actualizada": "updated_at"}
 _MODALIDADES = {"remoto": "remot", "hibrido": "brid", "presencial": "presencial"}
 _HEADERS = {
@@ -46,6 +48,10 @@ _HEADERS = {
     "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
     "Cross-Origin-Opener-Policy": "same-origin",
 }
+# La SPA (web v2) necesita JS propio, nada de terceros ni inline. connect-src 'self' = solo /api.
+_CSP_SPA = ("default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; "
+            "connect-src 'self'; font-src 'self'; worker-src 'self' blob:; form-action 'self'; "
+            "frame-ancestors 'none'; base-uri 'none'")
 
 
 def _cookie_segura(cfg: Config) -> bool:
@@ -175,8 +181,8 @@ def crear_app(cfg: Config) -> FastAPI:
         resp = await call_next(request)
         for k, v in _HEADERS.items():
             resp.headers.setdefault(k, v)
-        if not request.url.path.startswith("/static/"):
-            resp.headers["Cache-Control"] = "no-store"
+        if not request.url.path.startswith(("/static/", "/assets/")):
+            resp.headers.setdefault("Cache-Control", "no-store")
         return resp
 
     def _conn():
@@ -247,6 +253,8 @@ def crear_app(cfg: Config) -> FastAPI:
                 orden: str = "score", sentido_q: str = Query("desc", alias="dir"), page: int = 1):
         if not _autenticado(request):
             return _sin_acceso(request)
+        if cfg.web.ui == "v2" and not request.query_params.get("clasica"):
+            return RedirectResponse("/v2", status_code=303)
         where, params = ["1=1"], []
         if not inactivas:
             where.append("active = 1")
@@ -339,9 +347,47 @@ def crear_app(cfg: Config) -> FastAPI:
         return tpl.TemplateResponse(request, "fuentes.html", {
             "filas": filas, "barridos": [h["ts"] for h in hist]})
 
-    @app.exception_handler(404)
-    async def _no_encontrado(request: Request, exc):
-        return _sin_acceso(request, "Página no encontrada.", 404)
+    # ---------------- web v2: API JSON + SPA ----------------
+
+    from .api import crear_router
+    app.include_router(crear_router(cfg, _conn, _autenticado, _misma_origen))
+    dist = _DIR / "dist"
+
+    def _spa(request: Request):
+        if not _autenticado(request):
+            return _sin_acceso(request)
+        index = dist / "index.html"
+        if not index.is_file():
+            return PlainTextResponse("La interfaz v2 no está construida: cd frontend && npm ci && npm run build",
+                                     status_code=503)
+        return FileResponse(index, media_type="text/html", headers={"Content-Security-Policy": _CSP_SPA})
+
+    @app.get("/v2", response_class=HTMLResponse)
+    def spa_raiz(request: Request):
+        return _spa(request)
+
+    @app.get("/v2/{ruta:path}", response_class=HTMLResponse)
+    def spa_ruta(request: Request, ruta: str):
+        return _spa(request)
+
+    @app.get("/assets/{ruta:path}")
+    def spa_assets(ruta: str):
+        # público a propósito (solo código con hash en el nombre, sin datos); resolución segura
+        base = (dist / "assets").resolve()
+        f = (base / ruta).resolve()
+        if base not in f.parents or not f.is_file():
+            return PlainTextResponse("no encontrado", status_code=404)
+        return FileResponse(f, headers={"Cache-Control": "public, max-age=31536000, immutable",
+                                        "Content-Security-Policy": _CSP_SPA})
+
+    @app.exception_handler(StarletteHTTPException)
+    async def _http_error(request: Request, exc: StarletteHTTPException):
+        if request.url.path.startswith("/api/"):
+            return JSONResponse({"error": str(exc.detail)}, status_code=exc.status_code,
+                                headers={"Cache-Control": "no-store"})
+        if exc.status_code == 404:
+            return _sin_acceso(request, "Página no encontrada.", 404)
+        return await http_exception_handler(request, exc)
 
     return app
 

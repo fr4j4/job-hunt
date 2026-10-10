@@ -22,6 +22,7 @@ _QUERY = """query GetJobData {
 }"""
 
 import sys  # noqa: F401
+from ..domain.texto import MAX_DESC
 from ..logging_setup import get_logger
 from . import errores
 
@@ -110,5 +111,5 @@ def _parse_results(results, q, found_by_prefix, vistos):
                     "company": (j.get("employer") or {}).get("name") or "",
                     "location": (loc.get("formatted") or {}).get("long") or loc.get("countryName") or "",
                     "date": _iso(j.get("datePublished")), "url": f"https://cl.indeed.com/viewjob?jk={j.get('key','')}",
-                    "source": f"indeed:{q}", "salary": salary, "_desc": desc[:4000], "found_by": fb})
+                    "source": f"indeed:{q}", "salary": salary, "_desc": desc[:MAX_DESC], "found_by": fb})
     return out

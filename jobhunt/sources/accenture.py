@@ -14,6 +14,7 @@ from html import unescape as _u
 
 import requests
 
+from ..domain.texto import MAX_DESC
 from ..logging_setup import get_logger
 from . import errores
 
@@ -97,16 +98,16 @@ def jobs(queries: list[str], found_by_prefix: str = "", max_pages: int = 2, on_q
                         fecha = (parts[2] if len(parts[2]) == 4 else "20" + parts[2]) + "-" + \
                                 parts[1].zfill(2) + "-" + parts[0].zfill(2)
                     except Exception:
-                        fecha = now.date().isoformat()
+                        fecha = ""
                 else:
-                    fecha = now.date().isoformat()
+                    fecha = ""   # sin fecha real → vacío (se usa first_seen); antes: hoy
                 # remoteType: "Hybrid El..." / "Remote..." / "Onsite..."
                 remote = (a.get("remoteType") or "").strip()
                 modality = ("híbrido" if remote.lower().startswith("hybrid")
                             else "remoto" if remote.lower().startswith("remote")
                             else "presencial" if remote.lower().startswith(("onsite", "on-site", "presencial"))
                             else "")
-                desc = _clean(a.get("jobDescriptionClean") or a.get("jobDescription") or "")[:2000]
+                desc = _clean(a.get("jobDescriptionClean") or a.get("jobDescription") or "")[:MAX_DESC]
                 out[uid] = {
                     "title": _clean(a.get("title"))[:150],
                     "company": "Accenture",

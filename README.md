@@ -106,6 +106,25 @@ desglose del puntaje y estado de las fuentes.
     WEB_ENABLED=true                # en .env: el bot la levanta junto al daemon
     python -m jobhunt web           # o córrela aparte
 
+### Interfaz v2 (`/v2`): explorador y análisis de mercado
+
+Una SPA (Svelte + Vite + ECharts) servida por la misma web, en `/v2` (la vista clásica sigue en `/`).
+Ofertas en lista virtualizada, tarjetas, maestro-detalle y kanban; análisis de mercado con filtro
+cruzado (clic en una barra filtra todo), explorador libre y vistas guardables. Los filtros viajan en la URL.
+
+    cd frontend && npm ci && npm run build     # genera jobhunt/web/dist (no se commitea)
+    npm run check                              # tipos + valida la paleta (claro y oscuro)
+    npm test                                   # motor, catálogo de gráficos y paridad con Python
+
+La capa de datos (columnas derivadas, techs/tags normalizados, historia de eventos y foto diaria del
+mercado) se recalcula al final de cada barrido, o a mano:
+
+    python -m jobhunt materialize [--full]
+
+La historia (`oferta_eventos`, `mercado_diario`, `mercado_tech_semanal`) **sobrevive a `/db old|all`**:
+las tendencias solo existen desde el día en que empezó a acumularse. Contrato completo y decisiones:
+`.hermes/plans/spec-web-v2.md`. E2E con navegador: `pytest tests/test_web_v2_e2e.py`.
+
 **Acceso:** escribe `/web` en el bot. Te manda un enlace personal que sirve **una sola vez**
 y vence en `WEB_TOKEN_MINUTES` (10). Sin ese enlace la web no muestra nada.
 `/web_salir` cierra todas las sesiones.

@@ -22,8 +22,8 @@ def test_normalize_date_semanas():
 
 
 def test_normalize_date_meses():
-    assert normalize_date("Hace 1 mes", NOW) == (NOW - timedelta(days=30)).date().isoformat()
-    assert normalize_date("Hace 3 meses", NOW) == (NOW - timedelta(days=90)).date().isoformat()
+    assert normalize_date("Hace 1 mes", NOW) == "2026-08-03"   # mes calendario, no 30 días fijos
+    assert normalize_date("Hace 3 meses", NOW) == "2026-06-03"
 
 
 # ---------- CH-10: _bucket ----------

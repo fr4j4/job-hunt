@@ -49,7 +49,7 @@ def test_lote_prompt_bloques_idx():
     p = en._lote_prompt(rows, "perfil", "mercado")
     assert "--- OFERTA 1 ---" in p and "--- OFERTA 2 ---" in p
     assert "idx 1..N" in p
-    assert "salario_clp_mensual = 0" in p
+    assert "= 0 (cero" in p and "salario_evidencia" in p
 
 
 def test_lote_nota_anomalia_por_oferta():

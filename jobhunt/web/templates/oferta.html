@@ -26,6 +26,13 @@
     {% if o.techs %}<dt>Tecnologías</dt><dd>{{ o.techs.replace(";", " · ") }}</dd>{% endif %}
     {% if o.rol_categoria %}<dt>Rol</dt><dd>{{ o.rol_categoria }}{% if o.seniority_real %} · {{ o.seniority_real }}{% endif %}</dd>{% endif %}
     {% if idiomas %}<dt>Idiomas</dt><dd>{% for i in idiomas %}{{ i.idioma }}{% if i.nivel %} {{ i.nivel }}{% endif %}{% if i.excluyente %} (excluyente){% endif %}{% if not loop.last %}, {% endif %}{% endfor %}</dd>{% endif %}
+    <dt>Publicada</dt><dd>{% if o.date_posted %}{% if o.date_precision == "aprox" %}≈ {% endif %}{{ o.date_posted }}{% if o.date_posted_raw %} <span class="meta">(la página decía «{{ o.date_posted_raw }}» el {{ o.first_seen[:10] }})</span>{% endif %} · {{ o | edad }}{% else %}Sin fecha en la página · vista {{ o | edad }}{% endif %}</dd>
+    {% if o.contrato or o.employment_type %}<dt>Contrato</dt><dd>{{ o.contrato or o.employment_type }}{% if o.jornada %} · {{ o.jornada }}{% endif %}</dd>{% endif %}
+    {% if o.job_benefits %}<dt>Beneficios (ficha)</dt><dd>{{ o.job_benefits }}</dd>{% endif %}
+    {% if o.skills_official %}<dt>Skills (ficha)</dt><dd>{{ o.skills_official }}</dd>{% endif %}
+    {% if o.valid_through %}<dt>Vigente hasta</dt><dd>{{ o.valid_through }}</dd>{% endif %}
+    {% if o.applicants_hint %}<dt>Postulantes</dt><dd>{{ o.applicants_hint }}</dd>{% endif %}
+    {% if o.direct_apply is not none %}<dt>Postulación directa</dt><dd>{{ "sí" if o.direct_apply else "no (redirige a otro sitio)" }}</dd>{% endif %}
     <dt>Vista por primera vez</dt><dd>{{ o.first_seen | fecha }}</dd>
     <dt>Última modificación</dt><dd>{{ o.updated_at | fecha }}</dd>
     {% if o.sources %}<dt>Fuentes</dt><dd>{{ o.sources }}</dd>{% endif %}

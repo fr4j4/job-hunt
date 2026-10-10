@@ -36,6 +36,9 @@ from .ia.prompts import (  # noqa: F401 (compat: los tests leen estos nombres en
 from .ia.schemas import _LOTE_SCHEMA  # noqa: F401 (compat)
 from .logging_setup import get_logger
 from .salarios.arbiter import SalaryArbitrator
+from .salarios.texto import sueldo_respaldado
+from .domain.fechas import canonical_date, resolver_fecha
+from .domain.texto import MAX_DESC
 
 log = get_logger(__name__)
 
@@ -147,9 +150,9 @@ def ia_extract_detail(cfg: Config, job: dict, profile_desc: str,
               f'Contexto de mercado (para el campo opinion): {mercado}\n\n'
               f'Oferta:\nTítulo: {job.get("title","")}\nEmpresa: {job.get("company","")}\n'
               f'Ubicación: {job.get("location","")}\n'
-              f'Sueldo declarado: {job.get("salary") or "(no declarado — infiere rango de mercado solo si el texto lo permite)"}\n'
+              f'Sueldo declarado: {job.get("salary") or "(no declarado)"}\n'
               f'Modalidad declarada: {job.get("modality") or "(no declarada)"}\n'
-              f'Descripción: {(job.get("description") or "")[:2400]}'
+              f'Descripción: {(job.get("description") or "")[:6000]}'
               f'{nota_anomalia}\n\n'
               f'Responde SOLO JSON: {IA_SCHEMA}')
     messages = [{"role": "system",
@@ -337,7 +340,7 @@ def _extract_aira_spa(url: str) -> dict:
                     ".filter(e => e.innerText && e.innerText.length > 200)"
                     ".map(e => e.innerText.trim())"
                     ".sort((a, b) => b.length - a.length).slice(0, 2).join(' ')")
-                info["description"] = re.sub(r"\s+", " ", ps or "").strip()[:2000]
+                info["description"] = re.sub(r"\s+", " ", ps or "").strip()[:MAX_DESC]
             finally:
                 br.close()
         finally:
@@ -372,6 +375,7 @@ def _fetch_ficha(r: dict) -> dict:
             desc = meta.get("description") or ""
             if desc:
                 info = {"_access": "ok", "description": desc,
+                        "date_text": meta.get("date_text", ""),
                         "description_source": "linkedin-guest",
                         "employment_type": meta.get("employment_type", ""),
                         "industry": meta.get("industry", "")}
@@ -413,14 +417,27 @@ def _aplicar_ficha(conn, r: dict, info: dict, pool: list[int], cfg: Config | Non
         return "blocked"
     conn.execute("UPDATE ofertas SET fetch_fails=0, last_fetch_ok=datetime('now') WHERE group_id=?",
                  (r["group_id"],))
-    new_desc = (info.get("description") or "")[:1800]
+    new_desc = (info.get("description") or "")[:MAX_DESC]
     extra = (f" · {info['contrato']}" if info.get("contrato") else "") + \
             (f" · {info['jornada']}" if info.get("jornada") else "")
-    desc = ((new_desc + extra) if new_desc else r.get("description") or "")[:2000]
+    desc = ((new_desc + extra) if new_desc else r.get("description") or "")[:MAX_DESC]
     # ---- árbitro de salario (§1.3, ACCESO_OK únicamente) ----
     sal_fila = conn.execute(
-        "SELECT salary, salary_raw, salary_source, salary_status FROM ofertas WHERE group_id=?",
+        "SELECT salary, salary_raw, salary_source, salary_status, date_posted, date_posted_raw, "
+        "date_precision, first_seen FROM ofertas WHERE group_id=?",
         (r["group_id"],)).fetchone()
+    # ---- fecha de publicación: la del JSON-LD (exacta) manda; si la ficha solo trae texto
+    # relativo ("hace 2 semanas") y no hay fecha, se resuelve contra la hora del fetch ----
+    f_iso = sal_fila["date_posted"] if sal_fila else ""
+    f_raw = sal_fila["date_posted_raw"] if sal_fila else ""
+    f_prec = sal_fila["date_precision"] if sal_fila else ""
+    if (info.get("date_posted") or "")[:10]:
+        f_iso, f_raw, f_prec = info["date_posted"][:10], "", "exact"
+    elif not f_iso and info.get("date_text"):
+        iso_t, prec_t = resolver_fecha(info["date_text"])
+        if iso_t:
+            f_iso, f_raw, f_prec = iso_t, info["date_text"][:60], prec_t
+    f_canon = canonical_date({"date_posted": f_iso, "first_seen": sal_fila["first_seen"] if sal_fila else ""})
     dec = SalaryArbitrator(cfg).decide(
         {**r,
          "db_salary": sal_fila["salary"] if sal_fila else "",
@@ -455,7 +472,13 @@ def _aplicar_ficha(conn, r: dict, info: dict, pool: list[int], cfg: Config | Non
         salary_note=COALESCE(?, salary_note),
         salary_raw=CASE WHEN salary_raw='' OR salary_raw IS NULL THEN COALESCE(salary, '') ELSE salary_raw END,
         techs=COALESCE(NULLIF(techs,''), ?),
-        date_posted=COALESCE(NULLIF(date_posted,''), ?),
+        date_posted=?, date_posted_raw=?, date_precision=?, date_canonical=?,
+        location=CASE WHEN location='' OR location IS NULL THEN ? ELSE location END,
+        contrato=COALESCE(NULLIF(contrato,''), ?),
+        jornada=COALESCE(NULLIF(jornada,''), ?),
+        job_benefits=COALESCE(NULLIF(job_benefits,''), ?),
+        skills_official=COALESCE(NULLIF(skills_official,''), ?),
+        direct_apply=COALESCE(direct_apply, ?),
         valid_through=COALESCE(NULLIF(valid_through,''), ?),
         employment_type=COALESCE(NULLIF(employment_type,''), ?),
         years_official=COALESCE(years_official, ?),
@@ -467,7 +490,9 @@ def _aplicar_ficha(conn, r: dict, info: dict, pool: list[int], cfg: Config | Non
         WHERE group_id=?""",
         (desc, info.get("company") or "", info.get("modality_badge") or "", arb_salary,
          arb_source, arb_status, arb_note,
-         techs_join, info.get("date_posted") or "",
+         techs_join, f_iso or "", f_raw or "", f_prec or "", f_canon or "",
+         info.get("location") or "", info.get("contrato") or "", info.get("jornada") or "",
+         info.get("job_benefits") or "", info.get("skills_official") or "", info.get("direct_apply"),
          info.get("valid_through") or "", info.get("employment_type") or "",
          info.get("years_official"), info.get("remote_official"),
          "jsonld" if info.get("description") else "section",
@@ -744,10 +769,11 @@ def apply_ia_result(conn, cfg: Config, r: dict, parsed: dict | None,
     # vez aquí — todos los callers quedan cubiertos sin tocar la firma.
     fila = conn.execute(
         "SELECT salary, salary_source, modality, ia_model, ai_opinion, ai_resumen, "
-        "ai_fit_reason FROM ofertas WHERE group_id=?", (r["group_id"],)).fetchone()
+        "ai_fit_reason, title, description FROM ofertas WHERE group_id=?",
+        (r["group_id"],)).fetchone()
     if fila is not None:
         cols = ("salary", "salary_source", "modality", "ia_model", "ai_opinion",
-                "ai_resumen", "ai_fit_reason")
+                "ai_resumen", "ai_fit_reason", "title", "description")
         r = {**dict(r), **dict(zip(cols, tuple(fila)))}
     model = model or parsed.get("_ia_model") or None
     mod = {"R": "remoto", "H": "híbrido", "P": "presencial"}.get(parsed.get("modalidad"), "")
@@ -763,6 +789,14 @@ def apply_ia_result(conn, cfg: Config, r: dict, parsed: dict | None,
         sets.append("modality=?"); params.append(mod); ia_fields.append("modality")
     # guard A3: la IA propone salary SOLO si no hay procedencia ya establecida
     sal_ia = _coerce_salario(parsed.get("salario_clp_mensual"))
+    # anti-invención: el monto DEBE aparecer en el texto de la oferta; un LLM local
+    # rellena con valores plausibles cuando no hay dato (ver salarios/texto.py)
+    if sal_ia and "salario_evidencia" in parsed and not str(parsed.get("salario_evidencia") or "").strip():
+        sal_ia = 0   # monto sin cita literal = inventado
+    if sal_ia and not sueldo_respaldado(sal_ia, r.get("title") or "", r.get("description") or ""):
+        log.warning("sueldo IA descartado (no figura en el texto) %s: %s",
+                    r.get("group_id"), sal_ia)
+        sal_ia = 0
     if not r.get("salary") and not r.get("salary_source") and sal_ia:
         sets.append("salary=?"); params.append(f"CLP {sal_ia}")
         sets.append("salary_source=?"); params.append("ia")
