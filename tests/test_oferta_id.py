@@ -162,3 +162,13 @@ def test_snapshot_con_la_base_vacia_trae_todas_las_columnas(web):
     _nueva(conn, "Dev para comparar columnas")
     lleno = cli.get("/api/snapshot").json()
     assert set(vacio["cols"]) == set(lleno["cols"])
+
+
+def test_el_etag_depende_de_la_revision_del_cuerpo(web, monkeypatch):
+    """Regresión: arreglar el cuerpo del snapshot sin cambiar el ETag dejaba a los navegadores con la respuesta vieja (304)."""
+    from jobhunt.web.api import snapshot
+    _, conn, cli = web
+    antes = cli.get("/api/snapshot").headers["etag"]
+    monkeypatch.setattr(snapshot, "REV", snapshot.REV + 1)
+    despues = cli.get("/api/snapshot", headers={"If-None-Match": antes})
+    assert despues.status_code == 200 and despues.headers["etag"] != antes
