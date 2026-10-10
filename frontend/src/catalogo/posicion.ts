@@ -16,7 +16,7 @@ export function v80(x: Ctx): EspecGrafico {
   const enc = getDim(a, 'encaje');
   const rampa = rampaOrdinal(x.c, 4);
   const cats = [...NIVELES.map((n, i) => ({ nombre: `Encaje ${n}`, color: rampa[i] })), { nombre: 'Encaje sin evaluar', color: x.c.neutro }];
-  const puntos: { x: number; y: number | null; id: string; titulo: string; empresa: string; cat: number }[] = [];
+  const puntos: { x: number; y: number | null; id: number; titulo: string; empresa: string; cat: number }[] = [];
   const sue: number[] = [];
   for (let i = 0; i < a.n; i++) {
     if (!m[i]) continue;

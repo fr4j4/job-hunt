@@ -160,3 +160,17 @@ def test_comparar_segmentos_con_veredicto_honesto(pagina):
 def test_clasica_sigue_disponible(pagina):
     pagina.goto(pagina.base + "/?clasica=1")
     assert pagina.locator("table.responsiva").count() == 1
+
+
+def test_url_con_id_numerico_y_enlace_viejo_se_reescribe(pagina, servidor):
+    import re
+    from urllib.parse import quote
+    cfg, base = servidor
+    pagina.goto(base + "/v2/ofertas"); pagina.wait_for_selector(".vlist .vfila")
+    pagina.locator(".vlist .vfila").nth(3).click(); pagina.wait_for_selector(".drawer h1")
+    assert re.search(r"/v2/ofertas/\d+(\?|$)", pagina.url)
+    conn = database.connect(cfg)
+    gid, oid = conn.execute("SELECT group_id, id FROM ofertas ORDER BY id LIMIT 1").fetchone()
+    conn.close()
+    pagina.goto(base + "/v2/ofertas/" + quote(gid, safe="")); pagina.wait_for_selector(".drawer h1")
+    pagina.wait_for_function(f"location.pathname === '/v2/ofertas/{oid}'")       # el group_id viejo se tradujo al id

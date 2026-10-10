@@ -60,19 +60,19 @@ def construir(conn, cfg: Config, activas: bool = True, desde: str = "") -> dict:
         where.append("o.first_seen >= ?")
         params.append(desde)
     filas = conn.execute(f"""SELECT o.*, COALESCE(p.cerrada, 0) AS posible_cerrada, COALESCE(e.estado, '') AS estado
-        FROM ofertas o LEFT JOIN oferta_prev p ON p.group_id = o.group_id
-        LEFT JOIN estado_oferta e ON e.group_id = o.group_id
+        FROM ofertas o LEFT JOIN oferta_prev p ON p.oferta_id = o.id
+        LEFT JOIN estado_oferta e ON e.oferta_id = o.id
         {'WHERE ' + ' AND '.join(where) if where else ''}
         ORDER BY o.first_seen DESC LIMIT ?""", [*params, LIMITE + 1]).fetchall()
     truncado = len(filas) > LIMITE
     filas = filas[:LIMITE]
-    ids = {r["group_id"] for r in filas}
+    ids = {r["id"] for r in filas}
 
     techs, tags = defaultdict(list), defaultdict(lambda: defaultdict(list))
-    for gid, t in conn.execute("SELECT group_id, tech FROM oferta_techs"):
+    for gid, t in conn.execute("SELECT oferta_id, tech FROM oferta_techs"):
         if gid in ids:
             techs[gid].append(t)
-    for gid, tipo, v in conn.execute("SELECT group_id, tipo, valor FROM oferta_tags"):
+    for gid, tipo, v in conn.execute("SELECT oferta_id, tipo, valor FROM oferta_tags"):
         if gid in ids:
             tags[gid][tipo].append(v)
 
@@ -80,7 +80,7 @@ def construir(conn, cfg: Config, activas: bool = True, desde: str = "") -> dict:
     c: dict[str, list] = defaultdict(list)
     for r in filas:
         r = dict(r)
-        gid = r["group_id"]
+        gid = r["id"]
         c["id"].append(gid)
         c["titulo"].append(r["title"] or "")
         c["url"].append(r["url"] or "")

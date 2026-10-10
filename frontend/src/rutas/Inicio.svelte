@@ -19,7 +19,7 @@
   api.eventos('', 40).then((r) => (eventos = r.eventos.filter((e) => e.tipo !== 'aparecida').slice(0, 10))).catch(() => {});
 
   const ctx = $derived.by<Ctx | null>(() => app.almacen ? { a: app.almacen, f: filtrosVacios(), c: colores(ui.oscuro), perfil: app.perfil, mias: new Set(app.perfil?.techs ?? []),
-    filtrar: () => {}, abrir: (id) => ir(`/ofertas/${encodeURIComponent(id)}`), verOfertas: () => ir('/ofertas') } : null);
+    filtrar: () => {}, abrir: (id) => ir(`/ofertas/${id}`), verOfertas: () => ir('/ofertas') } : null);
   const tarjetas = $derived(ctx ? kpis(ctx) : []);
   const top = $derived.by(() => {
     const a = app.almacen; if (!a) return [];
@@ -52,7 +52,7 @@
     <ol style:padding-left="20px" style:margin="0">
       {#each top as r (r.id)}
         <li style:margin-bottom="6px">
-          <a href="/v2/ofertas/{encodeURIComponent(r.id)}" onclick={(e) => { e.preventDefault(); ir(`/ofertas/${encodeURIComponent(r.id)}`); }}><b>{r.titulo}</b></a>
+          <a href="/v2/ofertas/{r.id}" onclick={(e) => { e.preventDefault(); ir(`/ofertas/${r.id}`); }}><b>{r.titulo}</b></a>
           <div class="suave">{r.empresa || '—'} · <span class="pill">{r.score}</span> {r.sueldo ? clp(r.sueldo) : 'sin sueldo'} · {edad(r.antiguedad)}{r.modalidad ? ' · ' + etiquetaValor(r.modalidad) : ''}</div>
         </li>
       {/each}
@@ -65,7 +65,7 @@
       <h2>Qué cambió</h2>
       {#if !eventos.length}<p class="suave">Todavía no hay cambios registrados (sueldos, cierres, encaje). Se acumulan con cada barrido.</p>{/if}
       <ul style:padding-left="18px" style:margin="0">
-        {#each eventos as e}<li><a href="/v2/ofertas/{encodeURIComponent(e.group_id)}" onclick={(ev) => { ev.preventDefault(); ir(`/ofertas/${encodeURIComponent(e.group_id)}`); }}>{e.title}</a> — <span class="suave">{TXT[e.tipo] ?? e.tipo}</span></li>{/each}
+        {#each eventos as e}<li><a href="/v2/ofertas/{e.oferta_id}" onclick={(ev) => { ev.preventDefault(); ir(`/ofertas/${e.oferta_id}`); }}>{e.title}</a> — <span class="suave">{TXT[e.tipo] ?? e.tipo}</span></li>{/each}
       </ul>
     </section>
   </div>

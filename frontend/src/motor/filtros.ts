@@ -5,7 +5,7 @@ import { codigosDe, getDim, type Almacen } from './almacen';
 export type Rango = [number | null, number | null];
 export interface Filtros {
   q: string;
-  qIds: string[] | null;                       // ids devueltos por /api/buscar (búsqueda en descripción)
+  qIds: number[] | null;                       // ids devueltos por /api/buscar (búsqueda en descripción)
   sel: Record<string, string[]>;               // dimensión → valores seleccionados ('' = sin dato)
   techsModo: 'o' | 'y';
   rangos: Partial<Record<'sueldo' | 'score' | 'antiguedad' | 'fecha', Rango>>;

@@ -147,12 +147,12 @@ export function histograma(c: Colores, etiquetas: string[], conteos: number[], o
   };
 }
 
-export interface PuntoOferta { x: number; y: number | null; id: string; titulo: string; empresa: string; color: string; extra?: FilaTip[] }
+export interface PuntoOferta { x: number; y: number | null; id: number; titulo: string; empresa: string; color: string; extra?: FilaTip[] }
 /** Franja de puntos (un punto por oferta) + caja p25–p75 + mediana + IC, por categoría. */
 export function stripCaja(c: Colores, cats: { nombre: string; color: string; p25?: number | null; p50?: number | null; p75?: number | null;
-                          ic?: [number, number] | null; n: number }[], puntos: { cat: number; valor: number; id: string; titulo: string; empresa: string }[],
+                          ic?: [number, number] | null; n: number }[], puntos: { cat: number; valor: number; id: number; titulo: string; empresa: string }[],
                           o: { fmt: (v: number) => string; banda?: { desde: number; hasta: number; texto: string } }): EChartsOption {
-  const jit = (id: string) => { let h = 0; for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) >>> 0; return ((h % 1000) / 1000 - 0.5) * 0.46; };
+  const jit = (id: number) => { const s = String(id); let h = 0; for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0; return ((h % 1000) / 1000 - 0.5) * 0.46; };
   return {
     ...base(c),
     grid: { left: 8, right: 16, top: 8, bottom: 24, containLabel: true },
@@ -191,7 +191,7 @@ export function stripCaja(c: Colores, cats: { nombre: string; color: string; p25
 }
 
 /** Dispersión con color ordinal y carril aparte para "sin dato en Y" (no se descartan ni se inventan). */
-export function dispersion(c: Colores, puntos: { x: number; y: number | null; id: string; titulo: string; empresa: string; cat: number }[],
+export function dispersion(c: Colores, puntos: { x: number; y: number | null; id: number; titulo: string; empresa: string; cat: number }[],
                            cats: { nombre: string; color: string }[], o: { fmtX: (v: number) => string; fmtY: (v: number) => string; carril?: string;
                            refX?: { valor: number; texto: string }; refY?: { valor: number; texto: string }; yMin: number; yMax: number; ejeX: string; ejeY: string }): EChartsOption {
   const rango = o.yMax - o.yMin, carril = o.yMin - rango * 0.12;

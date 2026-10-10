@@ -84,7 +84,7 @@ def derivar_fila(r: dict, cfg: Config, alias: dict[str, str]) -> dict:
 
 
 def _paso_derivar(conn, cfg, desde: str, full: bool) -> list[str]:
-    """→ group_ids re-derivados (para techs/tags)."""
+    """→ ids re-derivados (para techs/tags)."""
     alias = _alias_empresa()
     where = "" if full else ("WHERE norm_version != ? OR norm_version IS NULL OR updated_at >= ?")
     params = () if full else (nz.VERSION, desde)
@@ -93,11 +93,11 @@ def _paso_derivar(conn, cfg, desde: str, full: bool) -> list[str]:
     for row in conn.execute(f"SELECT * FROM ofertas {where}", params).fetchall():
         r = dict(row)
         nuevo = derivar_fila(r, cfg, alias)
-        cambiados.append(r["group_id"])
+        cambiados.append(r["id"])
         if all(r.get(k) == v for k, v in nuevo.items()):
             continue
         sets = ", ".join(f"{k}=?" for k in nuevo)
-        conn.execute(f"UPDATE ofertas SET {sets} WHERE group_id=?", (*nuevo.values(), r["group_id"]))
+        conn.execute(f"UPDATE ofertas SET {sets} WHERE id=?", (*nuevo.values(), r["id"]))
         lote += 1
         if lote % 500 == 0:
             conn.commit()
@@ -112,13 +112,13 @@ def _paso_techs_tags(conn, gids: list[str]) -> None:
         trozo = gids[i:i + 500]
         q = ",".join("?" * len(trozo))
         for row in conn.execute(
-                f"SELECT group_id, techs, ai_benefits, ai_red_flags, ai_green_flags, ai_idiomas "
-                f"FROM ofertas WHERE group_id IN ({q})", trozo).fetchall():
-            gid = row["group_id"]
+                f"SELECT id, techs, ai_benefits, ai_red_flags, ai_green_flags, ai_idiomas "
+                f"FROM ofertas WHERE id IN ({q})", trozo).fetchall():
+            gid = row["id"]
             techs = {canon_tech(t.strip()) for t in (row["techs"] or "").split(";") if t.strip()}
-            ya = {r[0] for r in conn.execute("SELECT tech FROM oferta_techs WHERE group_id=?", (gid,))}
+            ya = {r[0] for r in conn.execute("SELECT tech FROM oferta_techs WHERE oferta_id=?", (gid,))}
             if techs != ya:
-                conn.execute("DELETE FROM oferta_techs WHERE group_id=?", (gid,))
+                conn.execute("DELETE FROM oferta_techs WHERE oferta_id=?", (gid,))
                 conn.executemany("INSERT OR IGNORE INTO oferta_techs VALUES (?,?)", [(gid, t) for t in sorted(techs)])
             tags: set[tuple[str, str]] = set()
             for tipo, col in (("beneficio", "ai_benefits"), ("rojo", "ai_red_flags"), ("verde", "ai_green_flags")):
@@ -130,12 +130,12 @@ def _paso_techs_tags(conn, gids: list[str]) -> None:
                     idi = nz._norm(str(it.get("idioma"))).strip()
                     niv = nz._norm(str(it.get("nivel") or "")).strip()
                     tags.add(("idioma", f"{idi}:{niv}:{'excluyente' if it.get('excluyente') else ''}"[:120]))
-            ya_t = {(r[0], r[1]) for r in conn.execute("SELECT tipo, valor FROM oferta_tags WHERE group_id=?", (gid,))}
+            ya_t = {(r[0], r[1]) for r in conn.execute("SELECT tipo, valor FROM oferta_tags WHERE oferta_id=?", (gid,))}
             if tags != ya_t:
-                conn.execute("DELETE FROM oferta_tags WHERE group_id=?", (gid,))
+                conn.execute("DELETE FROM oferta_tags WHERE oferta_id=?", (gid,))
                 conn.executemany("INSERT OR IGNORE INTO oferta_tags VALUES (?,?,?)", [(gid, a, b) for a, b in sorted(tags)])
-    conn.execute("DELETE FROM oferta_techs WHERE group_id NOT IN (SELECT group_id FROM ofertas)")
-    conn.execute("DELETE FROM oferta_tags WHERE group_id NOT IN (SELECT group_id FROM ofertas)")
+    conn.execute("DELETE FROM oferta_techs WHERE oferta_id NOT IN (SELECT id FROM ofertas)")
+    conn.execute("DELETE FROM oferta_tags WHERE oferta_id NOT IN (SELECT id FROM ofertas)")
     conn.commit()
 
 
@@ -172,18 +172,18 @@ def _umbral(barridos, fuentes: frozenset, k: int, memo: dict) -> str | None:
 def _paso_eventos(conn, cfg: Config, ahora: str, scan_id) -> dict:
     barridos = _umbrales_cierre(conn, cfg.analytics.close_after_sweeps)
     memo: dict = {}
-    prev = {r["group_id"]: dict(r) for r in conn.execute("SELECT * FROM oferta_prev")}
-    con_aparecida = {r[0] for r in conn.execute("SELECT group_id FROM oferta_eventos WHERE tipo='aparecida'")}
+    prev = {r["oferta_id"]: dict(r) for r in conn.execute("SELECT * FROM oferta_prev")}
+    con_aparecida = {r[0] for r in conn.execute("SELECT oferta_id FROM oferta_eventos WHERE tipo='aparecida'")}
     evs, n_ev = [], Counter()
 
     def ev(r, ts, tipo, antes, despues):
-        evs.append((ts, scan_id, r["group_id"], (r["title"] or "")[:120], (r["company"] or "")[:80],
+        evs.append((ts, scan_id, r["id"], (r["title"] or "")[:120], (r["company"] or "")[:80],
                     r["rol_familia"] or "", (r["source"] or "").split(":")[0], tipo, str(antes), str(despues)))
         n_ev[tipo] += 1
 
     for row in conn.execute("SELECT * FROM ofertas").fetchall():
         r = dict(row)
-        gid = r["group_id"]
+        gid = r["id"]
         if gid not in con_aparecida:
             ev(r, _iso(r["first_seen"]), "aparecida", "", _iso(r["first_seen"]))
         fuentes = frozenset(x for x in (r.get("sources") or r["source"].split(":")[0]).split(",") if x)
@@ -207,13 +207,13 @@ def _paso_eventos(conn, cfg: Config, ahora: str, scan_id) -> dict:
                 ev(r, ahora, "modalidad", p["modalidad"], actual["modalidad"])
             if all(actual[k] == p[k] for k in actual):
                 continue
-        conn.execute("""INSERT INTO oferta_prev (group_id, salary_clp, score, encaje, modalidad, cerrada)
-            VALUES (?,?,?,?,?,?) ON CONFLICT(group_id) DO UPDATE SET salary_clp=excluded.salary_clp,
+        conn.execute("""INSERT INTO oferta_prev (oferta_id, salary_clp, score, encaje, modalidad, cerrada)
+            VALUES (?,?,?,?,?,?) ON CONFLICT(oferta_id) DO UPDATE SET salary_clp=excluded.salary_clp,
             score=excluded.score, encaje=excluded.encaje, modalidad=excluded.modalidad, cerrada=excluded.cerrada""",
                      (gid, actual["salary_clp"], actual["score"], actual["encaje"], actual["modalidad"], cerrada))
     if evs:
         conn.executemany("""INSERT INTO oferta_eventos
-            (ts, scan_id, group_id, title, company, rol_familia, fuente, tipo, antes, despues)
+            (ts, scan_id, oferta_id, title, company, rol_familia, fuente, tipo, antes, despues)
             VALUES (?,?,?,?,?,?,?,?,?,?)""", evs)
     conn.commit()
     return dict(n_ev)
@@ -238,9 +238,9 @@ def _fila_agregada(grupo: list[dict], hoy: str, cerradas: int, cfg: Config):
 
 def _paso_mercado(conn, cfg: Config, hoy: str, semana: str) -> None:
     filas = []
-    for row in conn.execute("""SELECT o.group_id, o.active, o.first_seen, o.source, o.rol_familia, o.seniority_norm,
+    for row in conn.execute("""SELECT o.id, o.active, o.first_seen, o.source, o.rol_familia, o.seniority_norm,
             o.modality_norm, o.salary_clp, o.salary_status, COALESCE(p.cerrada, 0) AS cerrada
-            FROM ofertas o LEFT JOIN oferta_prev p USING (group_id)"""):
+            FROM ofertas o LEFT JOIN oferta_prev p ON p.oferta_id = o.id"""):
         filas.append(dict(row))
     cerr_hoy = defaultdict(int)
     for rf, fuente in conn.execute(
@@ -277,16 +277,16 @@ def _paso_mercado(conn, cfg: Config, hoy: str, semana: str) -> None:
 
     # tendencias de tecnologías (semana ISO)
     techs_de = defaultdict(set)
-    for gid, tech in conn.execute("SELECT group_id, tech FROM oferta_techs"):
+    for gid, tech in conn.execute("SELECT oferta_id, tech FROM oferta_techs"):
         techs_de[gid].add(tech)
     semana_de = lambda fs: _semana_iso(str(fs)[:10])   # noqa: E731
     activas = [g for g in filas if g["active"] and not g["cerrada"]]
     for alcance in ["*", *sorted({g["rol_familia"] or "No desarrollo" for g in filas})]:
         sub = [g for g in activas if alcance == "*" or (g["rol_familia"] or "No desarrollo") == alcance]
-        base = [g for g in sub if techs_de.get(g["group_id"])]
+        base = [g for g in sub if techs_de.get(g["id"])]
         cuenta, nuevas = Counter(), Counter()
         for g in base:
-            for t in techs_de[g["group_id"]]:
+            for t in techs_de[g["id"]]:
                 cuenta[t] += 1
                 if semana_de(g["first_seen"]) == semana:
                     nuevas[t] += 1

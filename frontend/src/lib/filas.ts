@@ -3,7 +3,7 @@ import type { Almacen } from '../motor/almacen';
 import { getDim } from '../motor/almacen';
 
 export interface FilaOferta {
-  i: number; id: string; titulo: string; empresa: string; url: string; fuente: string; fuentes: string[];
+  i: number; id: number; titulo: string; empresa: string; url: string; fuente: string; fuentes: string[];
   rol: string; familia: string; seniority: string; modalidad: string; modalidadSrc: string; region: string; comuna: string;
   sueldo: number | null; techs: string[]; score: number; market: number; encaje: string; antiguedad: number;
   resumen: string; estado: string; posibleCerrada: boolean; ingles: string; nFuentes: number; staffing: boolean;

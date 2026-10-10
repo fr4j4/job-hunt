@@ -11,7 +11,7 @@ import type { EChartsOption } from '../viz/echarts';
 export interface Ctx {
   a: Almacen; f: Filtros; c: Colores; perfil: Perfil | null; mias: Set<string>;
   filtrar: (dim: string, valor: string, aditivo?: boolean) => void;
-  abrir: (id: string) => void;
+  abrir: (id: number) => void;
   verOfertas: () => void;
 }
 export interface EspecGrafico {

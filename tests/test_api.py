@@ -34,7 +34,7 @@ def ent(tmp_path, monkeypatch):
                                         "source": f"{fuente}:x", "date": "2026-10-07"}, "2026-10-07T00:00:00+00:00")
         if extra:
             conn.execute(f"UPDATE ofertas SET {', '.join(k + '=?' for k in extra)} WHERE group_id=?", (*extra.values(), gid))
-        gids.append(gid)
+        gids.append(conn.execute("SELECT id FROM ofertas WHERE group_id=?", (gid,)).fetchone()[0])   # ids numéricos
     conn.execute("INSERT INTO scan_log (ts,total_seen,new_count,sources_summary) VALUES "
                  "('2026-10-08T00:00:00+00:00',3,3,?)", (json.dumps({"indeed": {"n": 0, "err": 2}, "laborum": {"n": 5, "err": 0}}),))
     conn.commit()
@@ -102,7 +102,7 @@ def test_snapshot_etag_304_y_cambia_con_datos(ent):
     r = cli.get("/api/snapshot")
     tag = r.headers["etag"]
     assert cli.get("/api/snapshot", headers={"If-None-Match": tag}).status_code == 304
-    conn.execute("UPDATE ofertas SET title='Otro titulo', updated_at='2099-01-01T00:00:00Z' WHERE group_id=?", (gids[2],))
+    conn.execute("UPDATE ofertas SET title='Otro titulo', updated_at='2099-01-01T00:00:00Z' WHERE id=?", (gids[2],))
     conn.commit()
     r2 = cli.get("/api/snapshot", headers={"If-None-Match": tag})
     assert r2.status_code == 200 and r2.headers["etag"] != tag

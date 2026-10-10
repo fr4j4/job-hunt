@@ -37,7 +37,7 @@
     ];
   });
   const difiere = (f: Fila) => new Set(f.celdas).size > 1;
-  const quitar = (id: string) => { const i = comparar.ids.indexOf(id); if (i >= 0) comparar.ids.splice(i, 1); };
+  const quitar = (id: number) => { const i = comparar.ids.indexOf(id); if (i >= 0) comparar.ids.splice(i, 1); };
 </script>
 
 <h1>Comparar ofertas</h1>
@@ -52,7 +52,7 @@
     <table class="tabla" aria-label="Comparación de ofertas">
       <thead><tr><th></th>{#each datos as o}
         <th style:min-width="220px" style:vertical-align="top">
-          <a href="/v2/ofertas/{encodeURIComponent(o.id)}" onclick={(e) => { e.preventDefault(); ir(`/ofertas/${encodeURIComponent(o.id)}`); }}>{o.titulo}</a>
+          <a href="/v2/ofertas/{o.id}" onclick={(e) => { e.preventDefault(); ir(`/ofertas/${o.id}`); }}>{o.titulo}</a>
           <div><button class="btn chico plano" onclick={() => quitar(o.id)}>Quitar ✕</button>
           {#if urlSegura(o.url)}<a class="btn chico plano" href={urlSegura(o.url)} target="_blank" rel="noopener noreferrer">Abrir ↗</a>{/if}</div>
         </th>{/each}</tr></thead>

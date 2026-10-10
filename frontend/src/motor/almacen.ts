@@ -14,14 +14,14 @@ export interface DimData {
 export interface Almacen {
   n: number;
   snap: Snapshot;
-  ids: string[];
+  ids: number[];
   dim: Record<string, DimData>;
   sueldo: Float64Array; sueldoValido: Uint8Array;
   score: Float64Array; market: Float64Array; antiguedad: Float64Array; applicants: Float64Array;
   exp: Float64Array; nFuentes: Float64Array;
   fecha: Int32Array;                   // días desde epoch de first_seen (-1 = sin dato)
   texto: string[];                     // título+empresa+resumen en minúsculas (búsqueda rápida)
-  indice: Map<string, number>;
+  indice: Map<number, number>;
   nombreEmpresa: Map<string, string>;  // clave canónica → nombre original más frecuente
 }
 
@@ -105,7 +105,7 @@ export function construirAlmacen(s: Snapshot): Almacen {
   const f64 = (a: (number | null)[]) => Float64Array.from(a, (x) => (x === null || x === undefined ? NaN : x));
   const sueldoValido = Uint8Array.from(c.sueldo_valido);
   const sueldo = Float64Array.from(c.sueldo, (x, i) => (x !== null && sueldoValido[i] ? x : NaN));
-  const indice = new Map<string, number>();
+  const indice = new Map<number, number>();
   c.id.forEach((id, i) => indice.set(id, i));
   const texto = c.titulo.map((t, i) => `${t} ${s.dicts.empresa[c.empresa[i]] ?? ''} ${c.resumen[i] ?? ''}`.toLowerCase());
   return {

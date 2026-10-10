@@ -2,7 +2,7 @@
   import { api } from '../lib/api';
   import { avisar, cargar } from '../estado/app.svelte';
   import { etiquetaValor } from '../lib/formato';
-  let { id, actual = '', nota = '', alCambiar }: { id: string; actual?: string; nota?: string; alCambiar?: (e: string) => void } = $props();
+  let { id, actual = '', nota = '', alCambiar }: { id: number; actual?: string; nota?: string; alCambiar?: (e: string) => void } = $props();
   const ESTADOS = ['guardada', 'postulada', 'entrevista', 'oferta', 'descartada'];
   let notaLocal = $state(nota);
   async function poner(e: string) {

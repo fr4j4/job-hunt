@@ -1037,3 +1037,14 @@ Verificado con: `pytest` (443 tests, incl. 11 e2e con Chromium real), `vitest` (
 
 - Solo **22 % de las ofertas declara sueldo** (227 con sueldo válido) y **55 % no informa empresa**; `modality` falta en 62 % (la inferencia por texto recupera ~11 ofertas: precisión no medida, ver T0-5 abierta).
 - Las etiquetas de la IA mezclan categorías (p. ej. «contrato a plazo fijo» aparece como beneficio, alerta y a favor).
+
+### 18.1 Id numérico de oferta (esquema nuevo, sin migración)
+
+`ofertas` pasa a `id INTEGER PRIMARY KEY AUTOINCREMENT` + `group_id TEXT NOT NULL UNIQUE` (el dedup sigue por `group_id`).
+`AUTOINCREMENT` garantiza que un id **no se reutiliza** aunque `/db` purgue filas. Las tablas por oferta
+(`oferta_techs`, `oferta_tags`, `oferta_eventos`, `oferta_prev`, `estado_oferta`, `aviso_estado`) referencian `oferta_id`.
+Decisión deliberada: **sin backfill ni rollback**; la DB se limpia una vez con `db.reset_ofertas()` (conserva `scan_log`, `mercado_*`,
+`channel_posts`, sesiones web). `init_db` rechaza con un error claro una tabla `ofertas` de esquema antiguo.
+La API y la web clásica aceptan el id o un `group_id` viejo (se eliminó el truncado `[:100]`, que rompía ids de 101–111 caracteres);
+el front usa `/v2/ofertas/<id>` y reescribe los enlaces antiguos. El canal no republica lo que figura en `channel_posts`
+(así la limpieza no vuelve a publicar ofertas ya enviadas).

@@ -20,7 +20,7 @@
   const ctx = $derived.by<Ctx | null>(() => { if (!app.almacen) return null; void ui.oscuro;
     return { a: app.almacen, f, c: colores(ui.oscuro), perfil: app.perfil, mias: new Set(app.perfil?.techs ?? []),
       filtrar: (dim, valor) => { const n = filtrosActuales(); n.sel = { ...n.sel, [dim]: [valor] }; setFiltros(n); },
-      abrir: (id) => ir(`/ofertas/${encodeURIComponent(id)}`, queryDeFiltros()), verOfertas: () => ir('/ofertas', queryDeFiltros()) }; });
+      abrir: (id) => ir(`/ofertas/${id}`, queryDeFiltros()), verOfertas: () => ir('/ofertas', queryDeFiltros()) }; });
   const res = $derived(ctx ? construir(ctx, spec, etiquetaDim) : null);
   const recSinForma = $derived(recomendar({ ...spec, forma: '' }));
   const formas = $derived(res ? [res.rec.forma, ...res.rec.alternativas] : []);
