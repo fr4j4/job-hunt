@@ -79,7 +79,8 @@ def canal_en_silencio(conn, cfg: Config) -> int:
 
 _NOMBRES = {"linkedin": "LinkedIn", "computrabajo": "Computrabajo", "indeed": "Indeed",
             "glassdoor": "Glassdoor", "laborum": "Laborum", "jooble": "Jooble",
-            "accenture": "Accenture", "aira": "Feeds de empleadores (AIRA)"}
+            "accenture": "Accenture", "aira": "Feeds de empleadores (AIRA)", "getonboard": "Get on Board",
+            "himalayas": "Himalayas", "remotive": "Remotive", "weworkremotely": "We Work Remotely"}
 
 
 def _nombre(fuente: str) -> str:

@@ -41,7 +41,8 @@ def build_keywords(cfg: Config) -> list[str]:
     for q in (cfg.search.queries_linkedin + cfg.search.queries_computrabajo +
               cfg.search.queries_indeed + cfg.search.queries_glassdoor +
               cfg.search.queries_laborum + cfg.search.queries_jooble +
-              cfg.search.queries_accenture):
+              cfg.search.queries_accenture + cfg.search.queries_getonboard +
+              cfg.search.queries_himalayas + cfg.search.queries_remotive):
         add(q)
     return kw
 

@@ -17,6 +17,7 @@ MISMO = {"Sec-Fetch-Site": "same-origin"}
 @pytest.fixture
 def entorno(tmp_path, monkeypatch):
     cfg = load_config()
+    cfg.web.ui = "legacy"        # estas pruebas cubren la web clásica en "/"
     monkeypatch.setattr(type(cfg), "db_path", property(lambda self: tmp_path / "w.sqlite"), raising=False)
     conn = database.connect(cfg)
     database.init_db(conn)

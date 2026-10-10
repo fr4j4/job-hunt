@@ -89,7 +89,8 @@ def cmd_run(cfg, notify: bool = True, on_phase=None, stop_event: threading.Event
         lots_done = ia_failures = breaker_trips = channel_posts = 0
 
         from .sources import (linkedin, computrabajo, indeed, glassdoor, laborum,
-                              jooble, accenture, aira)
+                              jooble, accenture, aira, getonboard, himalayas, remotive,
+                              weworkremotely)
         from .relevance import filter_offers, title_is_obvious_nontech
         from .sources import errores
         s = cfg.search
@@ -170,6 +171,19 @@ def cmd_run(cfg, notify: bool = True, on_phase=None, stop_event: threading.Event
         if cfg.sources.get("laborum", True):
             tareas["laborum"] = [lambda: _fuente_segura("laborum",
                 lambda: laborum.jobs(s.queries_laborum, "perfil:", on_query=qcb("laborum")))]
+        # APIs abiertas (sin Cloudflare, livianas): una tarea por sitio, corren en cada barrido
+        if cfg.sources.get("getonboard", True):
+            tareas["getonboard"] = [lambda: _fuente_segura("getonboard",
+                lambda: getonboard.jobs(s.queries_getonboard, "perfil:", on_query=qcb("getonboard")))]
+        if cfg.sources.get("himalayas", True):
+            tareas["himalayas"] = [lambda: _fuente_segura("himalayas",
+                lambda: himalayas.jobs(s.queries_himalayas, "perfil:", on_query=qcb("himalayas")))]
+        if cfg.sources.get("remotive", True):
+            tareas["remotive"] = [lambda: _fuente_segura("remotive",
+                lambda: remotive.jobs(s.queries_remotive, "perfil:", on_query=qcb("remotive")))]
+        if cfg.sources.get("weworkremotely", True):
+            tareas["weworkremotely"] = [lambda: _fuente_segura("weworkremotely",
+                lambda: weworkremotely.jobs(None, "perfil:", on_query=qcb("weworkremotely")))]
         muestreo = cfg.search.mode in ("both", "sample")
         n_m = max(1, int(len(s.sample_linkedin) * s.sample_rotation))
         if cfg.sources.get("linkedin"):
@@ -327,6 +341,20 @@ def cmd_run(cfg, notify: bool = True, on_phase=None, stop_event: threading.Event
                 except Exception as e:
                     log.warning("canal falló (barrido continúa): %s", e)
 
+        # analítica (web v2): derivadas + historia. Nunca tumba el barrido.
+        if cfg.analytics.enabled:
+            try:
+                from .analytics.materializar import materializar
+                materializar(conn, cfg, scan_id=row_id)
+                from .analytics.avisos import avisar_cierres
+                avisar_cierres(conn, cfg, _tg_api_for_channel(cfg))
+            except Exception as e:
+                log.warning("analytics falló (barrido continúa): %s", e)
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+
         # digest: solo >= ALERT_MIN_SCORE
         threshold = cfg.alerts.min_score
         alerts = conn.execute(
@@ -478,6 +506,15 @@ def main():
         cmd_rescore(cfg)
     elif cmd == "enrich":
         cmd_enrich(cfg)
+    elif cmd == "materialize":
+        # python -m jobhunt materialize [--full] — recalcula derivadas, historia y agregados
+        from .analytics.materializar import materializar
+        conn = database.connect(cfg)
+        try:
+            database.init_db(conn)
+            print(materializar(conn, cfg, full="--full" in sys.argv))
+        finally:
+            conn.close()
     elif cmd == "web":
         from .web.app import servir
         servir(cfg)             # python -m jobhunt web — acceso con /web en el bot

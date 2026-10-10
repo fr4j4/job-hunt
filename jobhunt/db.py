@@ -37,9 +37,20 @@ def backup_db(conn: sqlite3.Connection, dest_path) -> None:
         dest_conn.close()
 
 
+class EsquemaAntiguo(RuntimeError):
+    pass
+
+
 def init_db(conn: sqlite3.Connection) -> None:
+    # `id` entero (AUTOINCREMENT: jamás se reutiliza, ni tras borrar filas) es la clave que ven la web/API/historia;
+    # `group_id` (título|empresa) sigue siendo la clave de negocio del dedup.
+    existe = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='ofertas'").fetchone()
+    if existe and "id" not in {r[1] for r in conn.execute("PRAGMA table_info(ofertas)")}:
+        raise EsquemaAntiguo("la tabla `ofertas` es de un esquema anterior (sin `id` numérico) y no se migra: "
+                             "respalda data/ofertas.sqlite y descarta esas tablas con db.reset_ofertas()")
     conn.execute("""CREATE TABLE IF NOT EXISTS ofertas (
-        group_id    TEXT PRIMARY KEY,
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        group_id    TEXT NOT NULL UNIQUE,
         title       TEXT NOT NULL,
         company     TEXT DEFAULT '',
         location    TEXT DEFAULT '',
@@ -140,11 +151,13 @@ def init_db(conn: sqlite3.Connection) -> None:
     # VALOR de alguna columna de contenido. No cuentan los toques de barrido (last_seen,
     # occurrences, found_by) ni lo derivado (scores, date_canonical) ni el marcado del canal.
     # Se recrea en cada init para cubrir columnas añadidas por migraciones futuras.
-    _sin_auditar = {"group_id", "created_at", "updated_at", "last_seen", "occurrences",
+    _sin_auditar = {"id", "group_id", "created_at", "updated_at", "last_seen", "occurrences",
                     "found_by", "score_version", "ctx_version", "last_fetch_ok",
                     # derivadas/operativas: un rescore o el marcado del canal no editan la oferta
                     "score", "market_score", "date_canonical", "staffing",
                     "notified_channel_at", "fetch_fails"}
+    from .analytics.esquema import COLUMNAS_OFERTAS
+    _sin_auditar |= {c for c, _ in COLUMNAS_OFERTAS}   # derivadas de analytics: no son "edición" de la oferta
     cols_cont = [r[1] for r in conn.execute("PRAGMA table_info(ofertas)") if r[1] not in _sin_auditar]
     cambio = " OR ".join(f'NEW."{c}" IS NOT OLD."{c}"' for c in cols_cont)
     conn.execute("DROP TRIGGER IF EXISTS trg_ofertas_updated")
@@ -189,6 +202,8 @@ def init_db(conn: sqlite3.Connection) -> None:
     for col in ("lots_done", "ia_failures", "breaker_trips", "channel_posts"):
         if col not in cols_sl:
             conn.execute(f"ALTER TABLE scan_log ADD COLUMN {col} INTEGER DEFAULT 0")
+    from .analytics.esquema import asegurar_esquema as _esquema_analitico
+    _esquema_analitico(conn)
     conn.commit()
 
 
@@ -343,6 +358,7 @@ def upsert(conn: sqlite3.Connection, job: dict, now_iso: str) -> tuple[str, bool
                      CASE WHEN sources='' THEN ? ELSE sources || ',' || ? END END,
             found_by=CASE WHEN instr(found_by, ?) THEN found_by ELSE
                    CASE WHEN found_by='' THEN ? ELSE found_by || ',' || ? END END,
+            company=CASE WHEN company='' OR company IS NULL THEN ? ELSE company END,
             salary=CASE WHEN salary='' OR salary IS NULL THEN ? ELSE salary END,
             modality=CASE WHEN modality='' OR modality IS NULL THEN ? ELSE modality END,
             description=CASE WHEN length(description) < 200 THEN ? ELSE description END,
@@ -357,7 +373,7 @@ def upsert(conn: sqlite3.Connection, job: dict, now_iso: str) -> tuple[str, bool
             WHERE group_id=?""",
             (now_iso, src0, src0, src0,
              fb, fb, fb,
-             job.get("salary", ""), job.get("modality", ""),
+             job.get("company", ""), job.get("salary", ""), job.get("modality", ""),
              (job.get("_desc") or job.get("description") or "")[:MAX_DESC],
              job.get("valid_through", ""), job.get("years_official"),
              1 if job.get("remote_official") else None,
@@ -469,3 +485,22 @@ def url_key(url: str) -> str:
     if keep:
         return parsed.path + "?" + "&".join(keep)
     return parsed.path
+
+
+TABLAS_DE_OFERTAS = ("ofertas", "oferta_techs", "oferta_tags", "oferta_eventos", "oferta_prev", "estado_oferta", "aviso_estado")
+
+
+def reset_ofertas(conn: sqlite3.Connection) -> list[str]:
+    """Descarta las ofertas y todo lo que las referencia, para estrenar el esquema con `id` numérico.
+
+    Conserva scan_log, mercado_* (agregados sin ids), channel_posts (para no repostear en el canal),
+    sesiones web y score_versions. Sin migración ni backfill: es una limpieza deliberada."""
+    borradas = []
+    for t in TABLAS_DE_OFERTAS:
+        if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (t,)).fetchone():
+            conn.execute(f"DROP TABLE {t}")
+            borradas.append(t)
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE name='sqlite_sequence'").fetchone():
+        conn.execute("DELETE FROM sqlite_sequence WHERE name='ofertas'")
+    conn.commit()
+    return borradas
