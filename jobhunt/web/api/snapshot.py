@@ -12,6 +12,45 @@ from ...domain.fechas import age_days
 VERSION = 2
 LIMITE = 20000
 
+COLUMNAS = ['id',
+    'titulo',
+    'url',
+    'empresa',
+    'empresa_canon',
+    'fuente',
+    'fuentes',
+    'rol',
+    'rol_familia',
+    'seniority',
+    'modalidad',
+    'modalidad_src',
+    'empleo',
+    'region',
+    'comuna',
+    'sueldo',
+    'sueldo_min',
+    'sueldo_max',
+    'sueldo_valido',
+    'techs',
+    'score',
+    'market_score',
+    'encaje',
+    'ingles',
+    'first_seen',
+    'fecha_pub',
+    'antiguedad',
+    'applicants',
+    'exp_anios',
+    'staffing',
+    'n_fuentes',
+    'active',
+    'posible_cerrada',
+    'resumen',
+    'estado',
+    'beneficios',
+    'alertas',
+    'a_favor']
+
 _INGLES = {"": "", "desconocido": "", "no": "no", "deseable": "deseable", "requerido": "requerido",
            "excluyente": "requerido"}
 
@@ -76,8 +115,9 @@ def construir(conn, cfg: Config, activas: bool = True, desde: str = "") -> dict:
         if gid in ids:
             tags[gid][tipo].append(v)
 
+    # todas las columnas existen aunque no haya filas (la interfaz no debe romperse con la DB recién limpiada)
+    c: dict[str, list] = {k: [] for k in COLUMNAS}
     d = {k: _Dic() for k in ("empresa", "fuente", "rol", "tech", "tag", "region", "comuna")}
-    c: dict[str, list] = defaultdict(list)
     for r in filas:
         r = dict(r)
         gid = r["id"]

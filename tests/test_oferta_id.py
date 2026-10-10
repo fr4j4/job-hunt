@@ -152,3 +152,13 @@ def test_web_clasica_abre_por_id_y_por_group_id(web):
     oid = _id(conn, g)
     assert "Dev legado" in cli.get(f"/oferta/{oid}").text and "Dev legado" in cli.get(f"/oferta/{g}").text
     assert f'href="/oferta/{oid}"' in cli.get("/").text                    # los enlaces nuevos usan el id
+
+
+def test_snapshot_con_la_base_vacia_trae_todas_las_columnas(web):
+    """Regresión: tras limpiar la DB el snapshot devolvía cols={} y la interfaz fallaba con «No se pudo cargar»."""
+    _, conn, cli = web
+    vacio = cli.get("/api/snapshot").json()
+    assert vacio["n"] == 0 and vacio["cols"] and all(v == [] for v in vacio["cols"].values())
+    _nueva(conn, "Dev para comparar columnas")
+    lleno = cli.get("/api/snapshot").json()
+    assert set(vacio["cols"]) == set(lleno["cols"])
