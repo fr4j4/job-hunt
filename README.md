@@ -71,7 +71,7 @@ Restaurar (con el daemon detenido):
 
 ## Fuentes
 
-LinkedIn · Computrabajo · Indeed · Glassdoor · Laborum (API searchV2) · Accenture (findjobs) · Jooble (scraping headless).
+LinkedIn · Computrabajo · Indeed · Glassdoor · Laborum (API searchV2) · Accenture (findjobs) · Jooble (scraping headless) · Get on Board · Himalayas · Remotive · We Work Remotely (APIs abiertas, sin key).
 
 ### Jooble (scraping headless) — dependencia extra
 
@@ -90,6 +90,10 @@ y lanza headed automáticamente). Sin playwright la fuente se salta con warning.
 |---|---|---|
 | Laborum | 3 × 3 modalidades | API real (corta por `total`) |
 | Accenture | 2 | API pública |
+| Get on Board | 1 × 30/query | API v0 pública; `total_pages` disponible, no se pagina |
+| Himalayas | 1 (≤20/query) | `country=CL` |
+| Remotive | 1 (≤50/query) | filtro local por ubicación y categoría |
+| We Work Remotely | feed RSS (~25) | sin búsqueda |
 | Jooble | scroll infinito (~100) | requiere Playwright+xvfb; `&page=N` es cosmético |
 | LinkedIn | 1 (guest, últimos 7 días) | paginar dispara rate-limit |
 | Indeed | 1 (20/query) | GraphQL móvil sin cursor/offset (introspección off); web tras Security Check |

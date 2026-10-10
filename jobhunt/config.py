@@ -108,6 +108,9 @@ class Search:
     queries_laborum: list[str]
     queries_jooble: list[str]
     queries_accenture: list[str]
+    queries_getonboard: list[str]
+    queries_himalayas: list[str]
+    queries_remotive: list[str]
     sample_linkedin: list[str]
     sample_indeed: list[str]
     sample_computrabajo: list[str]
@@ -323,6 +326,9 @@ def load_config(env_file: Path | None = None) -> Config:
         queries_laborum=_env_list("QUERIES_LABORUM", "python,desarrollador,full stack,backend,java"),
         queries_jooble=_env_list("QUERIES_JOOBLE", "python,desarrollador full stack,backend"),
         queries_accenture=_env_list("QUERIES_ACCENTURE", "fullstack,python,tech lead"),
+        queries_getonboard=_env_list("QUERIES_GETONBOARD", "python,full stack,tech lead,backend"),
+        queries_himalayas=_env_list("QUERIES_HIMALAYAS", "python,full stack,tech lead"),
+        queries_remotive=_env_list("QUERIES_REMOTIVE", "python,full stack,backend"),
         sample_linkedin=_env_list("SAMPLE_QUERIES_LINKEDIN"),
         sample_indeed=_env_list("SAMPLE_QUERIES_INDEED"),
         sample_computrabajo=_env_list("SAMPLE_QUERIES_COMPUTRABAJO"),
@@ -339,6 +345,10 @@ def load_config(env_file: Path | None = None) -> Config:
         "computrabajo": _env_bool("ENABLE_COMPUTRABAJO", True),
         "indeed": _env_bool("ENABLE_INDEED", True),
         "glassdoor": _env_bool("ENABLE_GLASSDOOR", True),
+        "getonboard": _env_bool("ENABLE_GETONBOARD", True),
+        "himalayas": _env_bool("ENABLE_HIMALAYAS", True),
+        "remotive": _env_bool("ENABLE_REMOTIVE", True),
+        "weworkremotely": _env_bool("ENABLE_WEWORKREMOTELY", True),
         "aira": _env_bool("ENABLE_AIRA", True),   # antes faltaba: el barrido nunca corría AIRA
     }
     premium_hours = [int(h) for h in _env_list("PREMIUM_TICK_HOURS_UTC", "00,12")]

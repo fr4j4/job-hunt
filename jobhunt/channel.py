@@ -34,7 +34,9 @@ log = get_logger(__name__)
 
 _ABBR_FUENTE = {"linkedin": "LinkedIn", "computrabajo": "CB", "indeed": "Indeed",
                 "glassdoor": "Glassdoor", "laborum": "Laborum", "jooble": "Jooble",
-                "accenture": "Accenture", "aira": "AIRA"}
+                "accenture": "Accenture", "aira": "AIRA",
+                "getonboard": "GetOnBoard", "himalayas": "Himalayas", "remotive": "Remotive",
+                "weworkremotely": "WWR"}
 
 
 def _fuente(row: dict) -> str:

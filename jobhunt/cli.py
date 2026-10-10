@@ -88,7 +88,8 @@ def cmd_run(cfg, notify: bool = True, on_phase=None, stop_event: threading.Event
         lots_done = ia_failures = breaker_trips = channel_posts = 0
 
         from .sources import (linkedin, computrabajo, indeed, glassdoor, laborum,
-                              jooble, accenture, aira)
+                              jooble, accenture, aira, getonboard, himalayas, remotive,
+                              weworkremotely)
         from .relevance import filter_offers, title_is_obvious_nontech
         from .sources import errores
         s = cfg.search
@@ -147,6 +148,23 @@ def cmd_run(cfg, notify: bool = True, on_phase=None, stop_event: threading.Event
             phase("laborum")
             jobs += _fuente_segura("laborum",
                 lambda: laborum.jobs(s.queries_laborum, "perfil:", on_query=qcb("laborum")))
+        # APIs abiertas (sin Cloudflare, livianas): corren en cada barrido
+        if cfg.sources.get("getonboard", True):
+            phase("getonboard")
+            jobs += _fuente_segura("getonboard",
+                lambda: getonboard.jobs(s.queries_getonboard, "perfil:", on_query=qcb("getonboard")))
+        if cfg.sources.get("himalayas", True):
+            phase("himalayas")
+            jobs += _fuente_segura("himalayas",
+                lambda: himalayas.jobs(s.queries_himalayas, "perfil:", on_query=qcb("himalayas")))
+        if cfg.sources.get("remotive", True):
+            phase("remotive")
+            jobs += _fuente_segura("remotive",
+                lambda: remotive.jobs(s.queries_remotive, "perfil:", on_query=qcb("remotive")))
+        if cfg.sources.get("weworkremotely", True):
+            phase("weworkremotely")
+            jobs += _fuente_segura("weworkremotely",
+                lambda: weworkremotely.jobs(None, "perfil:", on_query=qcb("weworkremotely")))
         if cfg.sources.get("linkedin"):
             phase("linkedin")
             jobs += _fuente_segura("linkedin",
