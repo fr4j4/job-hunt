@@ -104,6 +104,7 @@
   {#if estado === 'vacio' || estado === 'oculto'}
     <div class="vacio" style:min-height="{Math.min(alto, 140)}px">{mensaje || 'Sin datos para esta selección.'}</div>
   {:else if verTabla && tabla}
+    {#if !tablaDirecta}<p style:margin="0 0 6px"><button class="btn chico" onclick={() => (verTabla = false)}>← Volver al gráfico</button></p>{/if}
     <div class="scroll-x" style:max-height="{alto + 40}px" style:overflow-y="auto">
       <table class="tabla">
         <thead><tr>{#each tabla.columnas as c}<th>{c}</th>{/each}</tr></thead>
@@ -113,7 +114,8 @@
   {:else if children}
     <div class="lienzo" class:atenuado={cargando}>{@render children()}</div>
   {:else}
-    <div class="lienzo" class:atenuado={cargando} bind:this={host} style:height="{alto}px" role="img" aria-label={titulo}></div>
+    <div class="lienzo" class:atenuado={cargando} bind:this={host} style:height="{alto}px" role="img" tabindex={tabla ? 0 : -1}
+         aria-label="{titulo}{tabla ? '. Enter para ver los datos como tabla' : ''}" onkeydown={(e) => { if (e.key === 'Enter' && tabla) verTabla = true; }}></div>
   {/if}
 
   {#if cobertura || aviso}

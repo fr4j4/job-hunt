@@ -1,5 +1,5 @@
-import type { HistoriaDiaria, Supervivencia } from '../lib/tipos';
-import { v02, v16, v60, v61, v62, v63 } from './dinamica';
+import type { HistoriaDiaria, HistoriaTechs, Supervivencia } from '../lib/tipos';
+import { v02, v16, v24, v60, v61, v62, v63 } from './dinamica';
 import { v40, v41, v42 } from './empresas';
 import { v72, v73, v80, v81 } from './posicion';
 import { apilado100, barrasDim, rolSeniority } from './roles';
@@ -13,8 +13,8 @@ export const PESTANAS = [['resumen', 'Resumen'], ['sueldos', 'Sueldos'], ['tecno
 export type Pestana = (typeof PESTANAS)[number][0];
 
 export interface Historia { diaria: HistoriaDiaria | null; p25: HistoriaDiaria | null; p50: HistoriaDiaria | null; p75: HistoriaDiaria | null;
-                            cerradas: HistoriaDiaria | null; porFamilia: HistoriaDiaria | null; surv: Supervivencia | null }
-export const historiaVacia = (): Historia => ({ diaria: null, p25: null, p50: null, p75: null, cerradas: null, porFamilia: null, surv: null });
+                            cerradas: HistoriaDiaria | null; porFamilia: HistoriaDiaria | null; surv: Supervivencia | null; techs: HistoriaTechs | null }
+export const historiaVacia = (): Historia => ({ diaria: null, p25: null, p50: null, p75: null, cerradas: null, porFamilia: null, surv: null, techs: null });
 
 const cond = (x: Ctx) => [
   apilado100(x, 'V-50', '¿Cuánta oferta es remota?', 'rol_familia', 'modalidad', { subtitulo: 'Modalidad por familia de rol · gris: la oferta no la informa', nota: 'Incluye modalidad inferida del texto cuando la fuente no la trae' }),
@@ -32,7 +32,7 @@ export function especs(tab: Pestana, x: Ctx, h: Historia): EspecGrafico[] {
     case 'sueldos': return [v10(x), sueldosPor(x, 'rol_familia', 'V-11', '¿Cuánto paga cada familia de rol?'), sueldosPor(x, 'seniority', 'V-12', '¿Cuánto sube con la seniority?'),
       sueldosPor(x, 'modalidad', 'V-13', '¿Remoto paga distinto?'), transparencia(x, 'fuente', 'V-14', '¿Qué fuente publica el sueldo?'),
       transparencia(x, 'rol_familia', 'V-14b', '¿Qué familias publican el sueldo?'), v15(x)];
-    case 'tecnologias': return [v20(x), v21(x), v22(x), v23(x), v25(x)];
+    case 'tecnologias': return [v20(x), v21(x), v22(x), v23(x), v25(x), v24(x, h.techs)];
     case 'roles': return [rolSeniority(x, 'ofertas'), rolSeniority(x, 'sueldo_p50'),
       apilado100(x, 'V-32', '¿Qué fuente trae qué tipo de rol?', 'fuente', 'rol_familia', { subtitulo: 'Familias de rol que publica cada fuente (100 %)' }),
       apilado100(x, 'V-33', '¿Qué tan bien encajan, por familia?', 'rol_familia', 'encaje', { ordinal: true, subtitulo: 'Veredicto de encaje de la IA (100 %) · gris: sin evaluar' })];

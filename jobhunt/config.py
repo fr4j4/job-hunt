@@ -220,6 +220,7 @@ class WebCfg:
     token_minutes: int = 10           # vigencia del enlace de un solo uso que manda /web
     session_days: int = 7             # vigencia de la sesión del navegador
     cookie_secure: bool | None = None  # None = auto (Secure si public_url es https)
+    ui: str = "legacy"                # "v2": la raíz (/) entra a la interfaz nueva; la clásica queda en /?clasica=1
 
 
 @dataclass
@@ -230,6 +231,7 @@ class AnalyticsCfg:
     band_min: int = 300_000           # sueldo mensual CLP plausible para estadística
     band_max: int = 15_000_000
     bootstrap_b: int = 500
+    avisos_estado: bool = False       # Telegram: avisa si una oferta que sigues (guardada/postulada/entrevista) pudo cerrar
 
 
 @dataclass
@@ -434,6 +436,7 @@ def load_config(env_file: Path | None = None) -> Config:
         public_url=_env("WEB_PUBLIC_URL", "").strip().rstrip("/"),
         token_minutes=max(1, min(60, _env_int("WEB_TOKEN_MINUTES", 10))),
         session_days=max(1, min(90, _env_int("WEB_SESSION_DAYS", 7))),
+        ui="v2" if _env("WEB_UI", "legacy").strip().lower() == "v2" else "legacy",
         cookie_secure=(None if _env("WEB_COOKIE_SECURE", "").strip() == ""
                        else _env_bool("WEB_COOKIE_SECURE", False)),
     )
@@ -444,6 +447,7 @@ def load_config(env_file: Path | None = None) -> Config:
         band_min=_env_int("ANALYTICS_BAND_MIN", 300_000),
         band_max=_env_int("ANALYTICS_BAND_MAX", 15_000_000),
         bootstrap_b=max(50, _env_int("ANALYTICS_BOOTSTRAP_B", 500)),
+        avisos_estado=_env_bool("ANALYTICS_AVISOS_ESTADO", False),
     )
     cfg = Config(
         profile=profile,

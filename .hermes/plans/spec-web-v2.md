@@ -1,6 +1,6 @@
 # Spec — Web v2: explorador de ofertas y análisis de mercado
 
-**Fecha:** 2026-10-10 · **Estado:** DRAFT r2 — pendiente de aprobación
+**Fecha:** 2026-10-10 · **Estado:** IMPLEMENTADA en gran parte (ver «Estado de implementación» al final)
 **Base:** `docs/PLAN-WEB-V2.md` (visión, stack, fases). Este documento es el contrato ejecutable:
 modelo semántico, esquema, motor de exploración, sistema visual, catálogo de visualizaciones,
 endpoints, criterios de aceptación, tests y tareas con ID.
@@ -989,3 +989,51 @@ por Telegram.
 6. **Familias de rol** (§2.2): ¿te sirve la agrupación o quieres otra? Afecta los colores y casi todos
    los gráficos.
 7. **¿Reemplazar el PDF de `/report`** por la impresión de Análisis, o mantener ambos?
+
+
+---
+
+## 18. Estado de implementación (2026-10-10)
+
+Verificado con: `pytest` (425 tests, incl. 11 e2e con Chromium real), `vitest` (52), `svelte-check` (0 errores) y
+`npm run check` (paleta validada en claro y oscuro). Medido sobre la DB real (1.095 ofertas).
+
+### Hecho
+
+| Área | Estado |
+|---|---|
+| **F0 datos** (§3) | Completa: columnas derivadas, `oferta_techs/tags`, `oferta_eventos`, `mercado_diario`, `mercado_tech_semanal`, `estado_oferta`, `vistas_guardadas`; materialización idempotente (~0,4 s con 1.095 filas) enganchada al barrido; `python -m jobhunt materialize [--full]`; la purga no toca la historia (test). |
+| **T0-1** | `years_official` solo viene del JSON-LD (casi nunca): se deriva `exp_anios` del texto (307 ofertas). `staffing` nunca se escribía: ahora se deriva con la misma regla del score (32). |
+| **F1 API** (§4) | Completa: snapshot columnar con diccionarios + ETag + gzip, detalle, historia (diaria/techs/eventos/supervivencia KM), fuentes con cobertura, perfil, semántica, buscar, estado y vistas (CSRF doble). |
+| **F2 front y motor** (§5–7) | Completa: motor con filtros por máscara, filtro cruzado, agregación con degradación, paridad estadística Python↔TS (vectores compartidos, incl. PRNG y bootstrap), paleta validada en CI, `Grafico` con los 10 puntos de §7.6 salvo el teclado interno (ver pendientes). |
+| **F3 ofertas** (§10) | Lista virtualizada, tarjetas, maestro-detalle, kanban (arrastrar/soltar y selector), comparador de 2–4, detalle con sueldo entre pares/cascada/historial, export CSV con escape de fórmulas, atajos `/ j k s x Esc`, mini-histogramas en los rangos (V-96). |
+| **F4 análisis** (§8) | V-02, 10–16, 20–25, 30–33, 40–42, 50–55, 60–63, 70–73, 80–81, 24 (con gating de historia). |
+| **F5 explorador** (§9.3–9.5) | Recomendador de forma con barandas, spec en la URL, vistas guardadas, 5 ejemplos, comparación A/B de segmentos con veredicto honesto. |
+| **F6 seguimiento** | Estados, kanban, notas; avisos de Telegram opt-in (`ANALYTICS_AVISOS_ESTADO`, una vez por oferta). |
+| **Corte** (§14) | SPA en `/v2`; `WEB_UI=v2` hace que `/` abra la nueva (la clásica queda en `/?clasica=1`). |
+
+### Cambios respecto al texto de la spec (decisiones tomadas al implementar)
+
+1. **Tooltip**: en vez de un componente Svelte aparte, se usa el tooltip de ECharts con `formatter` que devuelve **nodos DOM** armados con `textContent` (`viz/tip.ts`): mismo objetivo (sin `innerHTML`), menos código. Verificado en e2e con un título hostil.
+2. **Eventos**: se agregó la tabla `oferta_prev` (último estado conocido por oferta, sin FK) en vez de leer el último evento por tipo: más simple y permite detectar cambios sin duplicar el baseline.
+3. **Snapshot**: presupuesto real ≤150 KB gz (medido 123 KB / 607 KB crudo con 1.093 filas); el de 100 KB de la r1 no era alcanzable con título + URL + resumen de 240 caracteres.
+4. **Paleta ordinal oscura**: `#184f95 → #256abf → #3987e5 → #6da7ec` (bajo→alto); la derivada de la clara no pasaba el salto mínimo de luminosidad.
+5. **Barras de ranking**: no incluyen la barra «Otras (N)» (dominaba la escala); se informa «N más no se muestran» en el pie.
+6. **Vite 8 / TypeScript 6**: `svelte-check` aún no soporta TS 7; se fijó `typescript@~6`.
+7. `V-41` (tabla de empresas) se muestra como tabla directa sin gráfico; `V-82` (embudo) no se hizo (ver pendientes).
+
+### Pendiente (no implementado)
+
+- **Drill-down** con miga de pan (§9.2) y **deshacer/rehacer** global con `Ctrl+Z` (hoy: atrás/adelante del navegador).
+- **Navegación con flechas dentro de un gráfico** (hoy: foco + Enter para ver la tabla, y la tabla alternativa en todos).
+- **V-64** (calendario), **V-82** (embudo de postulaciones), mapa coroplético (fuera de alcance por spec).
+- **Tipos TS generados desde OpenAPI** (hoy escritos a mano en `lib/tipos.ts`).
+- **Hoja de impresión de Análisis** y retiro del PDF de `/report` (decisión abierta §17.7).
+- **Retiro de `/legacy`**: se mantiene la web clásica hasta confirmar paridad en uso real.
+- Las tendencias (V-02, V-16, V-24, V-60…V-62) están implementadas pero **ocultas por diseño** hasta acumular 7–42 días de historia (hoy: 1 día).
+- Backfill de historia anterior al despliegue: imposible (documentado en §3.5).
+
+### Hallazgos de datos que conviene atacar en las fuentes
+
+- Solo **22 % de las ofertas declara sueldo** (227 con sueldo válido) y **55 % no informa empresa**; `modality` falta en 62 % (la inferencia por texto recupera ~11 ofertas: precisión no medida, ver T0-5 abierta).
+- Las etiquetas de la IA mezclan categorías (p. ej. «contrato a plazo fijo» aparece como beneficio, alerta y a favor).

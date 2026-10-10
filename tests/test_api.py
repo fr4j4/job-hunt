@@ -242,3 +242,14 @@ def test_la_web_legacy_conserva_su_csp_estricta(ent):
     csp = cli.get("/").headers["content-security-policy"]
     assert "script-src" not in csp and "default-src 'none'" in csp
     assert "script-src 'self'" not in cli.get("/api/perfil").headers["content-security-policy"]
+
+
+def test_web_ui_v2_redirige_la_raiz_y_deja_la_clasica_a_mano(ent):
+    cfg, conn, cli, _ = ent
+    _entrar(conn, cli)
+    cfg.web.ui = "v2"
+    r = cli.get("/", follow_redirects=False)
+    assert r.status_code == 303 and r.headers["location"] == "/v2"
+    assert cli.get("/?clasica=1").status_code == 200
+    cfg.web.ui = "legacy"
+    assert cli.get("/").status_code == 200

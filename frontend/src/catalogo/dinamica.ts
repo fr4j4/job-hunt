@@ -1,6 +1,6 @@
 // Dinámica del mercado — "¿Se mueve rápido?" (V-02, V-16, V-60…V-63). Usa la historia acumulada del servidor.
 import { clp, fechaCorta } from '../lib/formato';
-import type { HistoriaDiaria, Supervivencia } from '../lib/tipos';
+import type { HistoriaDiaria, HistoriaTechs, Supervivencia } from '../lib/tipos';
 import { base } from '../viz/formas';
 import { lineas } from '../viz/formas';
 import { colorEntidad, FAMILIAS } from '../viz/tema';
@@ -94,4 +94,17 @@ export function v63(x: Ctx): EspecGrafico {
   if (!tot) return vacio('V-63', titulo, 'Sin ofertas en esta selección.');
   return { id: 'V-63', titulo, span: 'c6', alto: 220, subtitulo: 'Días desde la fecha de publicación (o desde que la vimos por primera vez)', cobertura: `${tot} ofertas`,
     opcion: histograma(x.c, et, cu, { color: x.c.serie[0] }), tabla: { columnas: ['Antigüedad', 'Ofertas'], filas: et.map((e, i) => [e, cu[i]]) } };
+}
+
+/** V-24 — ¿qué tecnologías suben o bajan? demanda semanal (% de ofertas con techs conocidas). Requiere 6 semanas. */
+export function v24(x: Ctx, h: HistoriaTechs | null): EspecGrafico {
+  const titulo = '¿Qué tecnologías suben o bajan?';
+  if (!h) return vacio('V-24', titulo, 'Cargando historia…', 'c12');
+  if (h.semanas_historia < 6) return { ...esperando('V-24', titulo, h.semanas_historia, 6, 'c12'), mensaje: `Acumulando historia: ${h.semanas_historia}/6 semanas. Las tendencias necesitan al menos 6 semanas de datos.` };
+  const orden = h.series.map((s) => ({ s, ult: [...s.demanda].reverse().find((v) => v !== null) ?? 0 })).sort((p, q) => q.ult - p.ult).slice(0, 8);
+  const series = orden.map(({ s }, k) => ({ nombre: s.tech, color: x.mias.has(s.tech) ? x.c.serie[Math.min(k, 7)] : x.c.neutro, valores: s.demanda, ns: s.n_base }));
+  return { id: 'V-24', titulo, span: 'c12', alto: 300, subtitulo: 'Porcentaje semanal de ofertas con tecnologías conocidas que piden cada una · en color, las de tu perfil',
+    cobertura: `${h.semanas_historia} semanas de historia`, leyenda: series.map((s) => ({ nombre: s.nombre, color: s.color })),
+    opcion: lineas(x.c, h.semanas, series, { fmt: (v) => `${Math.round(v * 100)} %`, etiquetaFecha: (w) => w.replace(/^\d+-/, '') }),
+    tabla: { columnas: ['Semana', ...series.map((s) => s.nombre)], filas: h.semanas.map((w, i) => [w, ...series.map((s) => (s.valores[i] === null ? null : Math.round((s.valores[i] as number) * 100)))]) } };
 }

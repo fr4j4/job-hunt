@@ -169,3 +169,26 @@ describe('explorador', () => {
     expect(espec.tabla!.filas.map((f) => [f[0], f[1]])).toEqual(dash.tabla!.filas.map((f) => [f[0], f[1]]));
   });
 });
+
+import { comparar as compararSeg, veredicto as veredictoSeg } from './comparar';
+describe('comparar segmentos A/B', () => {
+  const filas = [...mk(30, (i) => ({ mod: 'remoto', sueldo: 3_000_000 + (i % 5) * 100_000 })), ...mk(30, (i) => ({ id: `p${i}`, mod: 'presencial', sueldo: 1_500_000 + (i % 5) * 100_000 })),
+                 ...mk(3, (i) => ({ id: `h${i}`, mod: 'hibrido', sueldo: 2_000_000 }))];
+  it('diferencia clara cuando los intervalos no se solapan', () => {
+    const r = compararSeg(ctx(filas), 'modalidad', 'presencial', 'remoto');
+    expect(r.a.n).toBe(30); expect(r.b.n).toBe(30); expect(r.veredicto).toMatch(/no se solapan/);
+    expect(r.veredicto).toMatch(/más que Presencial/);
+  });
+  it('con muestra insuficiente NO declara diferencia', () => {
+    const r = compararSeg(ctx(filas), 'modalidad', 'hibrido', 'remoto');
+    expect(r.veredicto).toMatch(/Sin sueldos suficientes/);
+  });
+  it('intervalos solapados → sin evidencia', () => {
+    const f = [...mk(12, (i) => ({ mod: 'remoto', sueldo: 2_000_000 + (i % 6) * 50_000 })), ...mk(12, (i) => ({ id: `q${i}`, mod: 'presencial', sueldo: 2_020_000 + (i % 6) * 50_000 }))];
+    expect(compararSeg(ctx(f), 'modalidad', 'remoto', 'presencial').veredicto).toMatch(/se solapan: no hay evidencia/);
+  });
+  it('veredicto con un segmento vacío', () => {
+    const r = compararSeg(ctx(filas), 'modalidad', 'remoto', 'inexistente');
+    expect(veredictoSeg(r.a, r.b)).toMatch(/no tiene ofertas/);
+  });
+});

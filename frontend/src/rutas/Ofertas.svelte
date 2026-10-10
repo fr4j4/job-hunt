@@ -8,6 +8,7 @@
   import { api } from '../lib/api';
   import FiltrosBarra from '../componentes/FiltrosBarra.svelte';
   import Detalle from './Detalle.svelte';
+  import { comparar } from '../estado/comparar.svelte';
 
   const VISTAS = [['lista', 'Lista'], ['tarjetas', 'Tarjetas'], ['md', 'Maestro-detalle'], ['kanban', 'Kanban']] as const;
   const COLS: { id: string; t: string; num?: boolean }[] = [
@@ -117,6 +118,7 @@
   </div>
   <span class="suave tnum">{indices.length.toLocaleString('es-CL')} resultados</span>
   <span style:margin-left="auto"></span>
+  {#if comparar.ids.length}<button class="btn chico" onclick={() => ir('/comparar')}>Comparar ({comparar.ids.length})</button>{/if}
   <button class="btn chico" onclick={exportar}>Exportar CSV</button>
 </div>
 

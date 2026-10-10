@@ -253,6 +253,8 @@ def crear_app(cfg: Config) -> FastAPI:
                 orden: str = "score", sentido_q: str = Query("desc", alias="dir"), page: int = 1):
         if not _autenticado(request):
             return _sin_acceso(request)
+        if cfg.web.ui == "v2" and not request.query_params.get("clasica"):
+            return RedirectResponse("/v2", status_code=303)
         where, params = ["1=1"], []
         if not inactivas:
             where.append("active = 1")

@@ -7,6 +7,7 @@
   import Analisis from './rutas/Analisis.svelte';
   import Explorador from './rutas/Explorador.svelte';
   import Fuentes from './rutas/Fuentes.svelte';
+  import Comparador from './rutas/Comparador.svelte';
 
   const NAV = [['/', 'Inicio'], ['/ofertas', 'Ofertas'], ['/analisis', 'Análisis'], ['/explorador', 'Explorador'], ['/seguimiento', 'Seguimiento'], ['/fuentes', 'Fuentes']] as const;
   onMount(() => { iniciarTema(); cargar(); });
@@ -33,6 +34,7 @@
       {/each}
     </nav>
     <div class="acciones">
+      <a class="btn plano" href="/?clasica=1" title="Volver a la vista clásica">Clásica</a>
       <button class="btn plano" onclick={ciclarTema} title="Tema: {ui.tema}" aria-label="Cambiar tema (actual: {ui.tema})">{iconoTema}</button>
       <button class="btn plano" onclick={salir}>Salir</button>
     </div>
@@ -49,6 +51,7 @@
     {:else if sec === 'ofertas'}<Ofertas />
     {:else if sec === 'analisis'}<Analisis />
     {:else if sec === 'explorador'}<Explorador />
+    {:else if sec === 'comparar'}<Comparador />
     {:else if sec === 'fuentes'}<Fuentes />
     {:else}<div class="centro tarjeta"><h1>No encontrada</h1><p><a href="{BASE}">Volver al inicio</a></p></div>{/if}
   </main>

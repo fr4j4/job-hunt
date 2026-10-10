@@ -12,6 +12,9 @@
   import { base } from '../viz/formas';
   import Grafico from '../viz/Grafico.svelte';
   import EstadoBotones from '../componentes/EstadoBotones.svelte';
+  import { alternarComparar, comparar, MAX_COMPARAR } from '../estado/comparar.svelte';
+  import { avisar } from '../estado/app.svelte';
+  import { ir } from '../estado/ruta.svelte';
 
   let { id, alCerrar }: { id: string; alCerrar?: () => void } = $props();
   let d = $state<DetalleOferta | null>(null);
@@ -107,6 +110,10 @@
       {:else}<span style:color="var(--mal)">✖ no pasa el filtro del canal</span>{/if}
     </div>
     {#if url}<p><a class="btn primario" href={url} target="_blank" rel="noopener noreferrer">Ver y postular ↗</a></p>{/if}
+    <div class="chips" style:margin-bottom="6px">
+      <button class="btn chico" aria-pressed={comparar.ids.includes(d.id)} onclick={() => { if (!alternarComparar(d!.id)) avisar(`Máximo ${MAX_COMPARAR} ofertas para comparar`); }}>{comparar.ids.includes(d.id) ? '✓ En la comparación' : '＋ Agregar a comparación'}</button>
+      {#if comparar.ids.length >= 2}<button class="btn chico primario" onclick={() => ir('/comparar')}>Comparar ({comparar.ids.length})</button>{/if}
+    </div>
     <EstadoBotones id={d.id} actual={d.estado?.estado ?? ''} nota={d.estado?.nota ?? ''} />
 
     <h2 style:margin-top="14px">Datos</h2>

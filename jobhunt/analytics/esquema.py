@@ -55,6 +55,8 @@ _TABLAS = (
     """CREATE TABLE IF NOT EXISTS vistas_guardadas (
         id INTEGER PRIMARY KEY AUTOINCREMENT, nombre TEXT NOT NULL UNIQUE,
         tipo TEXT NOT NULL, spec TEXT NOT NULL, creada TEXT NOT NULL)""",
+    """CREATE TABLE IF NOT EXISTS aviso_estado (
+        group_id TEXT NOT NULL, tipo TEXT NOT NULL, ts TEXT NOT NULL, PRIMARY KEY (group_id, tipo)) WITHOUT ROWID""",
     """CREATE TABLE IF NOT EXISTS analytics_meta (
         clave TEXT PRIMARY KEY, valor TEXT NOT NULL)""",
 )

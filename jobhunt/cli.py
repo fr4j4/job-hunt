@@ -293,6 +293,8 @@ def cmd_run(cfg, notify: bool = True, on_phase=None, stop_event: threading.Event
             try:
                 from .analytics.materializar import materializar
                 materializar(conn, cfg, scan_id=row_id)
+                from .analytics.avisos import avisar_cierres
+                avisar_cierres(conn, cfg, _tg_api_for_channel(cfg))
             except Exception as e:
                 log.warning("analytics falló (barrido continúa): %s", e)
                 try:

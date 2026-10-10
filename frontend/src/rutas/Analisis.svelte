@@ -41,8 +41,15 @@
     cargada = true;
     Promise.all([api.diaria('n_nuevas'), api.diaria('n_cerradas'), api.diaria('n_activas', 'rol_familia'), api.diaria('sueldo_p50'), api.diaria('sueldo_p25'),
                  api.diaria('sueldo_p75'), api.supervivencia()]).then(([diaria, cerradas, porFamilia, p50, p25, p75, surv]) => {
-      hist = { diaria, cerradas, porFamilia, p50, p25, p75, surv };
+      hist = { diaria, cerradas, porFamilia, p50, p25, p75, surv, techs: hist.techs };
     }).catch(() => (cargada = false));
+  });
+
+  let techsCargadas = false;
+  $effect(() => {
+    if (tab !== 'tecnologias' || techsCargadas || !app.almacen) return;
+    techsCargadas = true;
+    api.techsSemanal([]).then((techs) => (hist = { ...hist, techs })).catch(() => (techsCargadas = false));
   });
 
   const lista = $derived(ctx ? especs(tab, ctx, hist) : []);

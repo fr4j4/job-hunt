@@ -10,6 +10,7 @@
   import type { Ctx } from '../catalogo/comun';
   import FiltrosBarra from '../componentes/FiltrosBarra.svelte';
   import Grafico from '../viz/Grafico.svelte';
+  import ComparaSegmentos from '../componentes/ComparaSegmentos.svelte';
 
   const f = $derived.by(() => { void ruta.search; return filtrosActuales(); });
   const p = $derived.by(() => { void ruta.search; return params(); });
@@ -78,6 +79,8 @@
     <p class="suave">Definiciones: {app.semantica?.metricas[spec.metrica]?.denominador ? `denominador = ${app.semantica.metricas[spec.metrica].denominador}; ` : ''}mínimo de ofertas = {app.semantica?.metricas[spec.metrica]?.min_n ?? 1}.</p>
   </details>
 {/if}
+
+{#if ctx}<ComparaSegmentos x={ctx} />{/if}
 
 <div class="grilla" style:margin-top="12px">
   <section class="tarjeta c6"><h2>Preguntas de ejemplo</h2>

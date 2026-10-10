@@ -139,3 +139,23 @@ def test_sin_sesion_la_spa_no_se_sirve(servidor):
     import requests
     _, base = servidor
     assert requests.get(base + "/v2").status_code == 401 and requests.get(base + "/api/snapshot").status_code == 401
+
+
+def test_comparador_de_ofertas(pagina):
+    pagina.goto(pagina.base + "/v2/ofertas"); pagina.wait_for_selector(".vlist .vfila")
+    for k in (1, 2):
+        pagina.locator(".vlist .vfila").nth(k).click(); pagina.wait_for_selector(".drawer h1")
+        pagina.click(".drawer button:has-text('Agregar a comparación')"); pagina.keyboard.press("Escape"); pagina.wait_for_timeout(200)
+    # la selección vive en memoria: se mantiene al navegar dentro de la SPA (no con una recarga completa)
+    pagina.click("button:has-text('Comparar (2)')"); pagina.wait_for_selector("table[aria-label='Comparación de ofertas']")
+    assert pagina.locator("table[aria-label='Comparación de ofertas'] thead th").count() == 3      # etiqueta + 2 ofertas
+
+
+def test_comparar_segmentos_con_veredicto_honesto(pagina):
+    pagina.goto(pagina.base + "/v2/explorador"); pagina.wait_for_selector("[data-testid=veredicto]")
+    assert pagina.inner_text("[data-testid=veredicto]")        # nunca vacío: o hay diferencia, o dice por qué no se puede afirmar
+
+
+def test_clasica_sigue_disponible(pagina):
+    pagina.goto(pagina.base + "/?clasica=1")
+    assert pagina.locator("table.responsiva").count() == 1

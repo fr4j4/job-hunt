@@ -186,3 +186,28 @@ def test_exp_anios_y_staffing_se_derivan_donde_la_fuente_no_los_trae(ent):
     materializar(conn, cfg, ahora=AHORA)
     fila = lambda g: tuple(conn.execute("SELECT exp_anios, staffing FROM ofertas WHERE group_id=?", (g,)).fetchone())
     assert fila(a) == (5, 0) and fila(b) == (3, 1)
+
+
+def test_avisos_de_seguimiento_solo_ofertas_que_sigues_y_una_vez(ent):
+    from jobhunt.analytics.avisos import avisar_cierres
+    cfg, conn = ent
+    cfg.analytics.avisos_estado = True
+    cfg.telegram.bot_token, cfg.telegram.chat_id = "t", "1"
+    a = _oferta(conn, "Dev <b>X</b>", empresa="Acme")
+    b = _oferta(conn, "Dev Y")
+    c = _oferta(conn, "Dev Z")
+    for g, est in ((a, "guardada"), (b, "descartada")):
+        conn.execute("INSERT INTO estado_oferta VALUES (?,?,?,?)", (g, est, "", "2026-10-10T00:00:00Z"))
+    conn.commit()
+    materializar(conn, cfg, ahora=AHORA)
+    for g in (a, b, c):
+        conn.execute("UPDATE ofertas SET active=0 WHERE group_id=?", (g,))
+    conn.commit()
+    materializar(conn, cfg, ahora=AHORA)
+    enviados = []
+    api = lambda m, p: enviados.append(p) or {"ok": True}      # noqa: E731
+    assert avisar_cierres(conn, cfg, api) == 1                  # solo `a`: `b` descartada, `c` sin seguimiento
+    assert "Dev &lt;b&gt;X&lt;/b&gt;" in enviados[0]["text"] and "Dev Y" not in enviados[0]["text"]   # HTML escapado
+    assert avisar_cierres(conn, cfg, api) == 0 and len(enviados) == 1                                  # una sola vez
+    cfg.analytics.avisos_estado = False
+    assert avisar_cierres(conn, cfg, api) == 0                                                          # opt-in

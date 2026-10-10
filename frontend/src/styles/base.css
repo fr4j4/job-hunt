@@ -171,3 +171,6 @@ h1 { font-size: 20px; margin: 0 0 4px; } h2 { font-size: 16px; margin: 0 0 8px; 
   .filtros .buscar { flex: 1 1 100%; max-width: none; }
   .resultado { margin-left: 0; width: 100%; }
 }
+
+.minihist { display: flex; align-items: flex-end; gap: 2px; height: 34px; margin: 4px 0 6px; }
+.minihist i { flex: 1; background: var(--eje); border-radius: 2px 2px 0 0; min-height: 1px; display: block; }

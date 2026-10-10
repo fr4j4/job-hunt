@@ -70,6 +70,19 @@
     return todas.filter((o) => !q || o.valor.toLowerCase().includes(q))
       .sort((x, y) => (x.valor === '' ? 1 : y.valor === '' ? -1 : y.n - x.n)).slice(0, 80);
   }
+  // V-96: distribución del valor DENTRO del filtro de rango (se recalcula con los demás filtros)
+  function minihist(id: 'sueldo' | 'score' | 'antiguedad', bins = 16): number[] {
+    if (!a) return [];
+    const col = id === 'sueldo' ? a.sueldo : id === 'score' ? a.score : a.antiguedad, m = mascara(a, f, [id]);
+    let mx = id === 'score' ? 100 : 0;
+    if (id !== 'score') for (let i = 0; i < a.n; i++) if (m[i] && !Number.isNaN(col[i])) mx = Math.max(mx, col[i]);
+    if (id === 'sueldo') mx = Math.min(mx, 6_000_000);
+    if (id === 'antiguedad') mx = Math.min(mx, 60);
+    const out = new Array(bins).fill(0);
+    for (let i = 0; i < a.n; i++) if (m[i] && !Number.isNaN(col[i]) && mx > 0) out[Math.min(bins - 1, Math.floor((col[i] / mx) * bins))]++;
+    return out;
+  }
+  const maxv = (h: number[]) => Math.max(1, ...h);
   const chips = $derived(Object.entries(f.sel).filter(([, v]) => v.length));
   const rangoTxt = (id: string, r: [number | null, number | null]) =>
     id === 'sueldo' ? `Sueldo ${r[0] ? '≥ $' + (r[0] / 1e6).toLocaleString('es-CL') + ' M' : ''} ${r[1] ? '≤ $' + (r[1] / 1e6).toLocaleString('es-CL') + ' M' : ''}`
@@ -124,6 +137,7 @@
         <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
         <div class="popover" onclick={(e) => e.stopPropagation()} style:min-width="270px">
           <div class="suave">Sueldo mensual (millones CLP)</div>
+          <div class="minihist" aria-hidden="true">{#each minihist('sueldo') as v}<i style:height="{(v / maxv(minihist('sueldo'))) * 100}%"></i>{/each}</div>
           <div class="fila">
             <input class="input" type="number" step="0.1" min="0" placeholder="mín" style:width="90px" value={valorRango('sueldo', 0, 1e6)} onchange={(e) => rango('sueldo', 0, e.currentTarget.value, 1e6)}>
             <span>a</span>
@@ -131,12 +145,14 @@
           </div>
           <label><input type="checkbox" checked={f.conSueldo} onchange={(e) => aplicar({ ...filtrosActuales(), conSueldo: e.currentTarget.checked })}> Solo con sueldo declarado</label>
           <div class="suave">Puntaje de encaje</div>
+          <div class="minihist" aria-hidden="true">{#each minihist('score') as v}<i style:height="{(v / maxv(minihist('score'))) * 100}%"></i>{/each}</div>
           <div class="fila">
             <input class="input" type="number" min="0" max="100" placeholder="mín" style:width="90px" value={valorRango('score', 0)} onchange={(e) => rango('score', 0, e.currentTarget.value)}>
             <span>a</span>
             <input class="input" type="number" min="0" max="100" placeholder="máx" style:width="90px" value={valorRango('score', 1)} onchange={(e) => rango('score', 1, e.currentTarget.value)}>
           </div>
           <div class="suave">Antigüedad máxima (días)</div>
+          <div class="minihist" aria-hidden="true">{#each minihist('antiguedad') as v}<i style:height="{(v / maxv(minihist('antiguedad'))) * 100}%"></i>{/each}</div>
           <input class="input" type="number" min="0" placeholder="días" style:width="90px" value={valorRango('antiguedad', 1)} onchange={(e) => rango('antiguedad', 1, e.currentTarget.value)}>
         </div>
       {/if}
