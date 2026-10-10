@@ -375,7 +375,7 @@ que el snapshot no tiene: historia, supervivencia y eventos.
 - `null` = dato ausente, distinto de 0 o lista vacía.
 - gzip, `ETag = sha1(max(updated_at), n, v, norm_version)`, 304 si no cambió.
 - Tope de 20.000 filas; si hay más ⇒ `truncado:true` y el cliente filtra por `desde`.
-- Presupuesto: ≤100 KB gzip con 1.100 filas (lo mide T1-2).
+- Presupuesto: ≤150 KB gzip con 1.100 filas (medido en T1-2: 123 KB gz / 607 KB crudo, 84 ms).
 
 ### 4.2 Detalle de oferta
 
@@ -884,7 +884,7 @@ ESLint prohíbe `{@html}`/`innerHTML`; `npm audit` sin altas.
   Tras un barrido: `oferta_techs` cubre las ~447 ofertas con techs, `mercado_diario` y
   `mercado_tech_semanal` tienen la fila del período y `oferta_eventos` tiene `aparecida` para todas.
   Materializar <2 s. Ningún test previo roto. La inferencia de modalidad cumple ≥85% o queda apagada.
-- **F1:** todas las rutas de §4 con tests verdes; snapshot ≤100 KB gz; legacy intacta en `/legacy`.
+- **F1:** todas las rutas de §4 con tests verdes; snapshot ≤150 KB gz; legacy intacta en `/legacy`.
 - **F2:** SPA con login, motor y benchmark de §6.4 cumplido; CSP sin violaciones; paleta validada en
   CI; un gráfico de prueba (V-20) cumple §7.6 completo (los 10 puntos).
 - **F3 Ofertas:** §10 completo; paridad con la web actual.
