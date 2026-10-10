@@ -288,6 +288,18 @@ def cmd_run(cfg, notify: bool = True, on_phase=None, stop_event: threading.Event
                 except Exception as e:
                     log.warning("canal falló (barrido continúa): %s", e)
 
+        # analítica (web v2): derivadas + historia. Nunca tumba el barrido.
+        if cfg.analytics.enabled:
+            try:
+                from .analytics.materializar import materializar
+                materializar(conn, cfg, scan_id=row_id)
+            except Exception as e:
+                log.warning("analytics falló (barrido continúa): %s", e)
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+
         # digest: solo >= ALERT_MIN_SCORE
         threshold = cfg.alerts.min_score
         alerts = conn.execute(
@@ -439,6 +451,15 @@ def main():
         cmd_rescore(cfg)
     elif cmd == "enrich":
         cmd_enrich(cfg)
+    elif cmd == "materialize":
+        # python -m jobhunt materialize [--full] — recalcula derivadas, historia y agregados
+        from .analytics.materializar import materializar
+        conn = database.connect(cfg)
+        try:
+            database.init_db(conn)
+            print(materializar(conn, cfg, full="--full" in sys.argv))
+        finally:
+            conn.close()
     elif cmd == "web":
         from .web.app import servir
         servir(cfg)             # python -m jobhunt web — acceso con /web en el bot

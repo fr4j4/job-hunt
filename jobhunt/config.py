@@ -223,6 +223,16 @@ class WebCfg:
 
 
 @dataclass
+class AnalyticsCfg:
+    enabled: bool = True
+    close_after_sweeps: int = 6       # barridos de su fuente sin verla → evento analítico 'cerrada'
+    infer_modality: bool = True       # fallback de modalidad por texto (modality_source='inferida')
+    band_min: int = 300_000           # sueldo mensual CLP plausible para estadística
+    band_max: int = 15_000_000
+    bootstrap_b: int = 500
+
+
+@dataclass
 class Config:
     profile: Profile
     scoring: Scoring
@@ -237,6 +247,7 @@ class Config:
     relevance: RelevanceCfg
     channel: ChannelCfg
     web: WebCfg = field(default_factory=WebCfg)
+    analytics: AnalyticsCfg = field(default_factory=AnalyticsCfg)
     jooble_api_key: str = ""
     aira_feeds: list[str] = field(default_factory=list)
     project_root: Path = PROJECT_ROOT
@@ -426,6 +437,14 @@ def load_config(env_file: Path | None = None) -> Config:
         cookie_secure=(None if _env("WEB_COOKIE_SECURE", "").strip() == ""
                        else _env_bool("WEB_COOKIE_SECURE", False)),
     )
+    analytics = AnalyticsCfg(
+        enabled=_env_bool("ANALYTICS_ENABLED", True),
+        close_after_sweeps=max(1, _env_int("ANALYTICS_CLOSE_AFTER_SWEEPS", 6)),
+        infer_modality=_env_bool("ANALYTICS_INFER_MODALITY", True),
+        band_min=_env_int("ANALYTICS_BAND_MIN", 300_000),
+        band_max=_env_int("ANALYTICS_BAND_MAX", 15_000_000),
+        bootstrap_b=max(50, _env_int("ANALYTICS_BOOTSTRAP_B", 500)),
+    )
     cfg = Config(
         profile=profile,
         scoring=scoring,
@@ -440,6 +459,7 @@ def load_config(env_file: Path | None = None) -> Config:
         relevance=relevance,
         channel=channel,
         web=web,
+        analytics=analytics,
         jooble_api_key=jooble_key,
         aira_feeds=_env_list("AIRA_FEEDS", "walmart,cencosud_scotiabank,tottus,entel,ripley,itau,bancoestado,wom,codelco,copec,cencosud"),
     )

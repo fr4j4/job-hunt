@@ -145,6 +145,8 @@ def init_db(conn: sqlite3.Connection) -> None:
                     # derivadas/operativas: un rescore o el marcado del canal no editan la oferta
                     "score", "market_score", "date_canonical", "staffing",
                     "notified_channel_at", "fetch_fails"}
+    from .analytics.esquema import COLUMNAS_OFERTAS
+    _sin_auditar |= {c for c, _ in COLUMNAS_OFERTAS}   # derivadas de analytics: no son "edición" de la oferta
     cols_cont = [r[1] for r in conn.execute("PRAGMA table_info(ofertas)") if r[1] not in _sin_auditar]
     cambio = " OR ".join(f'NEW."{c}" IS NOT OLD."{c}"' for c in cols_cont)
     conn.execute("DROP TRIGGER IF EXISTS trg_ofertas_updated")
@@ -189,6 +191,8 @@ def init_db(conn: sqlite3.Connection) -> None:
     for col in ("lots_done", "ia_failures", "breaker_trips", "channel_posts"):
         if col not in cols_sl:
             conn.execute(f"ALTER TABLE scan_log ADD COLUMN {col} INTEGER DEFAULT 0")
+    from .analytics.esquema import asegurar_esquema as _esquema_analitico
+    _esquema_analitico(conn)
     conn.commit()
 
 
