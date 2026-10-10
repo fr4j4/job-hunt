@@ -10,6 +10,7 @@ from ...config import Config
 from ...domain.fechas import age_days
 
 VERSION = 2
+REV = 3   # sube cuando cambia el CUERPO sin cambiar los datos (entra en el ETag; si no, el navegador reutiliza la respuesta vieja)
 LIMITE = 20000
 
 COLUMNAS = ['id',
@@ -82,7 +83,7 @@ def etag(conn) -> str:
     n, mx = conn.execute("SELECT COUNT(*), COALESCE(MAX(updated_at),'') FROM ofertas").fetchone()
     corrida = conn.execute("SELECT valor FROM analytics_meta WHERE clave='ultimo_inicio'").fetchone()
     est = conn.execute("SELECT COUNT(*), COALESCE(MAX(actualizado),'') FROM estado_oferta").fetchone()
-    base = f"{VERSION}|{NV}|{n}|{mx}|{corrida[0] if corrida else ''}|{est[0]}|{est[1]}"
+    base = f"{VERSION}.{REV}|{NV}|{n}|{mx}|{corrida[0] if corrida else ''}|{est[0]}|{est[1]}"
     return '"' + hashlib.sha1(base.encode()).hexdigest()[:20] + '"'
 
 
