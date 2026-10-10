@@ -220,7 +220,7 @@ class WebCfg:
     token_minutes: int = 10           # vigencia del enlace de un solo uso que manda /web
     session_days: int = 7             # vigencia de la sesión del navegador
     cookie_secure: bool | None = None  # None = auto (Secure si public_url es https)
-    ui: str = "legacy"                # "v2": la raíz (/) entra a la interfaz nueva; la clásica queda en /?clasica=1
+    ui: str = "v2"                    # "v2" (def.): la raíz (/) entra a la interfaz nueva; la clásica queda en /?clasica=1
 
 
 @dataclass
@@ -436,7 +436,7 @@ def load_config(env_file: Path | None = None) -> Config:
         public_url=_env("WEB_PUBLIC_URL", "").strip().rstrip("/"),
         token_minutes=max(1, min(60, _env_int("WEB_TOKEN_MINUTES", 10))),
         session_days=max(1, min(90, _env_int("WEB_SESSION_DAYS", 7))),
-        ui="v2" if _env("WEB_UI", "legacy").strip().lower() == "v2" else "legacy",
+        ui="legacy" if _env("WEB_UI", "v2").strip().lower() == "legacy" else "v2",
         cookie_secure=(None if _env("WEB_COOKIE_SECURE", "").strip() == ""
                        else _env_bool("WEB_COOKIE_SECURE", False)),
     )

@@ -26,6 +26,7 @@ HOSTIL = "Dev <script>window.__xss=1</script><img src=x onerror=window.__xss=1> 
 def servidor(tmp_path_factory):
     import uvicorn
     cfg = load_config()
+    cfg.web.ui = "v2"
     cfg.data_dir = tmp_path_factory.mktemp("e2e")
     conn = database.connect(cfg)
     database.init_db(conn)
@@ -70,7 +71,7 @@ def pagina(servidor):
         pg.on("pageerror", lambda e: pg.problemas.append(str(e)))
         pg.on("request", lambda r: pg.externas.append(r.url) if not r.url.startswith(base) and not r.url.startswith("data:") and not r.url.startswith("blob:") else None)
         conn = database.connect(cfg); auth.asegurar_tablas(conn); tok = auth.crear_token_login(conn); conn.commit(); conn.close()
-        pg.goto(f"{base}/login?t={tok}"); pg.click('button:has-text("Entrar")'); pg.wait_for_url(f"{base}/")
+        pg.goto(f"{base}/login?t={tok}"); pg.click('button:has-text("Entrar")'); pg.wait_for_url(f"{base}/v2")      # WEB_UI=v2 (por defecto): el login cae en la interfaz nueva
         pg.base = base
         yield pg
         nav.close()
