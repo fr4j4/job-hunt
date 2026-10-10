@@ -77,7 +77,8 @@ def test_batch_runner_procesa_dos_lotes(conn_mem):
                 "descartados": 0}
 
     runner = BatchRunner(cfg, "v-test", worker_fn=fake_worker, consume_fn=fake_consume)
-    jobs = [{"group_id": "a", "score": 10}, {"group_id": "b", "score": 5}]
+    
+    jobs = [{"group_id": "a", "score": 10, "description": "x" * 300}, {"group_id": "b", "score": 5, "description": "x" * 300}]
     st = runner.run(conn_mem, jobs, stop_event=threading.Event())   # externo, sin set
 
     assert sorted(vistos_worker) == ["a", "b"]

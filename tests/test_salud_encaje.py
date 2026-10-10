@@ -134,7 +134,8 @@ def test_cmd_run_registra_errores_en_salud(monkeypatch, tmp_path):
     cli.cmd_run(c, notify=False)
     conn = sqlite3.connect(tmp_path / "t.sqlite")
     resumen = json.loads(conn.execute("SELECT sources_summary FROM scan_log").fetchone()[0])
-    assert resumen["linkedin"] == {"n": 0, "err": 1}
+    assert {k: resumen["linkedin"][k] for k in ("n", "err")} == {"n": 0, "err": 1}
+    assert "s" in resumen["linkedin"]   # duración de la fuente
 
 
 def test_bot_encaje_async(monkeypatch):
@@ -299,3 +300,31 @@ def test_filtros_de_paginador_no_se_corrompen(monkeypatch):
     assert key.startswith("fk") and len(f"{key}:page:99") <= 64
     assert bot._FILTROS_CB[key]["q"] == f["q"]            # texto completo, sin cortar ni '-' ambiguo
     assert bot._registrar_filtros(f) == key               # estable
+
+
+def test_cmd_run_corre_las_fuentes_en_paralelo(monkeypatch, tmp_path):
+    """Dos fuentes que se esperan mutuamente en una Barrier solo terminan si corren a la vez;
+    en serie la primera agotaría el timeout. Además on_source reporta pend→run→ok por fuente."""
+    import threading
+    import jobhunt.cli as cli
+    from jobhunt.sources import computrabajo, laborum
+    c = load_config()
+    c.data_dir = tmp_path
+    monkeypatch.setattr(type(c), "db_path", property(lambda self: tmp_path / "t.sqlite"), raising=False)
+    for k in c.sources:
+        c.sources[k] = k in ("laborum", "computrabajo")
+    c.search.mode, c.search.queries_laborum, c.search.queries_computrabajo = "profile", ["a"], ["b"]
+    c.ia.enabled, c.channel.chat_id = False, ""
+    barrera = threading.Barrier(2, timeout=5)
+
+    def _fuente(*a, **k):
+        barrera.wait()
+        return []
+    monkeypatch.setattr(laborum, "jobs", _fuente)
+    monkeypatch.setattr(computrabajo, "jobs", _fuente)
+    eventos = []
+    cli.cmd_run(c, notify=False, on_source=lambda n, e, cnt, s: eventos.append((n, e)))
+    assert not barrera.broken
+    for n in ("laborum", "computrabajo"):
+        assert [e for nn, e in eventos if nn == n] == ["pend", "run", "ok"] or \
+               [e for nn, e in eventos if nn == n] == ["pend", "run", "err"]

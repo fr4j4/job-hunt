@@ -405,7 +405,7 @@ def test_lote_techs_ia_se_persisten(mem_db, monkeypatch):
     cfg = _cfg()
     _insert(mem_db, "g1", salary="")
     monkeypatch.setattr(en, "extract_structured",
-                        lambda url: {"description": "x" * 500, "_access": "ok"})
+                        lambda url: {"description": "Stack: Python, Kubernetes y AWS. " + "x" * 500, "_access": "ok"})
     monkeypatch.setattr(en, "ia_extract_lote",
                         lambda *a, **k: ([{"idx": 1, "opinion": "x", "resumen": "r",
                                            "fit_reason": "f", "seniority_real": "s",
@@ -428,7 +428,7 @@ def test_lote_techs_ia_refresca_existente(mem_db, monkeypatch):
     mem_db.execute("UPDATE ofertas SET techs='Java;Spring' WHERE group_id='g1'")
     mem_db.commit()
     monkeypatch.setattr(en, "extract_structured",
-                        lambda url: {"description": "x" * 500, "_access": "ok"})
+                        lambda url: {"description": "Stack: Python, Kubernetes y AWS. " + "x" * 500, "_access": "ok"})
     monkeypatch.setattr(en, "ia_extract_lote",
                         lambda *a, **k: ([{"idx": 1, "opinion": "x", "resumen": "r",
                                            "fit_reason": "f", "seniority_real": "s",
@@ -464,3 +464,13 @@ def test_lote_techs_ia_vacia_no_toca(mem_db, monkeypatch):
     en.enrich_pending(mem_db, cfg, max_n=1)
     techs = mem_db.execute("SELECT techs FROM ofertas WHERE group_id='g1'").fetchone()[0]
     assert techs == ""   # IA devolvió [] → limpia
+
+
+def test_fetch_ficha_jooble_usa_el_destino(monkeypatch):
+    """Las ofertas de Jooble (/away/) se leen siguiendo el redirect al sitio del empleador."""
+    llamadas = []
+    monkeypatch.setattr(en, "_extract_jooble_destino",
+                        lambda url: llamadas.append(url) or {"_access": "ok", "description": "d" * 500})
+    r = {"group_id": "g", "title": "t", "url": "https://cl.jooble.org/away/123?p=1"}
+    info = en._fetch_ficha(r)
+    assert llamadas == [r["url"]] and info["_access"] == "ok"

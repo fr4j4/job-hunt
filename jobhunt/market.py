@@ -358,26 +358,35 @@ REPORT_STORY_SCHEMA = ('{"relato": "6-8 párrafos en texto plano orientado a per
 
 
 def _ia_call(cfg: Config, prompt: str, temperature: float = 0.3) -> dict | None:
-    """LLM con JSON forzado — mismo endpoint que ia_extract, temperature narrativa."""
+    """LLM con JSON forzado — mismo endpoint que ia_extract, temperature narrativa.
+    Si el cloud falla (modelo retirado, sin key, red) y hay IA local habilitada,
+    cae al modelo local: el fallback es la IA local."""
     import requests
-    try:
-        req = requests.post(
-            f"{cfg.ia.base_url}/chat/completions",
-            json={"model": cfg.ia.model,
-                  "messages": [
-                      {"role": "system",
-                       "content": "Eres un analista de mercado laboral tech chileno. Escribes para "
-                                  "personas que buscan empleo: tono directo, segunda persona, sin jerga "
-                                  "estadística, números incrustados en el texto. Respondes SOLO JSON válido."},
-                      {"role": "user", "content": prompt}],
-                  "temperature": temperature, "format": "json"},
-            timeout=cfg.ia.timeout,
-            headers={"Authorization": f"Bearer {cfg.ia.api_key}", "Content-Type": "application/json"})
-        content = req.json()["choices"][0]["message"]["content"]
-        return json.loads(content)
-    except Exception as e:
-        log.warning("IA narrativa falló: %s", e)
-        return None
+    system = ("Eres un analista de mercado laboral tech chileno. Escribes para "
+              "personas que buscan empleo: tono directo, segunda persona, sin jerga "
+              "estadística, números incrustados en el texto. Respondes SOLO JSON válido.")
+    messages = [{"role": "system", "content": system}, {"role": "user", "content": prompt}]
+    if cfg.ia.api_key:
+        try:
+            req = requests.post(
+                f"{cfg.ia.base_url}/chat/completions",
+                json={"model": cfg.ia.model, "messages": messages,
+                      "temperature": temperature, "format": "json"},
+                timeout=cfg.ia.timeout,
+                headers={"Authorization": f"Bearer {cfg.ia.api_key}", "Content-Type": "application/json"})
+            if req.status_code >= 400:
+                raise RuntimeError(f"HTTP {req.status_code}: {req.text[:120]}")
+            return json.loads(req.json()["choices"][0]["message"]["content"])
+        except Exception as e:
+            log.warning("IA narrativa (cloud) falló: %s", e)
+    if cfg.ia.local_enabled:
+        from .ia.client import LocalClient
+        data, err = LocalClient(cfg).chat_json(
+            messages, response_format={"type": "json_object"}, extra={"temperature": temperature})
+        if isinstance(data, dict):
+            return data
+        log.warning("IA narrativa (local) falló: %s", err)
+    return None
 
 
 def _resumen_para_ia(agg: dict) -> str:

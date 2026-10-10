@@ -158,6 +158,23 @@ def _tg_edit_or_send(cfg: Config, chat_id: int, message_id: int | None,
     return (resp or {}).get("result", {}).get("message_id")
 
 
+def _tg_edit_progreso(cfg: Config, chat_id: int, message_id: int, texto: str, limitador) -> None:
+    """Edita el mensaje de progreso SIN recrearlo: ante 429 respeta retry_after, ante
+    'not modified' no hace nada. Solo si el mensaje fue borrado deja de editar."""
+    try:
+        _tg_api(cfg, "editMessageText", {"chat_id": chat_id, "message_id": message_id,
+                                         "text": texto, "parse_mode": "HTML"})
+    except Exception as exc:
+        msg = str(exc).lower()
+        if "not modified" in msg:
+            return
+        if "429" in msg or "too many" in msg or "retry" in msg:
+            m = re.search(r"(?:retry after|retry_after\D{0,5})\s*(\d+)", msg)
+            limitador.esperar_hasta(float(m.group(1)) if m else 10.0)
+            return
+        raise
+
+
 _CAMPOS_TEXTO = {"sendMessage": "text", "editMessageText": "text"}
 
 
@@ -618,39 +635,60 @@ def _op_minutes(op: str) -> int:
 
 
 def _run_search_async(cfg: Config, chat_id: int):
-    """Barrido en background con mensaje vivo que muta por fuente/query/página."""
+    """Barrido en background con mensaje vivo: una línea por fuente (corren en paralelo),
+    barra de IA y ETA. El mensaje se edita desde UN hilo refrescador con intervalo mínimo
+    (Telegram limita las ediciones; antes cada query/página editaba y un 429 recreaba el mensaje)."""
+    import re as _re
+    from .progreso import Limitador, Progreso
     msg_id = None
+    stop_ui = threading.Event()
     try:
         _SEARCH_STATE.update(running=True, t0=time.time())
-        sent = _tg_api(cfg, "sendMessage", {"chat_id": chat_id,
-                                            "text": "🔍 <b>Búsqueda iniciada</b> — barriendo fuentes…",
+        prog, lim = Progreso(), Limitador(4.0)
+        sent = _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "text": prog.render(),
                                             "parse_mode": "HTML"})
         msg_id = (sent or {}).get("result", {}).get("message_id")
         t0 = time.time()
-        fase = {"fuente": "preparando", "query": "", "page": 0, "detail": ""}
+        _ia_re = _re.compile(r"(\d+)/(\d+)\s*·\s*lote\s*(\d+)/(\d+)")
 
         def on_phase(fuente: str, query: str = "", page: int = 0, detail: str = ""):
-            """Actualiza estado y edita el MISMO mensaje (throttle 15s)."""
-            fase.update(fuente=fuente, query=query, page=page, detail=detail)
-            nonlocal msg_id
-            if not msg_id or time.time() - t0 < 15:
-                return
-            mins = int(time.time() - t0) // 60
-            linea = f"   ▸ <b>{esc(fuente)}</b>"
-            if query:
-                linea += f' — "{esc(query[:40])}"'
-            if page:
-                linea += f" · pág {page}"
-            if fase.get("detail"):
-                linea += f"\n   {esc(fase['detail'][:60])}"
-            try:
-                msg_id = _tg_edit_or_send(cfg, chat_id, msg_id, {
-                    "text": (f"🔍 <b>Búsqueda en curso</b> ({mins}m)\n{linea}"),
-                    "parse_mode": "HTML"})
-            except Exception:
-                pass  # flood o mensaje igual → no tumba el barrido
+            """Solo actualiza el estado en memoria; la edición la hace el refrescador."""
+            if fuente == "IA complementaria":
+                m = _ia_re.search(detail or "")
+                if m:
+                    prog.fase("ia", hechas=int(m[1]), total=int(m[2]), lote=int(m[3]), lotes=int(m[4]))
+            elif fuente == "guardando ofertas":
+                prog.fase("guardando")
+            elif fuente.startswith("canal"):
+                prog.fase("canal")
+            elif query or page:
+                prog.fuente(fuente, "run", query=query, page=page)
 
-        offers, stats = _do_sweep(cfg, on_phase=on_phase)
+        def on_source(nombre: str, estado: str, n: int, segs: float):
+            prog.fuente(nombre, estado, n=n, segs=segs)
+
+        def refrescar():
+            nonlocal msg_id
+            ultimo = ""
+            while not stop_ui.wait(1.0):
+                if not msg_id or not lim.listo():
+                    continue
+                txt = prog.render()
+                if txt == ultimo:
+                    continue
+                try:
+                    _tg_edit_progreso(cfg, chat_id, msg_id, txt, lim)
+                    ultimo = txt
+                except Exception as exc:
+                    if "not found" in str(exc).lower():
+                        msg_id = None   # el usuario borró el mensaje: no se recrea
+                    # otros errores (red) → se reintenta en el siguiente ciclo
+
+        hilo_ui = threading.Thread(target=refrescar, name="tg-progreso", daemon=True)
+        hilo_ui.start()
+
+        offers, stats = _do_sweep(cfg, on_phase=on_phase, on_source=on_source)
+        stop_ui.set()
         # resumen final: borrar el mensaje vivo y mandar el resultado limpio
         if msg_id:
             try:
@@ -679,6 +717,7 @@ def _run_search_async(cfg: Config, chat_id: int):
         except Exception:
             pass
     finally:
+        stop_ui.set()
         _SEARCH_STATE.update(running=False, t0=0.0)
 
 
@@ -2010,10 +2049,10 @@ def _register_commands(cfg: Config) -> None:
 
 # ---------------------------------------------------------------- daemon loop
 
-def _do_sweep(cfg: Config, on_phase=None) -> tuple[list[dict], dict]:
+def _do_sweep(cfg: Config, on_phase=None, on_source=None) -> tuple[list[dict], dict]:
     """Barrido completo + pool refrescado. Retorna (ofertas ≥min_score, stats del scan_log)."""
     with _sweep_lock:
-        cmd_run(cfg, notify=False, on_phase=on_phase, stop_event=_STOP_EVENT)   # barrido SIN mensaje push
+        cmd_run(cfg, notify=False, on_phase=on_phase, stop_event=_STOP_EVENT, on_source=on_source)   # barrido SIN mensaje push
         conn = database.connect(cfg)
         try:
             offers = [dict(r) for r in conn.execute(

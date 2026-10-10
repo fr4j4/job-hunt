@@ -1,5 +1,5 @@
 """Indeed Chile: GraphQL app móvil."""
-import json, re, ssl, time, urllib.request
+import html, json, re, ssl, time, urllib.request
 
 _CTX = ssl._create_unverified_context()
 _HEADERS = {
@@ -105,7 +105,7 @@ def _parse_results(results, q, found_by_prefix, vistos):
         salary = ""
         if rng.get("min") or rng.get("max"):
             salary = f"{comp.get('currencyCode','')} {rng.get('min','?')}-{rng.get('max','?')} {(base.get('unitOfWork') or '').lower()}".strip()[:40]
-        desc = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", (j.get("description") or {}).get("html") or "")).strip()
+        desc = re.sub(r"\s+", " ", html.unescape(re.sub(r"<[^>]+>", " ", (j.get("description") or {}).get("html") or ""))).strip()
         fb = f"{found_by_prefix}{q}"
         out.append({"title": re.sub(r"\s+", " ", j["title"])[:150],
                     "company": (j.get("employer") or {}).get("name") or "",

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 import sqlite3
 import time
 
@@ -34,6 +35,7 @@ from .ia.prompts import (  # noqa: F401 (compat: los tests leen estos nombres en
     _prompt_opinion_local,
 )
 from .ia.schemas import _LOTE_SCHEMA  # noqa: F401 (compat)
+from .ia import validar as _val
 from .logging_setup import get_logger
 from .salarios.arbiter import SalaryArbitrator
 from .salarios.texto import sueldo_respaldado
@@ -350,6 +352,73 @@ def _extract_aira_spa(url: str) -> dict:
     return info
 
 
+# destinos de Jooble que no se pueden leer: appcast.io detrás de DataDome (captcha), fitly.work
+# (SPA que no renderiza sin sesión). No se intenta saltar el captcha: se marcan 'blocked'.
+_JOOBLE_DESTINOS_VEDADOS = ("appcast.io", "captcha-delivery.com", "fitly.work")
+_JOOBLE_SEM = threading.BoundedSemaphore(2)   # Chromium es pesado: máx 2 a la vez
+
+
+def _extract_jooble_destino(url: str) -> dict:
+    """Ficha de una oferta de Jooble: el extracto de la tarjeta viene cortado ('...') y la página
+    interna /desc/ exige pasar el challenge de Cloudflare. El enlace /away/ redirige al sitio del
+    empleador o agregador; se sigue con un browser y se lee la descripción completa de ahí
+    (JSON-LD JobPosting; si no hay, el bloque principal de texto)."""
+    from urllib.parse import urlparse
+    info: dict = {"_access": "blocked", "description": "", "description_source": "jooble-destino"}
+    with _JOOBLE_SEM:
+        try:
+            from playwright.sync_api import sync_playwright
+            pw = sync_playwright().start()
+            try:
+                br = pw.chromium.launch(headless=False, args=["--no-sandbox",
+                                        "--disable-blink-features=AutomationControlled"])
+                pg = br.new_context(user_agent=("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                                                "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"),
+                                    locale="es-CL").new_page()
+                try:
+                    pg.goto(url, wait_until="commit", timeout=30000)
+                    host = ""
+                    for _ in range(25):                      # el /away/ pasa por challenge + redirects
+                        pg.wait_for_timeout(1000)
+                        host = urlparse(pg.url).netloc.lower()
+                        if any(v in host for v in _JOOBLE_DESTINOS_VEDADOS):
+                            info["error"] = f"destino vedado: {host}"
+                            return info
+                        if host and "jooble.org" not in host:
+                            break
+                    if not host or "jooble.org" in host:
+                        info["error"] = "sin redirect (challenge)"
+                        return info
+                    try:
+                        pg.wait_for_load_state("networkidle", timeout=8000)
+                    except Exception:
+                        pass
+                    ficha = parse_jobposting(pg.content(), pg.url)
+                    desc = ficha.get("description") or ""
+                    if len(desc) < 400:
+                        desc = pg.evaluate(
+                            "() => { const c = [...document.querySelectorAll("
+                            "'main, article, [class*=description], [class*=Description], "
+                            "[id*=description], [class*=job-detail]')]"
+                            ".map(e => e.innerText || '').sort((a, b) => b.length - a.length)[0];"
+                            " return c || ''; }") or ""
+                        desc = re.sub(r"[ \t]+", " ", re.sub(r"\n{3,}", "\n\n", desc)).strip()
+                    if len(desc) < 400:
+                        info["error"] = f"destino sin descripción útil ({host})"
+                        return info
+                    ficha["description"] = desc[:MAX_DESC]
+                    ficha.update(_access="ok", description_source="jooble-destino")
+                    return ficha
+                finally:
+                    br.close()
+            finally:
+                pw.stop()
+        except Exception as e:
+            log.warning("jooble-destino falló (%s): %s", url[:50], e)
+            info["error"] = str(e)[:100]
+            return info
+
+
 def get_salary_pool(conn) -> list[int]:
     """Pool de salarios activos, calculado UNA vez por invocación (spec-enrich-lotes §4).
     Leave-one-out se aplica en el llamador (excluir el valor evaluado)."""
@@ -369,6 +438,8 @@ def _fetch_ficha(r: dict) -> dict:
         url = r.get("url") or ""
         if "airavirtual.com" in url:
             return _extract_aira_spa(url)
+        if "jooble.org/away/" in url:
+            return _extract_jooble_destino(url)
         if "linkedin.com/jobs/view/" in url:
             from .sources.linkedin import fetch_description
             meta = fetch_description(url)
@@ -654,12 +725,18 @@ def ia_queue_count(conn) -> int:
     con salary presente también califican (salario llegó después de la IA)."""
     return conn.execute(
         "SELECT COUNT(*) FROM ofertas WHERE active=1 AND ia_model='' AND "
-        "(length(description)>200 OR description_source!='') AND "
+        "length(description)>=200 AND "
         "(modality='' OR salary='' OR description IS NULL OR "
         "salary_status IN ('implausible','suspect') OR "
         "(salary != '' AND (ai_opinion LIKE '%sin salario%' OR ai_opinion LIKE '%sin sueldo%' "
         "OR ai_opinion LIKE '%no declara%' OR ai_opinion LIKE '%carece de datos monetarios%')))"
     ).fetchone()[0]
+
+
+_ALIAS_POR_ABBR: dict[str, tuple[str, ...]] = {}
+for _alias, _abbr in _TECH_ABBR.items():
+    _ALIAS_POR_ABBR.setdefault(_norm(_abbr), []).append(_alias)   # type: ignore[arg-type]
+_ALIAS_POR_ABBR = {k: tuple(v) for k, v in _ALIAS_POR_ABBR.items()}
 
 
 def _clean_text(s, max_len=None, lower=False):
@@ -690,7 +767,8 @@ _TECH_NO_TECNOLOGIA = {
     "slo", "slos", "sli", "slis", "error budgets", "arquitectura",
     "architecture", "scalability", "escalabilidad", "automatización",
     "automatizacion", "automation", "pipelines", "pipeline", "agile", "scrum",
-    "kanban", "ci/cd", "cicd",
+    "kanban", "ci/cd", "cicd", "developer", "programador", "engineer", "ingeniero",
+    "site reliability", "platform", "plataforma", "software", "datos", "data",
 }
 
 
@@ -776,6 +854,26 @@ def apply_ia_result(conn, cfg: Config, r: dict, parsed: dict | None,
                 "ai_resumen", "ai_fit_reason", "title", "description")
         r = {**dict(r), **dict(zip(cols, tuple(fila)))}
     model = model or parsed.get("_ia_model") or None
+    # validación contra el texto (ia/validar.py): la IA no puede afirmar lo que la
+    # oferta no dice. Sin texto suficiente solo se guarda una frase fija.
+    texto_of = f"{r.get('title') or ''} {r.get('description') or ''}"
+    con_texto = _val.texto_suficiente(r.get("description"))
+    parsed = dict(parsed)
+    if not con_texto:
+        for k in ("resumen", "fit_reason"):
+            parsed.pop(k, None)
+        parsed["opinion"] = _val.FRASE_SIN_TEXTO
+    else:
+        if _val.texto_cita_perfil_ajeno(str(parsed.get("opinion") or ""), texto_of, cfg.profile.techs):
+            log.warning("opinión IA descartada (cita el stack del perfil, no de la oferta) %s",
+                        r.get("group_id"))
+            parsed["opinion"] = _val.FRASE_NO_RESPALDADA
+        if _val.texto_cita_perfil_ajeno(str(parsed.get("resumen") or ""), texto_of, cfg.profile.techs):
+            parsed.pop("resumen", None)
+    if str(parsed.get("ingles") or "desconocido").lower() in ("", "desconocido", "none", "null"):
+        ing_txt = _val.ingles_desde_texto(texto_of)
+        if ing_txt:
+            parsed["ingles"] = ing_txt
     mod = {"R": "remoto", "H": "híbrido", "P": "presencial"}.get(parsed.get("modalidad"), "")
     ia_fields = []
     sets, params = [], []
@@ -829,7 +927,7 @@ def apply_ia_result(conn, cfg: Config, r: dict, parsed: dict | None,
     # pudo detectar techs que ya no aplican o alucinadas).
     if "techs" in parsed and isinstance(parsed["techs"], list):
         techs_limpio = []
-        for t in parsed["techs"][:8]:
+        for t in _val.limpiar_techs(parsed["techs"], texto_of, _ALIAS_POR_ABBR)[:8]:
             t = _clean_tech(t)
             if not t:
                 continue
@@ -857,6 +955,10 @@ def apply_ia_result(conn, cfg: Config, r: dict, parsed: dict | None,
             sets.append("ai_idiomas=?")
             params.append(json.dumps(idiomas_limpio, ensure_ascii=False)[:400])
             ia_fields.append("idiomas")
+    parsed["red_flags"] = _val.limpiar_flags(parsed.get("red_flags") or [])
+    parsed["green_flags"] = _val.limpiar_flags(parsed.get("green_flags") or [])
+    parsed["benefits"] = _val.quitar_duplicados(_val.limpiar_flags(parsed.get("benefits") or []),
+                                                parsed["green_flags"])
     for field in ("red_flags", "green_flags", "benefits"):
         if parsed.get(field):
             limpio = [_clean_text(x, 120) for x in parsed[field] if _clean_text(x, 120)]
@@ -904,7 +1006,7 @@ def run_ia_batch(conn, cfg: Config, profile_desc: str, max_n: int | None = None,
             "SELECT group_id, title, company, location, description, modality, salary, "
             "salary_raw, salary_status, salary_note, techs FROM ofertas "
             "WHERE active=1 AND ia_model='' AND "
-            "(length(description)>200 OR description_source!='') "
+            "length(description)>=200 "
             "ORDER BY score DESC").fetchall()
     else:
         # C9 (v4.1) ampliado: cola relajada — la IA puede trabajar con lo que haya
@@ -916,7 +1018,7 @@ def run_ia_batch(conn, cfg: Config, profile_desc: str, max_n: int | None = None,
         rows = conn.execute(
             "SELECT group_id, title, company, location, description, modality, salary, "
             "salary_raw, salary_status, salary_note, techs FROM ofertas "
-            "WHERE active=1 AND ia_model='' AND (length(description)>200 OR description_source!='') AND "
+            "WHERE active=1 AND ia_model='' AND length(description)>=200 AND "
             "(modality='' OR salary='' OR description IS NULL OR "
             "salary_status IN ('implausible','suspect') OR "
             "(salary != '' AND (ai_opinion LIKE '%sin salario%' OR ai_opinion LIKE '%sin sueldo%' "

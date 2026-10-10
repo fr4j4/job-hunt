@@ -72,7 +72,7 @@ def test_apply_ia_result_sanitiza_fosil(mem_db):
     ok = en.apply_ia_result(mem_db, _cfg(), r, parsed)
     assert ok
     row = mem_db.execute("SELECT ai_opinion FROM ofertas WHERE group_id='g2'").fetchone()
-    assert row["ai_opinion"] == ""
+    assert "vieja" not in row["ai_opinion"]   # el fósil se reemplaza (sin texto: frase fija)
 
 
 @pytest.mark.parametrize("val,expected", [

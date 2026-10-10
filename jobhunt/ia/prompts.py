@@ -119,7 +119,11 @@ _PROMPT_OPINION_LOCAL = (
     "12. NUNCA repitas los ejemplos de respuesta de abajo ni sus frases literales. Los "
     "ejemplos solo muestran el FORMATO; el contenido de tu opinion/resumen/fit_reason debe "
     "describir ESTA oferta concreta (empresa, título, sueldo, stack, señales de este "
-    "anuncio). Si no tienes datos específicos, di exactamente qué falta.\n\n"
+    "anuncio). Si no tienes datos específicos, di exactamente qué falta.\n"
+    "13. El stack de la oferta son SOLO las tecnologías de 'Datos extraídos'. PROHIBIDO atribuir "
+    "a la oferta tecnologías del perfil del candidato que no estén ahí. Si 'Datos extraídos' no "
+    "trae tecnologías, escribe que la oferta no detalla stack; compara con el perfil solo por "
+    "rol y seniority.\n\n"
     "Perfil del candidato: {perfil}\n\n"
     "Contexto de mercado (los ÚNICOS números que puedes citar):\n{mercado}\n\n"
     "Oferta:\nTítulo: {title}\nEmpresa: {company}\nSueldo declarado: {salary}\n"
@@ -155,7 +159,7 @@ def _prompt_extract_local(job: dict) -> str:
         location=job.get("location", ""),
         salary=job.get("salary") or "(no declarado)",
         modality=job.get("modality") or "(no declarada)",
-        description=(job.get("description") or "")[:6000])
+        description=(job.get("description") or "")[:4000])
 
 
 def _prompt_opinion_local(job: dict, perfil: str, mercado: str,
