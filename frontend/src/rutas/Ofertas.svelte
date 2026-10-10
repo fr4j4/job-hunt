@@ -1,7 +1,7 @@
 <script lang="ts">
   // Ofertas en 4 formatos sobre el mismo filtro: lista densa (virtualizada), tarjetas, maestro-detalle y kanban.
   import { app, avisar, cargar } from '../estado/app.svelte';
-  import { filtrosActuales, params, ruta, setParams, subruta, ir, queryDeFiltros } from '../estado/ruta.svelte';
+  import { filtrosActuales, params, ruta, setParams, subruta, ir } from '../estado/ruta.svelte';
   import { mascara } from '../motor/filtros';
   import { fila, urlSegura, type FilaOferta } from '../lib/filas';
   import { clp, edad, etiquetaValor } from '../lib/formato';
@@ -51,7 +51,8 @@
   function ordenar(id: string) {
     setParams({ orden: id, dir: orden === id && dir === 'desc' ? 'asc' : 'desc' });
   }
-  function abrir(i: number) { ir(`/ofertas/${a!.ids[i]}`, queryDeFiltros() + (params().get('vista') ? `&vista=${params().get('vista')}` : ''), false); }
+  // se conserva TODO el query (filtros + vista + orden + dir): reconstruirlo solo con los filtros perdía el orden
+  function abrir(i: number) { ir(`/ofertas/${a!.ids[i]}`, ruta.search.replace(/^\?/, ''), false); }
   function cerrar() { ir('/ofertas', ruta.search.replace(/^\?/, ''), false); }
   const cambiarVista = (v: string) => setParams({ vista: v === 'lista' ? null : v }, true);
 

@@ -115,6 +115,19 @@ def test_clic_en_grafico_filtra_y_deshacer_con_atras(pagina):
     assert "tec=" not in pagina.url
 
 
+def test_abrir_oferta_conserva_orden_y_scroll(pagina):
+    """Regresión: abrir una oferta reconstruía el query solo con los filtros y perdía orden/dir,
+    así que la lista volvía a 'puntaje desc' al hacer clic."""
+    pagina.goto(pagina.base + "/v2/ofertas?orden=titulo&dir=asc"); pagina.wait_for_selector(".vlist .vfila")
+    titulos = lambda: pagina.locator(".vlist .vfila .cortar").evaluate_all("els => els.filter((e, i) => i % 3 === 0).map(e => e.textContent.trim())")
+    antes = titulos()
+    pagina.locator(".vlist .vfila").nth(3).click(); pagina.wait_for_selector(".drawer h1")
+    assert "orden=titulo" in pagina.url and "dir=asc" in pagina.url
+    assert titulos() == antes
+    pagina.keyboard.press("Escape"); pagina.wait_for_timeout(200)
+    assert "orden=titulo" in pagina.url and titulos() == antes
+
+
 def test_estado_y_kanban(pagina):
     pagina.goto(pagina.base + "/v2/ofertas"); pagina.wait_for_selector(".vlist .vfila")
     pagina.locator(".vlist .vfila").nth(2).click(); pagina.wait_for_selector(".drawer h1")
