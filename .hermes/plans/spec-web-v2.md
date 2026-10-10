@@ -995,7 +995,7 @@ por Telegram.
 
 ## 18. Estado de implementación (2026-10-10)
 
-Verificado con: `pytest` (427 tests, incl. 11 e2e con Chromium real), `vitest` (52), `svelte-check` (0 errores) y
+Verificado con: `pytest` (443 tests, incl. 11 e2e con Chromium real), `vitest` (52), `svelte-check` (0 errores) y
 `npm run check` (paleta validada en claro y oscuro). Medido sobre la DB real (1.095 ofertas).
 
 ### Hecho
