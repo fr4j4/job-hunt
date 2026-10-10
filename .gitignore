@@ -3,3 +3,7 @@ data/
 __pycache__/
 *.pyc
 .venv/
+
+# web v2: build del front (se reconstruye con: cd frontend && npm ci && npm run build)
+jobhunt/web/dist/
+frontend/node_modules/
