@@ -116,6 +116,8 @@ class Search:
     sample_computrabajo: list[str]
     sample_glassdoor: list[str]
     sample_rotation: float
+    queries_chiletrabajos: list[str] = field(default_factory=list)
+    queries_trabajando: list[str] = field(default_factory=list)
     max_pages: int = 3             # páginas por query (Computrabajo/Indeed/Accenture)
     linkedin_max_pages: int = 8    # LinkedIn tiene su propio tope (corta antes por antigüedad)
 
@@ -334,6 +336,10 @@ def load_config(env_file: Path | None = None) -> Config:
         sample_computrabajo=_env_list("SAMPLE_QUERIES_COMPUTRABAJO"),
         sample_glassdoor=_env_list("SAMPLE_QUERIES_GLASSDOOR"),
         sample_rotation=_env_float("SAMPLE_ROTATION", 0.33),
+        queries_chiletrabajos=_env_list("QUERIES_CHILETRABAJOS",
+                                        "full stack,python,java,backend,tech lead,data engineer,devops"),
+        queries_trabajando=_env_list("QUERIES_TRABAJANDO",
+                                     "full stack,python,java,backend,tech lead,data engineer,devops"),
         max_pages=max(1, min(10, _env_int("SEARCH_MAX_PAGES", 3))),
         linkedin_max_pages=max(1, min(20, _env_int("LINKEDIN_MAX_PAGES", 8))),
     )
@@ -349,6 +355,8 @@ def load_config(env_file: Path | None = None) -> Config:
         "himalayas": _env_bool("ENABLE_HIMALAYAS", True),
         "remotive": _env_bool("ENABLE_REMOTIVE", True),
         "weworkremotely": _env_bool("ENABLE_WEWORKREMOTELY", True),
+        "chiletrabajos": _env_bool("ENABLE_CHILETRABAJOS", True),
+        "trabajando": _env_bool("ENABLE_TRABAJANDO", True),
         "aira": _env_bool("ENABLE_AIRA", True),   # antes faltaba: el barrido nunca corría AIRA
     }
     premium_hours = [int(h) for h in _env_list("PREMIUM_TICK_HOURS_UTC", "00,12")]

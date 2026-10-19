@@ -90,7 +90,7 @@ def cmd_run(cfg, notify: bool = True, on_phase=None, stop_event: threading.Event
 
         from .sources import (linkedin, computrabajo, indeed, glassdoor, laborum,
                               jooble, accenture, aira, getonboard, himalayas, remotive,
-                              weworkremotely)
+                              weworkremotely, chiletrabajos, trabajando)
         from .relevance import filter_offers, title_is_obvious_nontech
         from .sources import errores
         s = cfg.search
@@ -184,6 +184,12 @@ def cmd_run(cfg, notify: bool = True, on_phase=None, stop_event: threading.Event
         if cfg.sources.get("weworkremotely", True):
             tareas["weworkremotely"] = [lambda: _fuente_segura("weworkremotely",
                 lambda: weworkremotely.jobs(None, "perfil:", on_query=qcb("weworkremotely")))]
+        if cfg.sources.get("chiletrabajos", True):
+            tareas["chiletrabajos"] = [lambda: _fuente_segura("chiletrabajos",
+                lambda: chiletrabajos.jobs(s.queries_chiletrabajos, "perfil:", on_query=qcb("chiletrabajos")))]
+        if cfg.sources.get("trabajando", True):
+            tareas["trabajando"] = [lambda: _fuente_segura("trabajando",
+                lambda: trabajando.jobs(s.queries_trabajando, "perfil:", on_query=qcb("trabajando")))]
         muestreo = cfg.search.mode in ("both", "sample")
         n_m = max(1, int(len(s.sample_linkedin) * s.sample_rotation))
         if cfg.sources.get("linkedin"):
