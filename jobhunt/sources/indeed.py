@@ -36,10 +36,15 @@ def _iso(v):
         except Exception: return ""
     return str(v)[:10]
 
+def _esc(s):
+    """Escapa `s` para un literal de string GraphQL (comillas y barras rompían la consulta)."""
+    return json.dumps(str(s))[1:-1]
+
+
 def _page(q, cursor=""):
     """Una página del GraphQL; None si falla (la 1ª página sin cursor = query original)."""
     cur = f'cursor: "{cursor}" ' if cursor else ""
-    body = {"query": _QUERY % {"what": q, "cursor": cur}}
+    body = {"query": _QUERY % {"what": _esc(q), "cursor": cur}}
     req = urllib.request.Request("https://apis.indeed.com/graphql",
         data=json.dumps(body).encode(), headers=_HEADERS, method="POST")
     try:
@@ -54,7 +59,7 @@ def _page(q, cursor=""):
     if d.get("errors") and not (d.get("data") or {}).get("jobSearch") and not cursor:
         # la API rechazó pageInfo: reintenta con la query original (sin paginar)
         log.warning("indeed: pageInfo rechazado (%s) — sin paginación", str(d["errors"])[:100])
-        body = {"query": (_QUERY % {"what": q, "cursor": ""}).replace("pageInfo { nextCursor }", "")}
+        body = {"query": (_QUERY % {"what": _esc(q), "cursor": ""}).replace("pageInfo { nextCursor }", "")}
         req = urllib.request.Request("https://apis.indeed.com/graphql",
             data=json.dumps(body).encode(), headers=_HEADERS, method="POST")
         try:

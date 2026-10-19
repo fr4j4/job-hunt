@@ -94,3 +94,37 @@ def test_http_error_devuelve_vacio_y_registra(monkeypatch, mod, fuente):
     _http(monkeypatch, _Resp(status=403))
     assert mod.jobs(["python"]) == []
     assert errores.tomar(fuente) == 3      # 1 intento + 2 reintentos
+
+
+def test_getonboard_acepta_remoto_localizado_y_pagina(monkeypatch):
+    """Con Accept-Language es-CL la API devuelve countries=['Remoto'] (antes se descartaba)
+    y pagina con meta.total_pages."""
+    def item(slug, paises):
+        return {"links": {"public_url": f"https://www.getonbrd.com/jobs/{slug}"},
+                "attributes": {"title": f"Dev {slug}", "countries": paises, "remote_modality": "fully_remote"}}
+    paginas = {1: {"data": [item("a", ["Remoto"]), item("co", ["Colombia"])], "meta": {"total_pages": 2}},
+               2: {"data": [item("b", ["Remote"]), item("c", ["Chile", "Peru"])], "meta": {"total_pages": 2}}}
+    pedidas = []
+
+    def fake_get(url, params=None, **k):
+        pedidas.append(params["page"])
+        return _Resp(paginas[params["page"]])
+    monkeypatch.setattr(_comun.requests, "get", fake_get)
+    r = getonboard.jobs(["java"], max_pages=3)
+    assert [j["url"].rsplit("/", 1)[1] for j in r] == ["a", "b", "c"]
+    assert pedidas == [1, 2]          # corta en total_pages aunque max_pages sea 3
+    assert r[0]["modality"] == "remoto"
+
+
+def test_himalayas_pagina_hasta_pagina_incompleta(monkeypatch):
+    def job(n):
+        return {"title": f"T{n}", "applicationLink": f"https://himalayas.app/{n}"}
+    paginas = {1: [job(i) for i in range(20)], 2: [job(i) for i in range(20, 25)]}
+    pedidas = []
+
+    def fake_get(url, params=None, **k):
+        pedidas.append(params["page"])
+        return _Resp({"jobs": paginas.get(params["page"], [])})
+    monkeypatch.setattr(_comun.requests, "get", fake_get)
+    r = himalayas.jobs(["python"], max_pages=3)
+    assert len(r) == 25 and pedidas == [1, 2]

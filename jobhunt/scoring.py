@@ -116,8 +116,11 @@ def compute_score(job: dict, cfg: Config) -> tuple[int, dict]:
     breakdown["base"] = s.base
 
     # ---- hard filters (red keywords del .env) ----
+    # solo título/ubicación: en la descripción 'comercial', 'soporte técnico', 'intern' o
+    # 'qa manual' aparecen en ofertas senior legítimas (el área, el equipo, los beneficios)
+    # y dejaban en score 0 → sin IA ni canal a >100 ofertas de desarrollo.
     for kw in p.red_keywords:
-        if kw and (_kw_hit(kw, blob) or _kw_hit(kw, t_desc)):
+        if kw and _kw_hit(kw, blob):
             breakdown["rejected_by"] = kw
             return 0, breakdown
 
