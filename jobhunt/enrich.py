@@ -579,6 +579,8 @@ def enrich_pending(conn, cfg: Config | None, max_n: int | None = None,
                    groups: set[str] | None = None, stop_event=None,
                    solo_fetch: bool = False) -> int:
     """Enriquece ofertas activas con descripción corta: Anillo A primero, C si sigue vacío.
+    El extracto de la tarjeta de Jooble ('jooble-serp', 250-400 caracteres cortados con '...')
+    cuenta como descripción corta aunque pase de 200: sin la ficha no hay modalidad ni sueldo.
 
     spec-enrich-lotes v2 (§3-5): fetch paralelo (threads SOLO HTTP, el main escribe),
     recarga N' tras fetch, pool de salarios cacheado con LOO, modo lote IA si
@@ -595,6 +597,7 @@ def enrich_pending(conn, cfg: Config | None, max_n: int | None = None,
         rows = conn.execute(
             f"SELECT {cols} FROM ofertas "
             f"WHERE active=1 AND (description IS NULL OR length(description)<200 OR "
+            f"description_source='jooble-serp' OR "
             f"salary_status IN ('implausible','suspect')) "
             f"AND COALESCE(fetch_fails,0) < 3 "
             f"AND group_id IN ({qs}) ORDER BY score DESC", tuple(groups)).fetchall()
@@ -602,6 +605,7 @@ def enrich_pending(conn, cfg: Config | None, max_n: int | None = None,
         rows = conn.execute(
             f"SELECT {cols} FROM ofertas "
             "WHERE active=1 AND (description IS NULL OR length(description)<200 OR "
+            "description_source='jooble-serp' OR "
             "salary_status IN ('implausible','suspect')) "
             "AND COALESCE(fetch_fails,0) < 3 "
             "ORDER BY score DESC").fetchall()

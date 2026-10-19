@@ -474,3 +474,16 @@ def test_fetch_ficha_jooble_usa_el_destino(monkeypatch):
     r = {"group_id": "g", "title": "t", "url": "https://cl.jooble.org/away/123?p=1"}
     info = en._fetch_ficha(r)
     assert llamadas == [r["url"]] and info["_access"] == "ok"
+
+
+def test_enrich_pending_selecciona_extracto_jooble_aunque_pase_de_200(mem_db, monkeypatch):
+    """El extracto de Jooble (300 caracteres cortados) no es descripción: debe pedir la ficha."""
+    cfg = _cfg()
+    _insert(mem_db, "j1", url="https://cl.jooble.org/away/1", desc="x" * 300)
+    _insert(mem_db, "ok", url="http://x.cl/ok", desc="y" * 300)
+    mem_db.execute("UPDATE ofertas SET description_source='jooble-serp' WHERE group_id='j1'")
+    mem_db.commit()
+    pedidas = []
+    monkeypatch.setattr(en, "_fetch_ficha", lambda r: pedidas.append(r["group_id"]) or {"_access": "blocked"})
+    en.enrich_pending(mem_db, cfg, solo_fetch=True)
+    assert pedidas == ["j1"]
