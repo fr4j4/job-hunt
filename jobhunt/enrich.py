@@ -468,6 +468,9 @@ def _fetch_ficha(r: dict) -> dict:
         if "chiletrabajos.cl/trabajo/" in url:
             from .sources.chiletrabajos import fetch_ficha
             return fetch_ficha(url)
+        if "wearestaffy.com/positions/" in url:
+            from .sources.staffy import fetch_ficha
+            return fetch_ficha(url)
         if "trabajando.cl/trabajo-empleo/" in url:
             from .sources.trabajando import fetch_ficha
             return fetch_ficha(url)

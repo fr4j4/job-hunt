@@ -357,6 +357,7 @@ def load_config(env_file: Path | None = None) -> Config:
         "weworkremotely": _env_bool("ENABLE_WEWORKREMOTELY", True),
         "chiletrabajos": _env_bool("ENABLE_CHILETRABAJOS", True),
         "trabajando": _env_bool("ENABLE_TRABAJANDO", True),
+        "staffy": _env_bool("ENABLE_STAFFY", True),
         "aira": _env_bool("ENABLE_AIRA", True),   # antes faltaba: el barrido nunca corría AIRA
     }
     premium_hours = [int(h) for h in _env_list("PREMIUM_TICK_HOURS_UTC", "00,12")]

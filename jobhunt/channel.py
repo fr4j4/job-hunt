@@ -37,7 +37,7 @@ _ABBR_FUENTE = {"linkedin": "LinkedIn", "computrabajo": "CB", "indeed": "Indeed"
                 "accenture": "Accenture", "aira": "AIRA",
                 "getonboard": "GetOnBoard", "himalayas": "Himalayas", "remotive": "Remotive",
                 "weworkremotely": "WWR", "chiletrabajos": "Chiletrabajos",
-                "trabajando": "Trabajando"}
+                "trabajando": "Trabajando", "staffy": "Staffy"}
 
 
 def _fuente(row: dict) -> str:

@@ -81,7 +81,7 @@ _NOMBRES = {"linkedin": "LinkedIn", "computrabajo": "Computrabajo", "indeed": "I
             "glassdoor": "Glassdoor", "laborum": "Laborum", "jooble": "Jooble",
             "accenture": "Accenture", "aira": "Feeds de empleadores (AIRA)", "getonboard": "Get on Board",
             "himalayas": "Himalayas", "remotive": "Remotive", "weworkremotely": "We Work Remotely",
-            "chiletrabajos": "Chiletrabajos", "trabajando": "Trabajando.com"}
+            "chiletrabajos": "Chiletrabajos", "trabajando": "Trabajando.com", "staffy": "Staffy Jobs"}
 
 
 def _nombre(fuente: str) -> str:
