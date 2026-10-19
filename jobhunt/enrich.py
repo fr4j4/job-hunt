@@ -356,6 +356,27 @@ def _extract_aira_spa(url: str) -> dict:
 # (SPA que no renderiza sin sesión). No se intenta saltar el captcha: se marcan 'blocked'.
 _JOOBLE_DESTINOS_VEDADOS = ("appcast.io", "captcha-delivery.com", "fitly.work")
 _JOOBLE_SEM = threading.BoundedSemaphore(2)   # Chromium es pesado: máx 2 a la vez
+# cortacircuitos: si el /away/ de Jooble se queda en el challenge N veces seguidas, se deja de lanzar
+# Chromium por un rato (cada intento perdido cuesta ~25 s y quemaba un intento de fetch_fails)
+_JOOBLE_BREAKER = {"fallos": 0, "hasta": 0.0}
+_JOOBLE_FALLOS_MAX = 4
+_JOOBLE_PAUSA_S = 6 * 3600
+
+
+def _jooble_en_pausa() -> bool:
+    return time.time() < _JOOBLE_BREAKER["hasta"]
+
+
+def _jooble_resultado(ok: bool, challenge: bool = False) -> None:
+    if ok:
+        _JOOBLE_BREAKER["fallos"] = 0
+    elif challenge:
+        _JOOBLE_BREAKER["fallos"] += 1
+        if _JOOBLE_BREAKER["fallos"] >= _JOOBLE_FALLOS_MAX:
+            _JOOBLE_BREAKER["hasta"] = time.time() + _JOOBLE_PAUSA_S
+            _JOOBLE_BREAKER["fallos"] = 0
+            log.warning("jooble-destino: %d challenges seguidos → pausa de %dh sin lanzar Chromium",
+                        _JOOBLE_FALLOS_MAX, _JOOBLE_PAUSA_S // 3600)
 
 
 def _extract_jooble_destino(url: str) -> dict:
@@ -365,6 +386,8 @@ def _extract_jooble_destino(url: str) -> dict:
     (JSON-LD JobPosting; si no hay, el bloque principal de texto)."""
     from urllib.parse import urlparse
     info: dict = {"_access": "blocked", "description": "", "description_source": "jooble-destino"}
+    if _jooble_en_pausa():
+        return {"_access": "skip", "error": "jooble-destino en pausa (challenge)"}
     with _JOOBLE_SEM:
         try:
             from playwright.sync_api import sync_playwright
@@ -388,6 +411,7 @@ def _extract_jooble_destino(url: str) -> dict:
                             break
                     if not host or "jooble.org" in host:
                         info["error"] = "sin redirect (challenge)"
+                        _jooble_resultado(False, challenge=True)
                         return info
                     try:
                         pg.wait_for_load_state("networkidle", timeout=8000)
@@ -408,6 +432,7 @@ def _extract_jooble_destino(url: str) -> dict:
                         return info
                     ficha["description"] = desc[:MAX_DESC]
                     ficha.update(_access="ok", description_source="jooble-destino")
+                    _jooble_resultado(True)
                     return ficha
                 finally:
                     br.close()
@@ -480,6 +505,8 @@ def _aplicar_ficha(conn, r: dict, info: dict, pool: list[int], cfg: Config | Non
     regex NO se ejecuta (la IA es la única fuente de techs)."""
     from . import stats as _st
     access = info.get("_access", "ok")
+    if access == "skip":      # fuente en pausa: no cuenta como intento fallido de la oferta
+        return "blocked"
     if info.get("_cb_expired") or access == "not_found":
         conn.execute("UPDATE ofertas SET active=0 WHERE group_id=?", (r["group_id"],))
         conn.commit()
@@ -585,8 +612,9 @@ def enrich_pending(conn, cfg: Config | None, max_n: int | None = None,
                    groups: set[str] | None = None, stop_event=None,
                    solo_fetch: bool = False) -> int:
     """Enriquece ofertas activas con descripción corta: Anillo A primero, C si sigue vacío.
-    El extracto de la tarjeta de Jooble ('jooble-serp', 250-400 caracteres cortados con '...')
-    cuenta como descripción corta aunque pase de 200: sin la ficha no hay modalidad ni sueldo.
+    Los extractos de Jooble ('jooble-serp', 250-400 caracteres) NO se piden aparte: el /away/ de
+    Jooble hoy se queda en el challenge de Cloudflare ('sin redirect') y cada intento cuesta ~25 s
+    de Chromium sin rendir ficha (probado 19-oct-2026: 0 de 249).
 
     spec-enrich-lotes v2 (§3-5): fetch paralelo (threads SOLO HTTP, el main escribe),
     recarga N' tras fetch, pool de salarios cacheado con LOO, modo lote IA si
@@ -603,7 +631,6 @@ def enrich_pending(conn, cfg: Config | None, max_n: int | None = None,
         rows = conn.execute(
             f"SELECT {cols} FROM ofertas "
             f"WHERE active=1 AND (description IS NULL OR length(description)<200 OR "
-            f"description_source='jooble-serp' OR "
             f"salary_status IN ('implausible','suspect')) "
             f"AND COALESCE(fetch_fails,0) < 3 "
             f"AND group_id IN ({qs}) ORDER BY score DESC", tuple(groups)).fetchall()
@@ -611,7 +638,6 @@ def enrich_pending(conn, cfg: Config | None, max_n: int | None = None,
         rows = conn.execute(
             f"SELECT {cols} FROM ofertas "
             "WHERE active=1 AND (description IS NULL OR length(description)<200 OR "
-            "description_source='jooble-serp' OR "
             "salary_status IN ('implausible','suspect')) "
             "AND COALESCE(fetch_fails,0) < 3 "
             "ORDER BY score DESC").fetchall()

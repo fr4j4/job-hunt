@@ -476,14 +476,33 @@ def test_fetch_ficha_jooble_usa_el_destino(monkeypatch):
     assert llamadas == [r["url"]] and info["_access"] == "ok"
 
 
-def test_enrich_pending_selecciona_extracto_jooble_aunque_pase_de_200(mem_db, monkeypatch):
-    """El extracto de Jooble (300 caracteres cortados) no es descripción: debe pedir la ficha."""
+def test_enrich_pending_no_pide_ficha_de_jooble_con_extracto_de_200_o_mas(mem_db, monkeypatch):
+    """El /away/ de Jooble no pasa el challenge: no se gastan ~25 s de Chromium por oferta
+    cuya descripción ya tiene un extracto de >=200 caracteres; sí se piden las de <200."""
     cfg = _cfg()
-    _insert(mem_db, "j1", url="https://cl.jooble.org/away/1", desc="x" * 300)
-    _insert(mem_db, "ok", url="http://x.cl/ok", desc="y" * 300)
-    mem_db.execute("UPDATE ofertas SET description_source='jooble-serp' WHERE group_id='j1'")
+    _insert(mem_db, "largo", url="https://cl.jooble.org/away/1", desc="x" * 300)
+    _insert(mem_db, "corto", url="https://cl.jooble.org/away/2", desc="x" * 50)
+    mem_db.execute("UPDATE ofertas SET description_source='jooble-serp'")
     mem_db.commit()
     pedidas = []
     monkeypatch.setattr(en, "_fetch_ficha", lambda r: pedidas.append(r["group_id"]) or {"_access": "blocked"})
     en.enrich_pending(mem_db, cfg, solo_fetch=True)
-    assert pedidas == ["j1"]
+    assert pedidas == ["corto"]
+
+
+def test_jooble_cortacircuitos_pausa_tras_challenges_seguidos(mem_db, monkeypatch):
+    """4 challenges seguidos → pausa: _extract_jooble_destino devuelve 'skip' sin lanzar Chromium y
+    _aplicar_ficha no suma fetch_fails."""
+    monkeypatch.setitem(en._JOOBLE_BREAKER, "fallos", 0)
+    monkeypatch.setitem(en._JOOBLE_BREAKER, "hasta", 0.0)
+    for _ in range(en._JOOBLE_FALLOS_MAX):
+        en._jooble_resultado(False, challenge=True)
+    assert en._jooble_en_pausa()
+    info = en._extract_jooble_destino("https://cl.jooble.org/away/9")
+    assert info["_access"] == "skip"
+    _insert(mem_db, "g1", url="https://cl.jooble.org/away/9", desc="x" * 50)
+    r = dict(mem_db.execute("SELECT * FROM ofertas WHERE group_id='g1'").fetchone())
+    assert en._aplicar_ficha(mem_db, r, info, []) == "blocked"
+    assert mem_db.execute("SELECT fetch_fails FROM ofertas WHERE group_id='g1'").fetchone()[0] == 0
+    en._jooble_resultado(True)
+    monkeypatch.setitem(en._JOOBLE_BREAKER, "hasta", 0.0)
