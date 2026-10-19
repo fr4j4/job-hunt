@@ -40,46 +40,77 @@ _EXTRACT_JS = """
 """
 
 
+_RE_REL_ATRAS = re.compile(r"(\d+|un[ao]?)\s+(minutos?|horas?|d[ií]as?|semanas?|mes(?:es)?)\s+atr[aá]s", re.I)
+
+
 def _parse_card(texto: str) -> dict:
-    """Parsea 'Título\\nempresa/industriaUbicación, Región, Chile...Publicado el X...'"""
-    partes = [p.strip() for p in texto.split("\n") if p.strip() and p.strip() != "\xa0..."]
-    company = ""
-    # la empresa suele ser la 2a línea (a veces con industria pegada) o está en el snippet
-    # jooble SERP no muestra empresa: la línea 2 es industria+ubicación; no inventar company
-    company = ""
-    fecha = ""
-    mfecha = re.search(r"Publicado el (\d{1,2}) de (\w+)(?:,? (\d{4}))?", texto)
-    if mfecha:
-        meses = {"enero": 1, "febrero": 2, "marzo": 3, "abril": 4, "mayo": 5, "junio": 6,
-                 "julio": 7, "agosto": 8, "septiembre": 9, "octubre": 10,
-                 "noviembre": 11, "diciembre": 12}
-        mes = meses.get(mfecha.group(2).lower())
-        if mes:
-            anio = int(mfecha.group(3) or datetime.now(timezone.utc).year)
-            fecha = f"{anio}-{mes:02d}-{int(mfecha.group(1)):02d}"
-    if not fecha:   # "Publicado hace 3 días" → texto relativo; db.upsert lo resuelve al capturar
-        mrel = re.search(r"(?:hace|publicad[oa] hace)\s+(?:\d+|un[ao]?)\s+(?:minutos?|horas?|d[ií]as?|semanas?|mes(?:es)?)",
-                         texto, re.I)
-        if mrel:
-            fecha = mrel.group(0)
-    # snippet: texto después del título
+    """Tarjeta del SERP (layout 2026-10): 'Título\n[$monto]\nextracto...\xa0\nReportar\n[empresa]\nciudad\nfecha'.
+    Tras 'Reportar' vienen 2 o 3 líneas: [empresa], ubicación y antigüedad ('25 días atrás',
+    'Hace un mes'). El monto suelto bajo el título es el sueldo mensual declarado."""
+    lineas = [p.strip() for p in texto.split("\n") if p.strip() and p.strip() != "\xa0..."]
+    company = location = fecha = ""
+    if "Reportar" in lineas:
+        cola = lineas[lineas.index("Reportar") + 1:]
+        if cola:
+            fecha = _fecha_relativa(cola[-1]) or _fecha_absoluta(texto)
+            resto = cola[:-1] if _fecha_relativa(cola[-1]) else cola
+            if len(resto) >= 2:
+                company, location = resto[-2], resto[-1]
+            elif len(resto) == 1:
+                location = resto[0]
+    if not fecha:
+        fecha = _fecha_absoluta(texto) or _fecha_relativa(texto)
     snippet = ""
     msnip = re.search(r"\xa0\.\.\.(.{80,})", texto)
     if msnip:
         snippet = msnip.group(1)[:1500]
-    # salario en el texto de la card (formato $X.XXX.XXX o "sin sueldo")
-    # solo con contexto de sueldo mensual y dentro de la banda física: el regex
-    # anterior tomaba cualquier "$" (presupuestos, USD, 15.000 de bonos…)
+    elif len(lineas) > 1:      # extracto = la línea más larga entre el título y 'Reportar'
+        previas = lineas[1:lineas.index("Reportar")] if "Reportar" in lineas else lineas[1:]
+        snippet = max(previas, key=len, default="")[:1500]
+    # sueldo: monto suelto bajo el título ('$1600000') o con contexto de sueldo mensual;
+    # siempre dentro de la banda física (el regex viejo tomaba cualquier '$')
     salary = ""
-    for msal in re.finditer(r"\$\s?(\d{1,3}(?:\.\d{3}){1,2})(?!\d)", texto):
-        ctx = texto[max(0, msal.start() - 40): msal.end() + 40].lower()
-        monto = int(msal.group(1).replace(".", ""))
-        if (FLOOR <= monto <= CEILING and re.search(
-                r"sueldo|salario|renta|remuneraci|l[ií]quid|brut|mensual|al mes|por mes", ctx)
-                and not re.search(r"usd|us\$|d[oó]lar|anual|bono|comisi", ctx)):
-            salary = f"CLP {monto}"
-            break
-    return {"company": "", "date": fecha, "snippet": snippet, "salary": salary}
+    suelto = next((l for l in lineas[1:3] if re.fullmatch(r"\$\s?[\d.]+", l)), "")
+    monto_suelto = int(re.sub(r"\D", "", suelto) or 0)
+    if suelto and FLOOR <= monto_suelto <= CEILING:
+        salary = f"CLP {monto_suelto}"
+    else:
+        for msal in re.finditer(r"\$\s?(\d{1,3}(?:\.\d{3}){1,2})(?!\d)", texto):
+            ctx = texto[max(0, msal.start() - 40): msal.end() + 40].lower()
+            monto = int(msal.group(1).replace(".", ""))
+            if (FLOOR <= monto <= CEILING and re.search(
+                    r"sueldo|salario|renta|remuneraci|l[ií]quid|brut|mensual|al mes|por mes", ctx)
+                    and not re.search(r"usd|us\$|d[oó]lar|anual|bono|comisi", ctx)):
+                salary = f"CLP {monto}"
+                break
+    return {"company": company, "location": location, "date": fecha, "snippet": snippet,
+            "salary": salary}
+
+
+def _fecha_relativa(txt: str) -> str:
+    """'25 días atrás' → 'hace 25 días' (formato que resuelve db.upsert); 'Hace un mes' pasa tal cual."""
+    m = _RE_REL_ATRAS.search(txt or "")
+    if m:
+        return f"hace {m.group(1)} {m.group(2)}"
+    m = re.search(r"(?:hace|publicad[oa] hace)\s+(?:\d+|un[ao]?)\s+(?:minutos?|horas?|d[ií]as?|semanas?|mes(?:es)?)",
+                  txt or "", re.I)
+    if m:
+        return m.group(0)
+    return {"hoy": "hoy", "ayer": "ayer"}.get((txt or "").strip().lower(), "")
+
+
+def _fecha_absoluta(texto: str) -> str:
+    mfecha = re.search(r"Publicado el (\d{1,2}) de (\w+)(?:,? (\d{4}))?", texto or "")
+    if not mfecha:
+        return ""
+    meses = {"enero": 1, "febrero": 2, "marzo": 3, "abril": 4, "mayo": 5, "junio": 6,
+             "julio": 7, "agosto": 8, "septiembre": 9, "octubre": 10,
+             "noviembre": 11, "diciembre": 12}
+    mes = meses.get(mfecha.group(2).lower())
+    if not mes:
+        return ""
+    anio = int(mfecha.group(3) or datetime.now(timezone.utc).year)
+    return f"{anio}-{mes:02d}-{int(mfecha.group(1)):02d}"
 
 
 def jobs(queries: list[str], found_by_prefix: str = "", max_pages: int = 2, on_query=None) -> list[dict]:
@@ -144,7 +175,7 @@ def jobs(queries: list[str], found_by_prefix: str = "", max_pages: int = 2, on_q
                 out[uid] = {
                     "title": (c.get("titulo") or "")[:150],
                     "company": parsed["company"],
-                    "location": "",
+                    "location": parsed["location"],
                     "date": parsed["date"],   # sin fecha real → vacío (antes: hoy, falseaba la frescura)
                     "url": c.get("url") or "",
                     "source": f"jooble:{q}",

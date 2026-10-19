@@ -61,28 +61,51 @@ def jobs(queries: list[str], found_by_prefix: str = "", on_query=None, max_pages
     return list(out.values())
 
 
+def _ficha_a_info(f: dict) -> dict:
+    """Ficha de /api/ofertas/<id> → campos que consume el enriquecimiento."""
+    desc = _comun.limpiar(f"{f.get('descripcionOferta') or ''} {f.get('requisitosMinimos') or ''}")
+    if f.get("aniosExperiencia") and f.get("nombreOperadorExperiencia"):
+        desc = (desc + f" Experiencia {f['nombreOperadorExperiencia'].lower()} {f['aniosExperiencia']} años.")
+    jornada = f.get("nombreJornada") or ""
+    ub = f.get("ubicacion") or {}
+    salary = ""
+    if f.get("mostrarSueldo") and (f.get("sueldo") or 0) > 0 and "peso" in (f.get("nombreMoneda") or "").lower():
+        salary = f"CLP {int(f['sueldo'])}"
+    return {"description": desc[:MAX_DESC], "modality": _modalidad(jornada) or _comun.modalidad_en_texto(desc),
+            "employment_type": jornada, "salary": salary,
+            "location": ", ".join(x for x in (ub.get("nombreComuna"), ub.get("nombreRegion")) if x),
+            "date_posted": f.get("fechaPublicacionFormatoIngles") or ""}
+
+
+def fetch_ficha(url: str) -> dict:
+    """Ficha para el enriquecimiento (enrich._fetch_ficha) a partir del enlace público."""
+    oid = url.rstrip("/").rsplit("/", 1)[-1].split("?")[0]
+    f = _comun.get("trabajando", f"{_API}/ofertas/{oid}") if oid.isdigit() else {}
+    if not f or "idOferta" not in f:
+        return {"_access": "blocked", "error": "trabajando sin ficha"}
+    i = _ficha_a_info(f)
+    if not i["description"]:
+        return {"_access": "blocked", "error": "ficha sin descripción"}
+    return {"_access": "ok", "description": i["description"], "modality_badge": i["modality"],
+            "employment_type": i["employment_type"], "salary": i["salary"], "location": i["location"],
+            "date_posted": i["date_posted"]}
+
+
 def _completar_fichas(ofertas: list[dict], max_detalles: int) -> None:
     for j in ofertas[:max_detalles]:
         f = _comun.get("trabajando", f"{_API}/ofertas/{j['_tb_id']}")
         if not f or "idOferta" not in f:
             continue
-        desc = _comun.limpiar(f"{f.get('descripcionOferta') or ''} {f.get('requisitosMinimos') or ''}")
-        if desc:
-            j["_desc"] = desc[:MAX_DESC]
+        i = _ficha_a_info(f)
+        if i["description"]:
+            j["_desc"] = i["description"]
             j["description_source"] = "trabajando-api"
-        jornada = f.get("nombreJornada")
-        mod = _modalidad(jornada) or _comun.modalidad_en_texto(desc)
-        if mod:
-            j["modality"] = mod
-        if f.get("mostrarSueldo") and (f.get("sueldo") or 0) > 0 and "peso" in (f.get("nombreMoneda") or "").lower():
-            j["salary"] = f"CLP {int(f['sueldo'])}"
-        if jornada:
-            j["employment_type"] = jornada
-        ub = f.get("ubicacion") or {}
-        loc = ", ".join(x for x in (ub.get("nombreComuna"), ub.get("nombreRegion")) if x)
-        if loc:
-            j["location"] = loc
-        if f.get("aniosExperiencia") and f.get("nombreOperadorExperiencia"):
-            j["_desc"] = (j["_desc"] + f" Experiencia {f['nombreOperadorExperiencia'].lower()} "
-                          f"{f['aniosExperiencia']} años.")[:MAX_DESC]
+        if i["modality"]:
+            j["modality"] = i["modality"]
+        if i["salary"]:
+            j["salary"] = i["salary"]
+        if i["employment_type"]:
+            j["employment_type"] = i["employment_type"]
+        if i["location"]:
+            j["location"] = i["location"]
         time.sleep(0.5)

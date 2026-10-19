@@ -82,3 +82,28 @@ def test_trabajando_listado_y_ficha(monkeypatch):
     assert "Experiencia desde 3 años" in a["_desc"]
     assert b["modality"] == "híbrido" and b["description_source"] == "trabajando-serp"   # ficha vacía
     assert "_tb_id" not in a and "_tb_id" not in b
+
+
+def test_fetch_ficha_chiletrabajos_y_trabajando(monkeypatch):
+    monkeypatch.setattr(_comun, "get", lambda fuente, url, params=None, retries=2, as_text=False: (
+        _FICHA.replace("</title>", "</title><table><tr><td>Fecha</td><td><div>2026-10-14 10:34:37</div></td></tr></table>")
+        if as_text else {"idOferta": 7, "descripcionOferta": "<p>Backend Java</p>", "nombreJornada": "Mixta (Teletrabajo + Presencial)",
+                         "fechaPublicacionFormatoIngles": "2026-10-19",
+                         "ubicacion": {"nombreComuna": "Las Condes", "nombreRegion": "Metropolitana de Santiago"}}))
+    c = chiletrabajos.fetch_ficha("https://www.chiletrabajos.cl/trabajo/dev-111")
+    assert c["_access"] == "ok" and c["modality_badge"] == "remoto" and c["date_posted"] == "2026-10-14"
+    t = trabajando.fetch_ficha("https://www.trabajando.cl/trabajo-empleo/7")
+    assert t["_access"] == "ok" and t["modality_badge"] == "híbrido" and t["location"] == "Las Condes, Metropolitana de Santiago"
+    assert t["date_posted"] == "2026-10-19" and "Backend Java" in t["description"]
+    monkeypatch.setattr(_comun, "get", lambda *a, **k: "" if k.get("as_text") else {})
+    assert chiletrabajos.fetch_ficha("https://www.chiletrabajos.cl/trabajo/x-1")["_access"] == "blocked"
+    assert trabajando.fetch_ficha("https://www.trabajando.cl/trabajo-empleo/9")["_access"] == "blocked"
+
+
+def test_enrich_enruta_las_fichas_de_las_fuentes_chilenas(monkeypatch):
+    from jobhunt import enrich as en
+    monkeypatch.setattr(chiletrabajos, "fetch_ficha", lambda url: {"_access": "ok", "description": "ct"})
+    monkeypatch.setattr(trabajando, "fetch_ficha", lambda url: {"_access": "ok", "description": "tb"})
+    r = {"group_id": "g", "title": "t"}
+    assert en._fetch_ficha({**r, "url": "https://www.chiletrabajos.cl/trabajo/dev-1"})["description"] == "ct"
+    assert en._fetch_ficha({**r, "url": "https://www.trabajando.cl/trabajo-empleo/5"})["description"] == "tb"

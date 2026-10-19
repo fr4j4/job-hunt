@@ -440,6 +440,12 @@ def _fetch_ficha(r: dict) -> dict:
             return _extract_aira_spa(url)
         if "jooble.org/away/" in url:
             return _extract_jooble_destino(url)
+        if "chiletrabajos.cl/trabajo/" in url:
+            from .sources.chiletrabajos import fetch_ficha
+            return fetch_ficha(url)
+        if "trabajando.cl/trabajo-empleo/" in url:
+            from .sources.trabajando import fetch_ficha
+            return fetch_ficha(url)
         if "linkedin.com/jobs/view/" in url:
             from .sources.linkedin import fetch_description
             meta = fetch_description(url)

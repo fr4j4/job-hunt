@@ -46,9 +46,11 @@ def parse_ficha(html_: str) -> dict:
     d = re.search(r'botones-desc.*?<p class="mb-0">(.*?)</p>', html_, re.S)
     tipo = re.search(r"<td>Tipo</td>\s*<td><a [^>]*>(.*?)</a>", html_, re.S)
     texto = _comun.limpiar(d.group(1)) if d else ""
+    fecha = re.search(r"<td>Fecha</td>\s*<td>\s*<div>\s*(\d{4}-\d{2}-\d{2})", html_)
     ti = re.search(r"<title>\s*(.*?)\s+-\s+[^<-]*\|\s*Chiletrabajos", html_, re.S)
     return {"description": texto, "employment_type": _comun.limpiar(tipo.group(1)) if tipo else "",
-            "title": _comun.limpiar(ti.group(1))[:150] if ti else ""}
+            "title": _comun.limpiar(ti.group(1))[:150] if ti else "",
+            "date": fecha.group(1) if fecha else ""}
 
 
 def jobs(queries: list[str], found_by_prefix: str = "", on_query=None, max_pages: int = 2,
@@ -96,3 +98,17 @@ def _completar_fichas(out: dict, max_detalles: int) -> None:
         if f["title"] and j["title"].endswith("…"):      # el listado recorta los títulos largos
             j["title"] = f["title"]
         time.sleep(0.5)
+
+
+def fetch_ficha(url: str) -> dict:
+    """Ficha para el enriquecimiento (enrich._fetch_ficha): descripción completa, modalidad y fecha.
+    Cubre las ofertas que quedaron fuera del tope `max_detalles` del barrido."""
+    html_ = _comun.get("chiletrabajos", url, as_text=True)
+    if not html_:
+        return {"_access": "blocked", "error": "chiletrabajos sin respuesta"}
+    f = parse_ficha(html_)
+    if not f["description"]:
+        return {"_access": "blocked", "error": "ficha sin descripción"}
+    return {"_access": "ok", "description": f["description"][:MAX_DESC],
+            "modality_badge": _comun.modalidad_en_texto(f["description"]),
+            "employment_type": f["employment_type"], "date_posted": f["date"]}
