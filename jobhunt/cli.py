@@ -332,6 +332,12 @@ def cmd_run(cfg, notify: bool = True, on_phase=None, stop_event: threading.Event
             phase("rescore pool")
             database.rescore_all(conn, compute_score, version_id, cfg,
                                   market_score_fn=compute_market_score)
+            # el rescore global (enrich + market score del pool) puede dejar ofertas elegibles
+            # que ningún lote publicó: salen ahora, no en el siguiente barrido
+            if presupuesto_canal > 0:
+                from .channel import publicar_pendientes
+                phase("canal: publicando pendientes")
+                channel_posts += publicar_pendientes(cfg, conn, api, budget=presupuesto_canal)
         else:
             # sin IA: fit score al vuelo ya escrito; market/rescore global para el gate
             phase("rescore pool")

@@ -332,6 +332,23 @@ def publish_channel(cfg: Config, conn, tg_api, dry_run: bool = False,
     return stats
 
 
+def publicar_pendientes(cfg: Config, conn, tg_api, budget: int | None = None) -> int:
+    """Publica lo que quedó elegible tras un paso que cambia el gate SIN publicar por sí mismo
+    (rescore global del barrido, batch IA nocturno/manual, backfill de encaje). Sin esto esas
+    ofertas esperaban al siguiente barrido para salir — de ahí los posts "de rezago" en cada
+    pasada. Nunca lanza: el canal no debe tumbar el paso que lo invoca. Retorna posts hechos."""
+    if not cfg.channel.enabled or not cfg.channel.chat_id:
+        return 0
+    try:
+        st = publish_channel(cfg, conn, tg_api,
+                             budget=cfg.channel.max_posts_per_sweep if budget is None else budget)
+        log.info("canal (pendientes): %s", st)
+        return st["posted"]
+    except Exception as e:
+        log.warning("canal (pendientes) falló: %s", e)
+        return 0
+
+
 # ---------------- digests (B/C/D/E — spec v3 §5) ----------------
 
 def _bucket(kind: str, now: datetime) -> str:

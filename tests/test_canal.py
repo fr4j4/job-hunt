@@ -450,3 +450,18 @@ def test_help_text_html_valido():
 
     _V().feed(_help_text())   # error si hay tags malformados
     assert "score≤" in _help_text() or "score<=" not in _help_text()
+
+
+def test_publicar_pendientes_nunca_lanza(monkeypatch):
+    """Tras batch IA / rescore global el canal publica lo elegible; un fallo no se propaga."""
+    from types import SimpleNamespace
+    from jobhunt import channel
+    cfg = SimpleNamespace(channel=SimpleNamespace(enabled=True, chat_id="1", max_posts_per_sweep=7))
+    vistos = {}
+    monkeypatch.setattr(channel, "publish_channel",
+                        lambda c, conn, api, budget=None, **kw: vistos.update(b=budget) or {"posted": 3})
+    assert channel.publicar_pendientes(cfg, None, None) == 3 and vistos["b"] == 7
+    monkeypatch.setattr(channel, "publish_channel", lambda *a, **k: 1 / 0)
+    assert channel.publicar_pendientes(cfg, None, None) == 0
+    cfg.channel.chat_id = ""
+    assert channel.publicar_pendientes(cfg, None, None) == 0

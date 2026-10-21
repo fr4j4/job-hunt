@@ -1633,6 +1633,9 @@ def _ia_batch_async(cfg: Config, chat_id: int | None, scheduled: bool = False,
                 database.register_criteria_version(conn3, version_id, cfg)
                 rescored = database.rescore_all(conn3, compute_score, version_id, cfg,
                                             market_score_fn=compute_market_score)
+                # la IA/ficha recién aplicada hace elegibles ofertas del pool: publicarlas ya
+                from .channel import publicar_pendientes
+                publicar_pendientes(cfg, conn3, _tg_api_for_channel(cfg))
             finally:
                 conn3.close()
         except Exception as e:
@@ -1724,6 +1727,8 @@ def _encaje_async(cfg: Config, chat_id: int | None, max_n: int | None = None) ->
             database.register_criteria_version(conn, version_id, cfg)
             rescored = database.rescore_all(conn, compute_score, version_id, cfg,
                                             market_score_fn=compute_market_score)
+            from .channel import publicar_pendientes
+            publicar_pendientes(cfg, conn, _tg_api_for_channel(cfg))
         finally:
             conn.close()
         dur = int(time.time() - t0)
