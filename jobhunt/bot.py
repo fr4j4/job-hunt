@@ -967,14 +967,10 @@ def _stats_text(cfg: Config) -> str:
         ia = q("SELECT COUNT(*) FROM ofertas WHERE active=1 AND ia_model != ''")
         con_mod = q("SELECT COUNT(*) FROM ofertas WHERE active=1 AND modality != ''")
         con_sal = q("SELECT COUNT(*) FROM ofertas WHERE active=1 AND salary != ''")
-        # C9 ampliado (mismo criterio que el ACK del enrich): procesables AHORA
-        en_cola = q("""SELECT COUNT(*) FROM ofertas WHERE active=1 AND ia_model=''
-                       AND (length(description)>200 OR description_source!='')
-                       AND (modality='' OR salary='' OR description IS NULL OR
-                            salary_status IN ('implausible','suspect'))""")
-        # sin IA + sin descripción suficiente → requieren scan (no enrich)
-        sin_ficha = q("""SELECT COUNT(*) FROM ofertas WHERE active=1 AND ia_model=''
-                         AND NOT (length(description)>200 OR description_source!='')""")
+        # mismo criterio que el batch y el ACK de /enrich (una sola definición en enrich.py)
+        from .enrich import ia_queue_count, ia_sin_ficha_count
+        en_cola = ia_queue_count(conn)
+        sin_ficha = ia_sin_ficha_count(conn)
         # modelo ACTIVO (config) — no el de la última oferta por last_seen
         # (last_seen refleja el search, no cuándo se procesó con IA — engañoso)
         modelo_activo = cfg.ia.local_model if cfg.ia.local_enabled else cfg.ia.model
@@ -1579,11 +1575,10 @@ def _ia_batch_async(cfg: Config, chat_id: int | None, scheduled: bool = False,
     try:
         conn = database.connect(cfg)
         try:
-            from .enrich import run_ia_batch, profile_description, ia_queue_count, enrich_pending
+            from .enrich import (run_ia_batch, profile_description, ia_queue_count,
+                                 ia_sin_ficha_count, enrich_pending)
             cola = ia_queue_count(conn)
-            sin_ficha = conn.execute(
-                "SELECT COUNT(*) FROM ofertas WHERE active=1 AND ia_model='' AND "
-                "NOT (length(description)>200 OR description_source!='')").fetchone()[0]
+            sin_ficha = ia_sin_ficha_count(conn)
         finally:
             conn.close()
         if chat_id:

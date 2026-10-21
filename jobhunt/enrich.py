@@ -772,6 +772,16 @@ def ia_queue_count(conn) -> int:
     ).fetchone()[0]
 
 
+def ia_sin_ficha_count(conn) -> int:
+    """Sin IA y sin texto suficiente (<200 chars: extracto de listado, p.ej. jooble-serp).
+    No entran a la cola (ia_queue_count exige >=200): requieren bajar la ficha. Antes /stats y
+    el ACK de /enrich excluían las que traían description_source aunque el texto fuera un
+    extracto, y esas ofertas no aparecían en ningún contador."""
+    return conn.execute(
+        "SELECT COUNT(*) FROM ofertas WHERE active=1 AND ia_model='' AND "
+        "(description IS NULL OR length(description)<200)").fetchone()[0]
+
+
 _ALIAS_POR_ABBR: dict[str, tuple[str, ...]] = {}
 for _alias, _abbr in _TECH_ABBR.items():
     _ALIAS_POR_ABBR.setdefault(_norm(_abbr), []).append(_alias)   # type: ignore[arg-type]
