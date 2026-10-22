@@ -46,9 +46,15 @@ def fit_ok(row: dict, cfg: Config) -> bool:
     Sin veredicto IA (campo vacío) no bloquea: manda el score determinista."""
     if not cfg.channel.require_fit:
         return True
-    if (row.get("ai_encaje") or "").strip().lower() in _ENCAJE_NO:
-        return False
     score = row.get("score")
+    encaje = (row.get("ai_encaje") or "").strip().lower()
+    if encaje in _ENCAJE_NO:
+        # 'bajo' es un veredicto blando (la IA local lo da casi siempre por "el stack no coincide
+        # con el perfil", y eso ya está en el score determinista): un score de perfil alto lo
+        # supera. 'ninguno' (no es del rubro) veta siempre.
+        ov = cfg.channel.encaje_bajo_override
+        if not (encaje == "bajo" and ov and int(score or 0) >= ov):
+            return False
     if score is None:
         return True
     return int(score or 0) > 0 and int(score or 0) >= cfg.channel.min_fit_score
@@ -70,6 +76,13 @@ def tiene_senal_tech(title: str | None, techs: str | None) -> bool:
     return bool(_SENAL_TECH.search(title or "") or (techs or "").strip())
 
 
+_AMBIGUAS = {"Otro", "Analista/Empresa"}
+_TITULO_DEV = re.compile(
+    r"software|back.?end|front.?end|full.?stack|devops|python|\bjava\b|\.net|abap|salesforce|"
+    r"\bweb developer|\bdeveloper\b|desarrollador(?:a|/a)?\s+(?:web|full|back|front|java|python|sap|"
+    r"salesforce|mobile|m[oó]vil|de software|de aplicaciones)|engineering manager", re.I)
+_TITULO_NO_DEV = re.compile(
+    r"business developer|de negocios|punto de venta|\bplc\b|mantenc|mantenim|volunteer|voluntari", re.I)
 _NONDEV_CATEGORIES = {"Ingeniería no-software", "Analista/Empresa", "Profesor/Formación",
                       "Soporte/TI", "No-tech", "Otro"}
 
@@ -83,6 +96,8 @@ def is_dev(rol_categoria: str | None, title: str, cfg: Config, description: str 
     La IA es la autoridad: categoría no-dev explícita → False siempre."""
     rc = (rol_categoria or "").strip()
     if rc:
+        if rc in _AMBIGUAS and _TITULO_DEV.search(title or "") and not _TITULO_NO_DEV.search(title or ""):
+            return True   # la IA dejó en 'Otro'/'Analista' un cargo que el título delata como dev
         if rc in _NONDEV_CATEGORIES:
             return False
         if rc in _DEV_CATEGORIES:

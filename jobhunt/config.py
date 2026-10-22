@@ -193,6 +193,8 @@ class ChannelCfg:
     require_dev: bool = True       # rol_categoria ∈ set dev
     require_fit: bool = True       # exige encaje con el perfil (score + veredicto IA)
     min_fit_score: int = 45        # score de perfil mínimo (0 = sin piso; base=40 sin señales)
+    encaje_bajo_override: int = 60  # IA 'bajo' NO veta si el score de perfil es >= esto (0 = el veto es absoluto)
+    max_unseen_hours: int = 72     # no publicar ofertas que su fuente lleva >N h sin devolver (0 = OFF)
     digest_daily: bool = True
     digest_daily_hour_utc: int = 21
     digest_weekly: bool = True
@@ -293,8 +295,8 @@ def load_config(env_file: Path | None = None) -> Config:
         us_hours_penalty=_env_int("SCORE_US_HOURS_PENALTY", -4),
         salary_in_range_bonus=_env_int("SCORE_SALARY_IN_RANGE_BONUS", 5),
         salary_out_soft=_env_int("SCORE_SALARY_OUT_SOFT", -2),
-        stack_overlap_per=_env_float("SCORE_STACK_OVERLAP_PER", 1.5),
-        stack_overlap_max=_env_float("SCORE_STACK_OVERLAP_MAX", 6),
+        stack_overlap_per=_env_float("SCORE_STACK_OVERLAP_PER", 2.5),
+        stack_overlap_max=_env_float("SCORE_STACK_OVERLAP_MAX", 10),
         cap=_env_int("SCORE_CAP", 98),
         modality_bonus={
             "remoto": _env_int("PROFILE_MOD_REMOTO_BONUS", 3),
@@ -437,6 +439,8 @@ def load_config(env_file: Path | None = None) -> Config:
         require_dev=_env_bool("CHANNEL_REQUIRE_DEV", True),
         require_fit=_env_bool("CHANNEL_REQUIRE_FIT", True),
         min_fit_score=_env_int("CHANNEL_MIN_FIT_SCORE", 45),
+        encaje_bajo_override=_env_int("CHANNEL_ENCAJE_BAJO_OVERRIDE", 60),
+        max_unseen_hours=_env_int("CHANNEL_MAX_UNSEEN_HOURS", 72),
         digest_daily=_env_bool("CHANNEL_DIGEST_DAILY", True),
         digest_daily_hour_utc=_env_int("CHANNEL_DIGEST_DAILY_HOUR_UTC", 21),
         digest_weekly=_env_bool("CHANNEL_DIGEST_WEEKLY", True),

@@ -207,16 +207,21 @@ WHERE active=1 AND market_score >= :min_score
   ORDER BY market_score DESC, first_seen DESC"""
 
 
-def _cerradas(conn) -> set[str]:
-    """group_id de ofertas que la analítica da por cerradas (su fuente dejó de verlas — mismo
-    criterio que muestra la web). Una cerrada no se publica: se postearían avisos ya caídos.
-    Sin analítica (tabla ausente) no filtra."""
+def _sin_ver(row: dict, cfg: Config) -> bool:
+    """True si la fuente lleva más de max_unseen_hours sin devolver la oferta (probable aviso
+    caído). Criterio por TIEMPO: el 'cerrada' de la analítica cuenta barridos y con barridos
+    manuales seguidos o rotación de queries marca como cerradas ofertas vivas (1183 reaparecidas
+    de 3138 cierres)."""
+    h = cfg.channel.max_unseen_hours
+    if not h:
+        return False
     try:
-        return {r[0] for r in conn.execute(
-            "SELECT o.group_id FROM oferta_prev p JOIN ofertas o ON o.id=p.oferta_id "
-            "WHERE p.cerrada=1")}
-    except Exception:
-        return set()
+        dt = datetime.fromisoformat(str(row.get("last_seen") or "").replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+    except ValueError:
+        return False
+    return (datetime.now(timezone.utc) - dt).total_seconds() > h * 3600
 
 
 def select_channel_offers(conn, cfg: Config, require_ia: bool = False) -> list[dict]:
@@ -233,10 +238,9 @@ def select_channel_offers(conn, cfg: Config, require_ia: bool = False) -> list[d
         "max_age": cfg.channel.max_age_days,
     }).fetchall()
     out = []
-    cerradas = _cerradas(conn)
     for r in rows:
         d = dict(r)
-        if d["group_id"] in cerradas or not tiene_senal_tech(d.get("title"), d.get("techs")):
+        if _sin_ver(d, cfg) or not tiene_senal_tech(d.get("title"), d.get("techs")):
             continue
         if cfg.channel.require_dev and not is_dev(d.get("rol_categoria"), d.get("title") or "", cfg,
                                                   d.get("description") or ""):
@@ -295,10 +299,9 @@ def publish_channel(cfg: Config, conn, tg_api, dry_run: bool = False,
         return stats
 
     posteadas = []
-    cerradas = _cerradas(conn)
     for r in rows:
-        if r["group_id"] in cerradas:
-            stats["skipped_cerrada"] = stats.get("skipped_cerrada", 0) + 1
+        if _sin_ver(r, cfg):
+            stats["skipped_sin_ver"] = stats.get("skipped_sin_ver", 0) + 1
             continue
         if not tiene_senal_tech(r.get("title"), r.get("techs")):
             stats["skipped_sin_senal"] = stats.get("skipped_sin_senal", 0) + 1
