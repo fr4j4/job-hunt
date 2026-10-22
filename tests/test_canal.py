@@ -465,3 +465,28 @@ def test_publicar_pendientes_nunca_lanza(monkeypatch):
     assert channel.publicar_pendientes(cfg, None, None) == 0
     cfg.channel.chat_id = ""
     assert channel.publicar_pendientes(cfg, None, None) == 0
+
+
+def test_senal_tech_bloquea_lead_no_tecnico():
+    from jobhunt.domain.roles import tiene_senal_tech as t
+    assert t("Tech Lead", "") and t("Desarrollador Java", "") and t("Project Lead", "Py;AWS")
+    assert not t("Energy Initiatives Lead, LATAM", "") and not t("Partnership Lead (US & LATAM)", "")
+
+
+def test_gate_excluye_cerradas_y_expira_sin_texto():
+    import sqlite3
+    from jobhunt import channel, db
+    c = sqlite3.connect(":memory:")
+    c.row_factory = sqlite3.Row
+    assert channel._cerradas(c) == set()            # sin tabla de analítica: no filtra
+    c.execute("CREATE TABLE ofertas (id INTEGER PRIMARY KEY, group_id TEXT, active INT, ia_model TEXT,"
+              " description TEXT, fetch_fails INT, last_seen TEXT)")
+    c.execute("CREATE TABLE oferta_prev (oferta_id INTEGER PRIMARY KEY, cerrada INT)")
+    c.executemany("INSERT INTO ofertas VALUES (?,?,1,'',?,?,?)", [
+        (1, "a", "", 3, "2026-01-01T00:00:00+00:00"),     # sin texto, sin ficha, vieja → se desactiva
+        (2, "b", "", 3, "2999-01-01T00:00:00+00:00"),     # vista hace poco → se queda
+        (3, "c", "x" * 300, 3, "2026-01-01T00:00:00+00:00")])   # con texto → se queda
+    c.executemany("INSERT INTO oferta_prev VALUES (?,?)", [(1, 1), (2, 0)])
+    assert channel._cerradas(c) == {"a"}
+    assert db.expirar_sin_texto(c) == 1
+    assert [r["active"] for r in c.execute("SELECT active FROM ofertas ORDER BY id")] == [0, 1, 1]

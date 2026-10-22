@@ -24,6 +24,7 @@ from .domain.roles import (  # noqa: F401
     _categorias_dev,
     fit_ok,
     is_dev,
+    tiene_senal_tech,
 )
 from .logging_setup import get_logger
 
@@ -206,6 +207,18 @@ WHERE active=1 AND market_score >= :min_score
   ORDER BY market_score DESC, first_seen DESC"""
 
 
+def _cerradas(conn) -> set[str]:
+    """group_id de ofertas que la analítica da por cerradas (su fuente dejó de verlas — mismo
+    criterio que muestra la web). Una cerrada no se publica: se postearían avisos ya caídos.
+    Sin analítica (tabla ausente) no filtra."""
+    try:
+        return {r[0] for r in conn.execute(
+            "SELECT o.group_id FROM oferta_prev p JOIN ofertas o ON o.id=p.oferta_id "
+            "WHERE p.cerrada=1")}
+    except Exception:
+        return set()
+
+
 def select_channel_offers(conn, cfg: Config, require_ia: bool = False) -> list[dict]:
     """Candidatas al canal (market gate + edad + dev + no notificadas).
 
@@ -220,8 +233,11 @@ def select_channel_offers(conn, cfg: Config, require_ia: bool = False) -> list[d
         "max_age": cfg.channel.max_age_days,
     }).fetchall()
     out = []
+    cerradas = _cerradas(conn)
     for r in rows:
         d = dict(r)
+        if d["group_id"] in cerradas or not tiene_senal_tech(d.get("title"), d.get("techs")):
+            continue
         if cfg.channel.require_dev and not is_dev(d.get("rol_categoria"), d.get("title") or "", cfg,
                                                   d.get("description") or ""):
             continue
@@ -279,7 +295,14 @@ def publish_channel(cfg: Config, conn, tg_api, dry_run: bool = False,
         return stats
 
     posteadas = []
+    cerradas = _cerradas(conn)
     for r in rows:
+        if r["group_id"] in cerradas:
+            stats["skipped_cerrada"] = stats.get("skipped_cerrada", 0) + 1
+            continue
+        if not tiene_senal_tech(r.get("title"), r.get("techs")):
+            stats["skipped_sin_senal"] = stats.get("skipped_sin_senal", 0) + 1
+            continue
         if cfg.channel.require_dev and not is_dev(r.get("rol_categoria"), r.get("title") or "", cfg,
                                                   r.get("description") or ""):
             stats["skipped_dev"] += 1

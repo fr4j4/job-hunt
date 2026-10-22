@@ -54,6 +54,22 @@ def fit_ok(row: dict, cfg: Config) -> bool:
     return int(score or 0) > 0 and int(score or 0) >= cfg.channel.min_fit_score
 
 
+_SENAL_TECH = re.compile(
+    r"\bdev|developer|desarroll|program|software|\bswe\b|coding|\bcode\b|backend|back.end|frontend|"
+    r"front.end|full.?stack|devops|\bdata\b|datos|python|java|\.net|node|react|angular|cloud|\bsre\b|"
+    r"\bqa\b|tester|testing|ingenier|engineer|arquitect|architect|tecnolog|\btech\b|\bia\b|\bai\b|"
+    r"machine|\bml\b|mobile|android|\bios\b|abap|\bsap\b|sql|dba|seguridad|security|infra|"
+    r"integraci|analista|sistemas|\bti\b|\bit\b|ciber|cyber|\bweb\b|aplicaci|plataforma|platform",
+    re.I)
+
+
+def tiene_senal_tech(title: str | None, techs: str | None) -> bool:
+    """El título nombra algo técnico o la oferta tiene techs detectadas. La IA a veces etiqueta
+    como 'Tech Lead'/'QA' cargos de gestión o calidad industrial ('Energy Initiatives Lead',
+    'Partnership Lead', 'Jefe de calidad'): sin señal técnica en ninguna parte no se publican."""
+    return bool(_SENAL_TECH.search(title or "") or (techs or "").strip())
+
+
 _NONDEV_CATEGORIES = {"Ingeniería no-software", "Analista/Empresa", "Profesor/Formación",
                       "Soporte/TI", "No-tech", "Otro"}
 

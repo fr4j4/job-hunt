@@ -408,6 +408,20 @@ def upsert(conn: sqlite3.Connection, job: dict, now_iso: str) -> tuple[str, bool
         return job["uid"], False
 
 
+def expirar_sin_texto(conn: sqlite3.Connection, dias: int = 7) -> int:
+    """Desactiva ofertas sin IA, sin texto utilizable (<200 chars) y sin ficha recuperable
+    (fetch_fails>=3) que su fuente lleva `dias` sin devolver. No hay nada que enriquecer ni
+    publicar: solo inflaban la cola 'sin ficha' y el pool. Si la fuente las devuelve de nuevo,
+    upsert las reactiva (active=1)."""
+    n = conn.execute("""UPDATE ofertas SET active=0
+        WHERE active=1 AND ia_model='' AND (description IS NULL OR length(description)<200)
+          AND COALESCE(fetch_fails,0)>=3
+          AND last_seen < strftime('%Y-%m-%dT%H:%M:%S', 'now', ?)""",
+                     (f"-{int(dias)} day",)).rowcount
+    conn.commit()
+    return n
+
+
 def db_find_duplicate(conn: sqlite3.Connection, job: dict) -> str | None:
     from .dedup import find_duplicate
     return find_duplicate(conn, job)

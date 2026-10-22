@@ -356,6 +356,13 @@ def cmd_run(cfg, notify: bool = True, on_phase=None, stop_event: threading.Event
                 except Exception as e:
                     log.warning("canal falló (barrido continúa): %s", e)
 
+        try:
+            n_exp = database.expirar_sin_texto(conn)
+            if n_exp:
+                log.info("pool: %d ofertas sin texto ni ficha recuperable desactivadas (>7 días sin verse)", n_exp)
+        except Exception as e:
+            log.warning("expirar_sin_texto falló (barrido continúa): %s", e)
+
         # analítica (web v2): derivadas + historia. Nunca tumba el barrido.
         if cfg.analytics.enabled:
             try:
