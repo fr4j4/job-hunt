@@ -835,23 +835,24 @@ def run_ia_batch(conn, cfg: Config, profile_desc: str, max_n: int | None = None,
     rate_racha = 0   # OPS-4: circuito nocturno ante tormenta 429/5xx (backoff + corte)
     local = cfg.ia.local_enabled
     N = 1 if local else (cfg.ia.batch_prompt if cfg.ia.batch_prompt > 1 else 1)
-    for i in range(0, total, N):
-        # /stop: corte limpio ENTRE grupos — lo procesado ya está commiteado
-        if stop_event is not None and stop_event.is_set():
-            log.warning("batch IA detenido por /stop tras %d/%d", done, total)
-            break
-        grupo = pending[i:i + N]
-        if N > 1:
-            arr, err = ia_extract_lote(cfg, grupo, profile_desc, mercado)
+    if N > 1:
+        # modo lote cloud: antes 100% secuencial (un ia_extract_lote detrás de
+        # otro) — ahora respeta IA_CONCURRENCY (mismo patrón que el modo local
+        # de abajo): varios lotes en vuelo vía threads SOLO HTTP (P0-3), el
+        # MAIN sigue siendo el único que escribe/commitea (patrón conexión única).
+        lotes = [pending[i:i + N] for i in range(0, total, N)]
+        n_lotes = len(lotes)
+        concurrency = max(1, min(cfg.ia.concurrency, n_lotes))
+
+        def _aplicar_resultado_lote(grupo, arr, err):
+            nonlocal rate_racha, done
             if arr is None:
                 if err == "rate":
                     rate_racha += 1
                     if rate_racha >= 10:
-                        log.warning("batch IA nocturno: %d fallos 429/5xx seguidos — circuito cortado, "
-                                    "resto queda en cola para el próximo batch", rate_racha)
-                        break
+                        return False   # señal: cortar el circuito (breaker)
                     time.sleep(min(60, 5 * rate_racha))
-                    continue
+                    return True
                 rate_racha = 0
                 for r in grupo:   # fallback individual (timeout/other) — §2.5
                     parsed, _ = ia_extract_detail(cfg, r, profile_desc, mercado)
@@ -859,7 +860,7 @@ def run_ia_batch(conn, cfg: Config, profile_desc: str, max_n: int | None = None,
                         conn.commit()
                         done += 1
                     time.sleep(0.5)
-                continue
+                return True
             rate_racha = 0
             idxs: dict[int, dict] = {}
             for item in arr:
@@ -879,12 +880,56 @@ def run_ia_batch(conn, cfg: Config, profile_desc: str, max_n: int | None = None,
                     conn.commit()
                     done += 1
                 time.sleep(0.5)
-            if progress:
-                try:
-                    progress(min(i + N, total), total, f"lote {i // N + 1}")
-                except Exception:
-                    pass
+            return True
+
+        if concurrency > 1 and n_lotes > 1:
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            n_vistos = 0
+            with ThreadPoolExecutor(max_workers=concurrency) as ex:
+                futures = {ex.submit(ia_extract_lote, cfg, grupo, profile_desc, mercado): grupo
+                          for grupo in lotes}
+                for fut in as_completed(futures):
+                    grupo = futures[fut]
+                    if stop_event is not None and stop_event.is_set():
+                        log.warning("batch IA detenido por /stop tras %d/%d lotes", n_vistos, n_lotes)
+                        for f in futures:
+                            f.cancel()
+                        break
+                    arr, err = fut.result()
+                    n_vistos += 1
+                    if not _aplicar_resultado_lote(grupo, arr, err):
+                        log.warning("batch IA nocturno: %d fallos 429/5xx seguidos — circuito cortado, "
+                                    "resto queda en cola para el próximo batch", rate_racha)
+                        for f in futures:
+                            f.cancel()
+                        break
+                    if progress:
+                        try:
+                            progress(min(n_vistos * N, total), total, f"lote {n_vistos}/{n_lotes}")
+                        except Exception:
+                            pass
         else:
+            for i, grupo in enumerate(lotes, 1):
+                if stop_event is not None and stop_event.is_set():
+                    log.warning("batch IA detenido por /stop tras %d/%d", done, total)
+                    break
+                arr, err = ia_extract_lote(cfg, grupo, profile_desc, mercado)
+                if not _aplicar_resultado_lote(grupo, arr, err):
+                    log.warning("batch IA nocturno: %d fallos 429/5xx seguidos — circuito cortado, "
+                                "resto queda en cola para el próximo batch", rate_racha)
+                    break
+                if progress:
+                    try:
+                        progress(min(i * N, total), total, f"lote {i}/{n_lotes}")
+                    except Exception:
+                        pass
+    else:
+        for i in range(0, total, N):
+            # /stop: corte limpio ENTRE grupos — lo procesado ya está commiteado
+            if stop_event is not None and stop_event.is_set():
+                log.warning("batch IA detenido por /stop tras %d/%d", done, total)
+                break
+            grupo = pending[i:i + N]
             # spec-ia-local: paralelo por oferta (2 tareas/oferta) — usa
             # local_concurrency (decisión #3, speedup 1.54x). Los workers usan
             # ia_extract_local_con_fallback (etiqueta el modelo REAL — IA-1 del
