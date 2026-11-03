@@ -185,8 +185,9 @@ def _insert(conn, gid, title="Dev Python", ms=80, rol="Backend", company="X Corp
         notified_channel_at, date_canonical)
         VALUES (?, ?, 'X Corp', 'Chile', 'https://x.cl/1', 'test:x', 'test', 'test',
         'CLP 2500000', ?, ?, 'Py;SQL', 50, 'env-test', '2026-09-02T10:00:00+00:00',
-        '2026-09-02T10:00:00+00:00', 1, 1, ?, ?, ?, ?)""",
-                 (gid, title, modality, desc, rol, ms, notified, date_canonical))
+        ?, 1, 1, ?, ?, ?, ?)""",
+                 (gid, title, modality, desc, datetime.now(timezone.utc).isoformat(),   # visto ahora
+                  rol, ms, notified, date_canonical))
     conn.commit()
 
 
@@ -450,3 +451,64 @@ def test_help_text_html_valido():
 
     _V().feed(_help_text())   # error si hay tags malformados
     assert "score≤" in _help_text() or "score<=" not in _help_text()
+
+
+def test_publicar_pendientes_nunca_lanza(monkeypatch):
+    """Tras batch IA / rescore global el canal publica lo elegible; un fallo no se propaga."""
+    from types import SimpleNamespace
+    from jobhunt import channel
+    cfg = SimpleNamespace(channel=SimpleNamespace(enabled=True, chat_id="1", max_posts_per_sweep=7))
+    vistos = {}
+    monkeypatch.setattr(channel, "publish_channel",
+                        lambda c, conn, api, budget=None, **kw: vistos.update(b=budget) or {"posted": 3})
+    assert channel.publicar_pendientes(cfg, None, None) == 3 and vistos["b"] == 7
+    monkeypatch.setattr(channel, "publish_channel", lambda *a, **k: 1 / 0)
+    assert channel.publicar_pendientes(cfg, None, None) == 0
+    cfg.channel.chat_id = ""
+    assert channel.publicar_pendientes(cfg, None, None) == 0
+
+
+def test_senal_tech_bloquea_lead_no_tecnico():
+    from jobhunt.domain.roles import tiene_senal_tech as t
+    assert t("Tech Lead", "") and t("Desarrollador Java", "") and t("Project Lead", "Py;AWS")
+    assert not t("Energy Initiatives Lead, LATAM", "") and not t("Partnership Lead (US & LATAM)", "")
+
+
+def test_sin_ver_y_expira_sin_texto():
+    import sqlite3
+    from types import SimpleNamespace
+    from jobhunt import channel, db
+    cfg = SimpleNamespace(channel=SimpleNamespace(max_unseen_hours=72))
+    assert channel._sin_ver({"last_seen": "2026-01-01T00:00:00+00:00"}, cfg)
+    assert not channel._sin_ver({"last_seen": "2999-01-01T00:00:00+00:00"}, cfg)
+    cfg.channel.max_unseen_hours = 0
+    assert not channel._sin_ver({"last_seen": "2026-01-01T00:00:00+00:00"}, cfg)
+    c = sqlite3.connect(":memory:")
+    c.row_factory = sqlite3.Row
+    c.execute("CREATE TABLE ofertas (id INTEGER PRIMARY KEY, group_id TEXT, active INT, ia_model TEXT,"
+              " description TEXT, fetch_fails INT, last_seen TEXT)")
+    c.executemany("INSERT INTO ofertas VALUES (?,?,1,'',?,?,?)", [
+        (1, "a", "", 3, "2026-01-01T00:00:00+00:00"),     # sin texto, sin ficha, vieja → se desactiva
+        (2, "b", "", 3, "2999-01-01T00:00:00+00:00"),     # vista hace poco → se queda
+        (3, "c", "x" * 300, 3, "2026-01-01T00:00:00+00:00")])   # con texto → se queda
+    assert db.expirar_sin_texto(c) == 1
+    assert [r["active"] for r in c.execute("SELECT active FROM ofertas ORDER BY id")] == [0, 1, 1]
+
+
+def test_fit_ok_bajo_blando_ninguno_duro():
+    from types import SimpleNamespace
+    from jobhunt.domain.roles import fit_ok, is_dev
+    cfg = SimpleNamespace(channel=SimpleNamespace(require_fit=True, min_fit_score=45,
+                                                  encaje_bajo_override=60), ia=SimpleNamespace(enabled=True))
+    assert not fit_ok({"ai_encaje": "bajo", "score": 55}, cfg)
+    assert fit_ok({"ai_encaje": "bajo", "score": 60}, cfg)          # score de perfil alto supera el 'bajo'
+    assert not fit_ok({"ai_encaje": "ninguno", "score": 90}, cfg)   # 'ninguno' veta siempre
+    assert is_dev("Otro", "Desarrollador/a Salesforce - BECH", cfg) is True
+    assert is_dev("Otro", "Business Developer Concepción", cfg) is False
+    assert is_dev("Otro", "Programador de mantenimiento planta", cfg) is False
+
+
+def test_stack_overlap_cuenta_python_y_k8s():
+    from jobhunt.scoring import _perfil_abbrs
+    ab = _perfil_abbrs(["python", "kubernetes", "spring boot", "apache nifi", "postgresql"])
+    assert {"Py", "K8s", "Spring", "NiFi", "Postgres"} <= ab

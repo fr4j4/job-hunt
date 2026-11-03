@@ -20,7 +20,8 @@ def test_fit_ok_bloquea_score_bajo_y_encaje_bajo():
     c = _cfg()
     assert fit_ok({"score": 60, "ai_encaje": "alto"}, c)
     assert fit_ok({"score": 60, "ai_encaje": ""}, c)             # sin veredicto IA: manda el score
-    assert not fit_ok({"score": 60, "ai_encaje": "bajo"}, c)
+    assert not fit_ok({"score": 55, "ai_encaje": "bajo"}, c)     # 'bajo' veta con score de perfil < 60
+    assert fit_ok({"score": 60, "ai_encaje": "bajo"}, c)         # …y un score alto lo supera
     assert not fit_ok({"score": 60, "ai_encaje": "Ninguno"}, c)
     assert not fit_ok({"score": 40, "ai_encaje": "alto"}, c)     # sin señales de perfil
     assert not fit_ok({"score": 0, "ai_encaje": "alto"}, c)      # red keyword

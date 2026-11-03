@@ -42,7 +42,8 @@ def build_keywords(cfg: Config) -> list[str]:
               cfg.search.queries_indeed + cfg.search.queries_glassdoor +
               cfg.search.queries_laborum + cfg.search.queries_jooble +
               cfg.search.queries_accenture + cfg.search.queries_getonboard +
-              cfg.search.queries_himalayas + cfg.search.queries_remotive):
+              cfg.search.queries_himalayas + cfg.search.queries_remotive +
+              cfg.search.queries_chiletrabajos + cfg.search.queries_trabajando):
         add(q)
     return kw
 

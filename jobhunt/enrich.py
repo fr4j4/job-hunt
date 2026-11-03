@@ -356,6 +356,27 @@ def _extract_aira_spa(url: str) -> dict:
 # (SPA que no renderiza sin sesión). No se intenta saltar el captcha: se marcan 'blocked'.
 _JOOBLE_DESTINOS_VEDADOS = ("appcast.io", "captcha-delivery.com", "fitly.work")
 _JOOBLE_SEM = threading.BoundedSemaphore(2)   # Chromium es pesado: máx 2 a la vez
+# cortacircuitos: si el /away/ de Jooble se queda en el challenge N veces seguidas, se deja de lanzar
+# Chromium por un rato (cada intento perdido cuesta ~25 s y quemaba un intento de fetch_fails)
+_JOOBLE_BREAKER = {"fallos": 0, "hasta": 0.0}
+_JOOBLE_FALLOS_MAX = 4
+_JOOBLE_PAUSA_S = 6 * 3600
+
+
+def _jooble_en_pausa() -> bool:
+    return time.time() < _JOOBLE_BREAKER["hasta"]
+
+
+def _jooble_resultado(ok: bool, challenge: bool = False) -> None:
+    if ok:
+        _JOOBLE_BREAKER["fallos"] = 0
+    elif challenge:
+        _JOOBLE_BREAKER["fallos"] += 1
+        if _JOOBLE_BREAKER["fallos"] >= _JOOBLE_FALLOS_MAX:
+            _JOOBLE_BREAKER["hasta"] = time.time() + _JOOBLE_PAUSA_S
+            _JOOBLE_BREAKER["fallos"] = 0
+            log.warning("jooble-destino: %d challenges seguidos → pausa de %dh sin lanzar Chromium",
+                        _JOOBLE_FALLOS_MAX, _JOOBLE_PAUSA_S // 3600)
 
 
 def _extract_jooble_destino(url: str) -> dict:
@@ -365,6 +386,8 @@ def _extract_jooble_destino(url: str) -> dict:
     (JSON-LD JobPosting; si no hay, el bloque principal de texto)."""
     from urllib.parse import urlparse
     info: dict = {"_access": "blocked", "description": "", "description_source": "jooble-destino"}
+    if _jooble_en_pausa():
+        return {"_access": "skip", "error": "jooble-destino en pausa (challenge)"}
     with _JOOBLE_SEM:
         try:
             from playwright.sync_api import sync_playwright
@@ -388,6 +411,7 @@ def _extract_jooble_destino(url: str) -> dict:
                             break
                     if not host or "jooble.org" in host:
                         info["error"] = "sin redirect (challenge)"
+                        _jooble_resultado(False, challenge=True)
                         return info
                     try:
                         pg.wait_for_load_state("networkidle", timeout=8000)
@@ -408,6 +432,7 @@ def _extract_jooble_destino(url: str) -> dict:
                         return info
                     ficha["description"] = desc[:MAX_DESC]
                     ficha.update(_access="ok", description_source="jooble-destino")
+                    _jooble_resultado(True)
                     return ficha
                 finally:
                     br.close()
@@ -440,6 +465,15 @@ def _fetch_ficha(r: dict) -> dict:
             return _extract_aira_spa(url)
         if "jooble.org/away/" in url:
             return _extract_jooble_destino(url)
+        if "chiletrabajos.cl/trabajo/" in url:
+            from .sources.chiletrabajos import fetch_ficha
+            return fetch_ficha(url)
+        if "wearestaffy.com/positions/" in url:
+            from .sources.staffy import fetch_ficha
+            return fetch_ficha(url)
+        if "trabajando.cl/trabajo/" in url or "trabajando.cl/trabajo-empleo/" in url:   # el 2.º es el enlace antiguo roto
+            from .sources.trabajando import fetch_ficha
+            return fetch_ficha(url)
         if "linkedin.com/jobs/view/" in url:
             from .sources.linkedin import fetch_description
             meta = fetch_description(url)
@@ -474,6 +508,8 @@ def _aplicar_ficha(conn, r: dict, info: dict, pool: list[int], cfg: Config | Non
     regex NO se ejecuta (la IA es la única fuente de techs)."""
     from . import stats as _st
     access = info.get("_access", "ok")
+    if access == "skip":      # fuente en pausa: no cuenta como intento fallido de la oferta
+        return "blocked"
     if info.get("_cb_expired") or access == "not_found":
         conn.execute("UPDATE ofertas SET active=0 WHERE group_id=?", (r["group_id"],))
         conn.commit()
@@ -579,6 +615,9 @@ def enrich_pending(conn, cfg: Config | None, max_n: int | None = None,
                    groups: set[str] | None = None, stop_event=None,
                    solo_fetch: bool = False) -> int:
     """Enriquece ofertas activas con descripción corta: Anillo A primero, C si sigue vacío.
+    Los extractos de Jooble ('jooble-serp', 250-400 caracteres) NO se piden aparte: el /away/ de
+    Jooble hoy se queda en el challenge de Cloudflare ('sin redirect') y cada intento cuesta ~25 s
+    de Chromium sin rendir ficha (probado 19-oct-2026: 0 de 249).
 
     spec-enrich-lotes v2 (§3-5): fetch paralelo (threads SOLO HTTP, el main escribe),
     recarga N' tras fetch, pool de salarios cacheado con LOO, modo lote IA si
@@ -731,6 +770,16 @@ def ia_queue_count(conn) -> int:
         "(salary != '' AND (ai_opinion LIKE '%sin salario%' OR ai_opinion LIKE '%sin sueldo%' "
         "OR ai_opinion LIKE '%no declara%' OR ai_opinion LIKE '%carece de datos monetarios%')))"
     ).fetchone()[0]
+
+
+def ia_sin_ficha_count(conn) -> int:
+    """Sin IA y sin texto suficiente (<200 chars: extracto de listado, p.ej. jooble-serp).
+    No entran a la cola (ia_queue_count exige >=200): requieren bajar la ficha. Antes /stats y
+    el ACK de /enrich excluían las que traían description_source aunque el texto fuera un
+    extracto, y esas ofertas no aparecían en ningún contador."""
+    return conn.execute(
+        "SELECT COUNT(*) FROM ofertas WHERE active=1 AND ia_model='' AND "
+        "(description IS NULL OR length(description)<200)").fetchone()[0]
 
 
 _ALIAS_POR_ABBR: dict[str, tuple[str, ...]] = {}
@@ -1034,23 +1083,24 @@ def run_ia_batch(conn, cfg: Config, profile_desc: str, max_n: int | None = None,
     rate_racha = 0   # OPS-4: circuito nocturno ante tormenta 429/5xx (backoff + corte)
     local = cfg.ia.local_enabled
     N = 1 if local else (cfg.ia.batch_prompt if cfg.ia.batch_prompt > 1 else 1)
-    for i in range(0, total, N):
-        # /stop: corte limpio ENTRE grupos — lo procesado ya está commiteado
-        if stop_event is not None and stop_event.is_set():
-            log.warning("batch IA detenido por /stop tras %d/%d", done, total)
-            break
-        grupo = pending[i:i + N]
-        if N > 1:
-            arr, err = ia_extract_lote(cfg, grupo, profile_desc, mercado)
+    if N > 1:
+        # modo lote cloud: antes 100% secuencial (un ia_extract_lote detrás de
+        # otro) — ahora respeta IA_CONCURRENCY (mismo patrón que el modo local
+        # de abajo): varios lotes en vuelo vía threads SOLO HTTP (P0-3), el
+        # MAIN sigue siendo el único que escribe/commitea (patrón conexión única).
+        lotes = [pending[i:i + N] for i in range(0, total, N)]
+        n_lotes = len(lotes)
+        concurrency = max(1, min(cfg.ia.concurrency, n_lotes))
+
+        def _aplicar_resultado_lote(grupo, arr, err):
+            nonlocal rate_racha, done
             if arr is None:
                 if err == "rate":
                     rate_racha += 1
                     if rate_racha >= 10:
-                        log.warning("batch IA nocturno: %d fallos 429/5xx seguidos — circuito cortado, "
-                                    "resto queda en cola para el próximo batch", rate_racha)
-                        break
+                        return False   # señal: cortar el circuito (breaker)
                     time.sleep(min(60, 5 * rate_racha))
-                    continue
+                    return True
                 rate_racha = 0
                 for r in grupo:   # fallback individual (timeout/other) — §2.5
                     parsed, _ = ia_extract_detail(cfg, r, profile_desc, mercado)
@@ -1058,7 +1108,7 @@ def run_ia_batch(conn, cfg: Config, profile_desc: str, max_n: int | None = None,
                         conn.commit()
                         done += 1
                     time.sleep(0.5)
-                continue
+                return True
             rate_racha = 0
             idxs: dict[int, dict] = {}
             for item in arr:
@@ -1078,12 +1128,64 @@ def run_ia_batch(conn, cfg: Config, profile_desc: str, max_n: int | None = None,
                     conn.commit()
                     done += 1
                 time.sleep(0.5)
-            if progress:
-                try:
-                    progress(min(i + N, total), total, f"lote {i // N + 1}")
-                except Exception:
-                    pass
+            return True
+
+        if concurrency > 1 and n_lotes > 1:
+            from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
+            n_vistos = 0
+            siguiente = 0
+            en_vuelo: dict = {}
+            parar = False
+            # Ventana deslizante: nunca más de `concurrency` lotes en vuelo. Así el breaker de
+            # 429/5xx y /stop frenan de verdad (no hay decenas de llamadas ya lanzadas).
+            with ThreadPoolExecutor(max_workers=concurrency) as ex:
+                while True:
+                    while (not parar and siguiente < n_lotes and len(en_vuelo) < concurrency
+                           and not (stop_event is not None and stop_event.is_set())):
+                        g = lotes[siguiente]
+                        en_vuelo[ex.submit(ia_extract_lote, cfg, g, profile_desc, mercado)] = g
+                        siguiente += 1
+                    if not en_vuelo:
+                        break
+                    hechos, _ = wait(list(en_vuelo), return_when=FIRST_COMPLETED)
+                    for fut in hechos:
+                        grupo = en_vuelo.pop(fut)
+                        arr, err = fut.result()
+                        n_vistos += 1
+                        if not parar and not _aplicar_resultado_lote(grupo, arr, err):
+                            log.warning("batch IA nocturno: %d fallos 429/5xx seguidos — circuito cortado, "
+                                        "resto queda en cola para el próximo batch", rate_racha)
+                            parar = True
+                        if progress:
+                            try:
+                                progress(min(n_vistos * N, total), total, f"lote {n_vistos}/{n_lotes}")
+                            except Exception:
+                                pass
+                    if stop_event is not None and stop_event.is_set():
+                        log.warning("batch IA detenido por /stop tras %d/%d lotes", n_vistos, n_lotes)
+                        parar = True
         else:
+            for i, grupo in enumerate(lotes, 1):
+                if stop_event is not None and stop_event.is_set():
+                    log.warning("batch IA detenido por /stop tras %d/%d", done, total)
+                    break
+                arr, err = ia_extract_lote(cfg, grupo, profile_desc, mercado)
+                if not _aplicar_resultado_lote(grupo, arr, err):
+                    log.warning("batch IA nocturno: %d fallos 429/5xx seguidos — circuito cortado, "
+                                "resto queda en cola para el próximo batch", rate_racha)
+                    break
+                if progress:
+                    try:
+                        progress(min(i * N, total), total, f"lote {i}/{n_lotes}")
+                    except Exception:
+                        pass
+    else:
+        for i in range(0, total, N):
+            # /stop: corte limpio ENTRE grupos — lo procesado ya está commiteado
+            if stop_event is not None and stop_event.is_set():
+                log.warning("batch IA detenido por /stop tras %d/%d", done, total)
+                break
+            grupo = pending[i:i + N]
             # spec-ia-local: paralelo por oferta (2 tareas/oferta) — usa
             # local_concurrency (decisión #3, speedup 1.54x). Los workers usan
             # ia_extract_local_con_fallback (etiqueta el modelo REAL — IA-1 del

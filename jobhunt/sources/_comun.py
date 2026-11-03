@@ -45,3 +45,19 @@ def fecha_epoch(ts) -> str:
         return datetime.fromtimestamp(float(ts), tz=timezone.utc).date().isoformat()
     except Exception:
         return ""
+
+
+_RE_HIBRIDO = re.compile(r"h[ií]brid[oa]", re.I)
+_RE_REMOTO = re.compile(
+    r"100\s*%\s*remot[oa]|totalmente remot[oa]|full[\s-]*remote|teletrabajo|"
+    r"(?:modalidad|trabajo|jornada|cargo|posici[oó]n|vacante)\s+(?:\w+\s+){0,2}remot[oa]", re.I)
+
+
+def modalidad_en_texto(texto: str) -> str:
+    """Modalidad explícita en el cuerpo de un aviso ('' si no la dice). Conservador: 'acceso remoto
+    a servidores' no cuenta; híbrido gana sobre remoto ('híbrido con teletrabajo parcial')."""
+    if _RE_HIBRIDO.search(texto or ""):
+        return "híbrido"
+    if _RE_REMOTO.search(texto or ""):
+        return "remoto"
+    return ""

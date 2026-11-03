@@ -273,3 +273,18 @@ def test_apply_ia_descarta_sueldo_inventado(mem_db):
     en.apply_ia_result(mem_db, _cfg(), r,
                        {"salario_clp_mensual": 2500000, "salario_evidencia": "", "seniority_real": "semi"})
     assert mem_db.execute("SELECT salary FROM ofertas WHERE group_id='inv1'").fetchone()["salary"] == ""
+
+
+def test_compute_score_red_keyword_solo_aplica_a_titulo_y_ubicacion():
+    """'comercial', 'intern' o 'qa manual' en la descripción de una oferta senior no la descartan."""
+    cfg = _mkcfg(red_keywords=["comercial", "qa manual", "intern"])
+    desc = "Trabajarás con el área comercial; equipo de QA manual y programa intern. " + "x" * 100
+    score, bd = sc.compute_score({"title": "Senior React Full-stack Developer", "description": desc}, cfg)
+    assert "rejected_by" not in bd and score > 0
+    score, bd = sc.compute_score({"title": "Intern - MERN stack", "description": "x" * 100}, cfg)
+    assert score == 0 and bd["rejected_by"] == "intern"
+
+
+def test_indeed_escapa_comillas_de_la_consulta():
+    from jobhunt.sources import indeed
+    assert indeed._esc('c++ "senior"\\x') == 'c++ \\"senior\\"\\\\x'

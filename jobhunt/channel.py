@@ -24,6 +24,7 @@ from .domain.roles import (  # noqa: F401
     _categorias_dev,
     fit_ok,
     is_dev,
+    tiene_senal_tech,
 )
 from .logging_setup import get_logger
 
@@ -36,7 +37,8 @@ _ABBR_FUENTE = {"linkedin": "LinkedIn", "computrabajo": "CB", "indeed": "Indeed"
                 "glassdoor": "Glassdoor", "laborum": "Laborum", "jooble": "Jooble",
                 "accenture": "Accenture", "aira": "AIRA",
                 "getonboard": "GetOnBoard", "himalayas": "Himalayas", "remotive": "Remotive",
-                "weworkremotely": "WWR"}
+                "weworkremotely": "WWR", "chiletrabajos": "Chiletrabajos",
+                "trabajando": "Trabajando", "staffy": "Staffy"}
 
 
 def _fuente(row: dict) -> str:
@@ -205,6 +207,23 @@ WHERE active=1 AND market_score >= :min_score
   ORDER BY market_score DESC, first_seen DESC"""
 
 
+def _sin_ver(row: dict, cfg: Config) -> bool:
+    """True si la fuente lleva más de max_unseen_hours sin devolver la oferta (probable aviso
+    caído). Criterio por TIEMPO: el 'cerrada' de la analítica cuenta barridos y con barridos
+    manuales seguidos o rotación de queries marca como cerradas ofertas vivas (1183 reaparecidas
+    de 3138 cierres)."""
+    h = cfg.channel.max_unseen_hours
+    if not h:
+        return False
+    try:
+        dt = datetime.fromisoformat(str(row.get("last_seen") or "").replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+    except ValueError:
+        return False
+    return (datetime.now(timezone.utc) - dt).total_seconds() > h * 3600
+
+
 def select_channel_offers(conn, cfg: Config, require_ia: bool = False) -> list[dict]:
     """Candidatas al canal (market gate + edad + dev + no notificadas).
 
@@ -221,6 +240,8 @@ def select_channel_offers(conn, cfg: Config, require_ia: bool = False) -> list[d
     out = []
     for r in rows:
         d = dict(r)
+        if _sin_ver(d, cfg) or not tiene_senal_tech(d.get("title"), d.get("techs")):
+            continue
         if cfg.channel.require_dev and not is_dev(d.get("rol_categoria"), d.get("title") or "", cfg,
                                                   d.get("description") or ""):
             continue
@@ -279,6 +300,12 @@ def publish_channel(cfg: Config, conn, tg_api, dry_run: bool = False,
 
     posteadas = []
     for r in rows:
+        if _sin_ver(r, cfg):
+            stats["skipped_sin_ver"] = stats.get("skipped_sin_ver", 0) + 1
+            continue
+        if not tiene_senal_tech(r.get("title"), r.get("techs")):
+            stats["skipped_sin_senal"] = stats.get("skipped_sin_senal", 0) + 1
+            continue
         if cfg.channel.require_dev and not is_dev(r.get("rol_categoria"), r.get("title") or "", cfg,
                                                   r.get("description") or ""):
             stats["skipped_dev"] += 1
@@ -329,6 +356,23 @@ def publish_channel(cfg: Config, conn, tg_api, dry_run: bool = False,
              stats["skipped_fit"],
              stats["candidates"] - stats["skipped_dev"] - stats["skipped_fit"] - stats["posted"])
     return stats
+
+
+def publicar_pendientes(cfg: Config, conn, tg_api, budget: int | None = None) -> int:
+    """Publica lo que quedó elegible tras un paso que cambia el gate SIN publicar por sí mismo
+    (rescore global del barrido, batch IA nocturno/manual, backfill de encaje). Sin esto esas
+    ofertas esperaban al siguiente barrido para salir — de ahí los posts "de rezago" en cada
+    pasada. Nunca lanza: el canal no debe tumbar el paso que lo invoca. Retorna posts hechos."""
+    if not cfg.channel.enabled or not cfg.channel.chat_id:
+        return 0
+    try:
+        st = publish_channel(cfg, conn, tg_api,
+                             budget=cfg.channel.max_posts_per_sweep if budget is None else budget)
+        log.info("canal (pendientes): %s", st)
+        return st["posted"]
+    except Exception as e:
+        log.warning("canal (pendientes) falló: %s", e)
+        return 0
 
 
 # ---------------- digests (B/C/D/E — spec v3 §5) ----------------

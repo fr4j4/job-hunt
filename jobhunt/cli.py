@@ -8,6 +8,7 @@
     python -m jobhunt tabla        # prueba de tabla nativa de Telegram (manda una muestra)
     python -m jobhunt web          # web privada (acceso con /web en el bot)
     python -m jobhunt report       # stats de mercado del pool completo
+    python -m jobhunt reparar-trabajando  # enlaces /trabajo-empleo/ ya indexados → enlace real del sitio
 """
 from __future__ import annotations
 
@@ -90,7 +91,7 @@ def cmd_run(cfg, notify: bool = True, on_phase=None, stop_event: threading.Event
 
         from .sources import (linkedin, computrabajo, indeed, glassdoor, laborum,
                               jooble, accenture, aira, getonboard, himalayas, remotive,
-                              weworkremotely)
+                              weworkremotely, chiletrabajos, trabajando, staffy)
         from .relevance import filter_offers, title_is_obvious_nontech
         from .sources import errores
         s = cfg.search
@@ -184,6 +185,15 @@ def cmd_run(cfg, notify: bool = True, on_phase=None, stop_event: threading.Event
         if cfg.sources.get("weworkremotely", True):
             tareas["weworkremotely"] = [lambda: _fuente_segura("weworkremotely",
                 lambda: weworkremotely.jobs(None, "perfil:", on_query=qcb("weworkremotely")))]
+        if cfg.sources.get("chiletrabajos", True):
+            tareas["chiletrabajos"] = [lambda: _fuente_segura("chiletrabajos",
+                lambda: chiletrabajos.jobs(s.queries_chiletrabajos, "perfil:", on_query=qcb("chiletrabajos")))]
+        if cfg.sources.get("trabajando", True):
+            tareas["trabajando"] = [lambda: _fuente_segura("trabajando",
+                lambda: trabajando.jobs(s.queries_trabajando, "perfil:", on_query=qcb("trabajando")))]
+        if cfg.sources.get("staffy", True):
+            tareas["staffy"] = [lambda: _fuente_segura("staffy",
+                lambda: staffy.jobs(None, "perfil:", on_query=qcb("staffy")))]
         muestreo = cfg.search.mode in ("both", "sample")
         n_m = max(1, int(len(s.sample_linkedin) * s.sample_rotation))
         if cfg.sources.get("linkedin"):
@@ -323,6 +333,12 @@ def cmd_run(cfg, notify: bool = True, on_phase=None, stop_event: threading.Event
             phase("rescore pool")
             database.rescore_all(conn, compute_score, version_id, cfg,
                                   market_score_fn=compute_market_score)
+            # el rescore global (enrich + market score del pool) puede dejar ofertas elegibles
+            # que ningún lote publicó: salen ahora, no en el siguiente barrido
+            if presupuesto_canal > 0:
+                from .channel import publicar_pendientes
+                phase("canal: publicando pendientes")
+                channel_posts += publicar_pendientes(cfg, conn, api, budget=presupuesto_canal)
         else:
             # sin IA: fit score al vuelo ya escrito; market/rescore global para el gate
             phase("rescore pool")
@@ -340,6 +356,13 @@ def cmd_run(cfg, notify: bool = True, on_phase=None, stop_event: threading.Event
                     log.info("canal: %s", ch_stats)
                 except Exception as e:
                     log.warning("canal falló (barrido continúa): %s", e)
+
+        try:
+            n_exp = database.expirar_sin_texto(conn)
+            if n_exp:
+                log.info("pool: %d ofertas sin texto ni ficha recuperable desactivadas (>7 días sin verse)", n_exp)
+        except Exception as e:
+            log.warning("expirar_sin_texto falló (barrido continúa): %s", e)
 
         # analítica (web v2): derivadas + historia. Nunca tumba el barrido.
         if cfg.analytics.enabled:
@@ -553,6 +576,14 @@ def main():
         run_daemon(cfg)
     elif cmd == "report":
         cmd_report(cfg)
+    elif cmd == "reparar-trabajando":
+        from .sources.trabajando import reparar_urls
+        conn = database.connect(cfg)
+        try:
+            database.init_db(conn)
+            print(f"trabajando: {reparar_urls(conn)}")
+        finally:
+            conn.close()
     else:
         print(__doc__)
 

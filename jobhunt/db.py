@@ -358,7 +358,9 @@ def upsert(conn: sqlite3.Connection, job: dict, now_iso: str) -> tuple[str, bool
                      CASE WHEN sources='' THEN ? ELSE sources || ',' || ? END END,
             found_by=CASE WHEN instr(found_by, ?) THEN found_by ELSE
                    CASE WHEN found_by='' THEN ? ELSE found_by || ',' || ? END END,
+            url=CASE WHEN url LIKE '%trabajando.cl/trabajo-empleo/%' AND ? != '' THEN ? ELSE url END,
             company=CASE WHEN company='' OR company IS NULL THEN ? ELSE company END,
+            location=CASE WHEN location='' OR location IS NULL THEN ? ELSE location END,
             salary=CASE WHEN salary='' OR salary IS NULL THEN ? ELSE salary END,
             modality=CASE WHEN modality='' OR modality IS NULL THEN ? ELSE modality END,
             description=CASE WHEN length(description) < 200 THEN ? ELSE description END,
@@ -373,7 +375,9 @@ def upsert(conn: sqlite3.Connection, job: dict, now_iso: str) -> tuple[str, bool
             WHERE group_id=?""",
             (now_iso, src0, src0, src0,
              fb, fb, fb,
-             job.get("company", ""), job.get("salary", ""), job.get("modality", ""),
+             job.get("url", ""), job.get("url", ""),
+             job.get("company", ""), job.get("location", ""), job.get("salary", ""),
+             job.get("modality", ""),
              (job.get("_desc") or job.get("description") or "")[:MAX_DESC],
              job.get("valid_through", ""), job.get("years_official"),
              1 if job.get("remote_official") else None,
@@ -404,6 +408,20 @@ def upsert(conn: sqlite3.Connection, job: dict, now_iso: str) -> tuple[str, bool
         conn.execute("""UPDATE ofertas SET last_seen=?, occurrences=occurrences+1 WHERE group_id=?""",
                      (now_iso, job["uid"]))
         return job["uid"], False
+
+
+def expirar_sin_texto(conn: sqlite3.Connection, dias: int = 7) -> int:
+    """Desactiva ofertas sin IA, sin texto utilizable (<200 chars) y sin ficha recuperable
+    (fetch_fails>=3) que su fuente lleva `dias` sin devolver. No hay nada que enriquecer ni
+    publicar: solo inflaban la cola 'sin ficha' y el pool. Si la fuente las devuelve de nuevo,
+    upsert las reactiva (active=1)."""
+    n = conn.execute("""UPDATE ofertas SET active=0
+        WHERE active=1 AND ia_model='' AND (description IS NULL OR length(description)<200)
+          AND COALESCE(fetch_fails,0)>=3
+          AND last_seen < strftime('%Y-%m-%dT%H:%M:%S', 'now', ?)""",
+                     (f"-{int(dias)} day",)).rowcount
+    conn.commit()
+    return n
 
 
 def db_find_duplicate(conn: sqlite3.Connection, job: dict) -> str | None:

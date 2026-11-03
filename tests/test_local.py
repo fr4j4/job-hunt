@@ -504,3 +504,58 @@ def test_clean_rol_inventados_a_dev_o_otro():
     assert en._clean_rol("Desarrollador Salesforce") == "Software"
     assert en._clean_rol("Backend Developer") == "Backend"
     assert en._clean_rol("DevOps") == "DevOps/Cloud"
+
+
+def _ok_lote(rows):
+    return [{"idx": i + 1, "opinion": "o", "resumen": "r", "fit_reason": "f",
+             "seniority_real": "s", "rol_categoria": "Backend", "ingles": "B2",
+             "idiomas": [], "modalidad": "R", "salario_clp_mensual": 0,
+             "red_flags": [], "green_flags": [], "benefits": []} for i in range(len(rows))]
+
+
+def test_enrich_lotes_paralelos_respeta_concurrency(mem_db, monkeypatch):
+    """Varios lotes en paralelo, sin pasar de IA_CONCURRENCY en vuelo, y se procesan todas."""
+    import threading
+    cfg = _cfg()
+    cfg.ia.local_enabled = False
+    cfg.ia.batch_prompt = 1 + 1   # 2 ofertas por lote
+    cfg.ia.concurrency = 3
+    for i in range(12):
+        _insert(mem_db, f"g{i}", desc="x" * 500)
+    monkeypatch.setattr(en.time, "sleep", lambda s: None)
+    monkeypatch.setattr(en, "extract_structured", lambda url: {"description": "x" * 500, "_access": "ok"})
+    lock = threading.Lock()
+    estado = {"vuelo": 0, "max": 0, "vistos": []}
+
+    def fake_lote(cfg, rows, perfil, mercado):
+        with lock:
+            estado["vuelo"] += 1
+            estado["max"] = max(estado["max"], estado["vuelo"])
+            estado["vistos"].extend(r["group_id"] for r in rows)
+        threading.Event().wait(0.05)    # no time.sleep: un fixture puede parchearlo
+        with lock:
+            estado["vuelo"] -= 1
+        return _ok_lote(rows), ""
+    monkeypatch.setattr(en, "ia_extract_lote", fake_lote)
+    en.run_ia_batch(mem_db, cfg, "perfil", all_pending=True)
+    assert sorted(estado["vistos"]) == sorted(f"g{i}" for i in range(12))
+    assert 1 < estado["max"] <= 3
+
+
+def test_enrich_lotes_paralelos_breaker_corta_sin_lanzar_el_resto(mem_db, monkeypatch):
+    """Con 429 seguidos el breaker corta y NO se lanzan todos los lotes pendientes."""
+    cfg = _cfg()
+    cfg.ia.local_enabled = False
+    cfg.ia.batch_prompt = 2
+    cfg.ia.concurrency = 2
+    for i in range(60):
+        _insert(mem_db, f"g{i}", desc="x" * 500)
+    monkeypatch.setattr(en.time, "sleep", lambda s: None)
+    llamadas = []
+
+    def fake_lote(cfg, rows, perfil, mercado):
+        llamadas.append(1)
+        return None, "rate"
+    monkeypatch.setattr(en, "ia_extract_lote", fake_lote)
+    en.run_ia_batch(mem_db, cfg, "perfil", all_pending=True)
+    assert len(llamadas) <= 10 + cfg.ia.concurrency      # 30 lotes en total

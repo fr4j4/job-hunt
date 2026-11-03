@@ -116,6 +116,8 @@ class Search:
     sample_computrabajo: list[str]
     sample_glassdoor: list[str]
     sample_rotation: float
+    queries_chiletrabajos: list[str] = field(default_factory=list)
+    queries_trabajando: list[str] = field(default_factory=list)
     max_pages: int = 3             # páginas por query (Computrabajo/Indeed/Accenture)
     linkedin_max_pages: int = 8    # LinkedIn tiene su propio tope (corta antes por antigüedad)
 
@@ -191,6 +193,8 @@ class ChannelCfg:
     require_dev: bool = True       # rol_categoria ∈ set dev
     require_fit: bool = True       # exige encaje con el perfil (score + veredicto IA)
     min_fit_score: int = 45        # score de perfil mínimo (0 = sin piso; base=40 sin señales)
+    encaje_bajo_override: int = 60  # IA 'bajo' NO veta si el score de perfil es >= esto (0 = el veto es absoluto)
+    max_unseen_hours: int = 72     # no publicar ofertas que su fuente lleva >N h sin devolver (0 = OFF)
     digest_daily: bool = True
     digest_daily_hour_utc: int = 21
     digest_weekly: bool = True
@@ -291,8 +295,8 @@ def load_config(env_file: Path | None = None) -> Config:
         us_hours_penalty=_env_int("SCORE_US_HOURS_PENALTY", -4),
         salary_in_range_bonus=_env_int("SCORE_SALARY_IN_RANGE_BONUS", 5),
         salary_out_soft=_env_int("SCORE_SALARY_OUT_SOFT", -2),
-        stack_overlap_per=_env_float("SCORE_STACK_OVERLAP_PER", 1.5),
-        stack_overlap_max=_env_float("SCORE_STACK_OVERLAP_MAX", 6),
+        stack_overlap_per=_env_float("SCORE_STACK_OVERLAP_PER", 2.5),
+        stack_overlap_max=_env_float("SCORE_STACK_OVERLAP_MAX", 10),
         cap=_env_int("SCORE_CAP", 98),
         modality_bonus={
             "remoto": _env_int("PROFILE_MOD_REMOTO_BONUS", 3),
@@ -326,14 +330,18 @@ def load_config(env_file: Path | None = None) -> Config:
         queries_laborum=_env_list("QUERIES_LABORUM", "python,desarrollador,full stack,backend,java"),
         queries_jooble=_env_list("QUERIES_JOOBLE", "python,desarrollador full stack,backend"),
         queries_accenture=_env_list("QUERIES_ACCENTURE", "fullstack,python,tech lead"),
-        queries_getonboard=_env_list("QUERIES_GETONBOARD", "python,full stack,tech lead,backend"),
-        queries_himalayas=_env_list("QUERIES_HIMALAYAS", "python,full stack,tech lead"),
-        queries_remotive=_env_list("QUERIES_REMOTIVE", "python,full stack,backend"),
+        queries_getonboard=_env_list("QUERIES_GETONBOARD", "python,full stack,tech lead,backend,java,spring boot,data engineer,devops"),
+        queries_himalayas=_env_list("QUERIES_HIMALAYAS", "python,full stack,tech lead,java,backend,data engineer"),
+        queries_remotive=_env_list("QUERIES_REMOTIVE", "python,full stack,backend,java,data engineer"),
         sample_linkedin=_env_list("SAMPLE_QUERIES_LINKEDIN"),
         sample_indeed=_env_list("SAMPLE_QUERIES_INDEED"),
         sample_computrabajo=_env_list("SAMPLE_QUERIES_COMPUTRABAJO"),
         sample_glassdoor=_env_list("SAMPLE_QUERIES_GLASSDOOR"),
         sample_rotation=_env_float("SAMPLE_ROTATION", 0.33),
+        queries_chiletrabajos=_env_list("QUERIES_CHILETRABAJOS",
+                                        "full stack,python,java,backend,tech lead,data engineer,devops"),
+        queries_trabajando=_env_list("QUERIES_TRABAJANDO",
+                                     "full stack,python,java,backend,tech lead,data engineer,devops"),
         max_pages=max(1, min(10, _env_int("SEARCH_MAX_PAGES", 3))),
         linkedin_max_pages=max(1, min(20, _env_int("LINKEDIN_MAX_PAGES", 8))),
     )
@@ -349,6 +357,9 @@ def load_config(env_file: Path | None = None) -> Config:
         "himalayas": _env_bool("ENABLE_HIMALAYAS", True),
         "remotive": _env_bool("ENABLE_REMOTIVE", True),
         "weworkremotely": _env_bool("ENABLE_WEWORKREMOTELY", True),
+        "chiletrabajos": _env_bool("ENABLE_CHILETRABAJOS", True),
+        "trabajando": _env_bool("ENABLE_TRABAJANDO", True),
+        "staffy": _env_bool("ENABLE_STAFFY", True),
         "aira": _env_bool("ENABLE_AIRA", True),   # antes faltaba: el barrido nunca corría AIRA
     }
     premium_hours = [int(h) for h in _env_list("PREMIUM_TICK_HOURS_UTC", "00,12")]
@@ -428,6 +439,8 @@ def load_config(env_file: Path | None = None) -> Config:
         require_dev=_env_bool("CHANNEL_REQUIRE_DEV", True),
         require_fit=_env_bool("CHANNEL_REQUIRE_FIT", True),
         min_fit_score=_env_int("CHANNEL_MIN_FIT_SCORE", 45),
+        encaje_bajo_override=_env_int("CHANNEL_ENCAJE_BAJO_OVERRIDE", 60),
+        max_unseen_hours=_env_int("CHANNEL_MAX_UNSEEN_HOURS", 72),
         digest_daily=_env_bool("CHANNEL_DIGEST_DAILY", True),
         digest_daily_hour_utc=_env_int("CHANNEL_DIGEST_DAILY_HOUR_UTC", 21),
         digest_weekly=_env_bool("CHANNEL_DIGEST_WEEKLY", True),
