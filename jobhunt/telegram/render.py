@@ -276,64 +276,157 @@ def _age_short(date_posted: str) -> str:
     return age_tag(date_posted).lstrip("📅")
 
 
+_TECHS_TABLA = [("python", "Py"), ("java", "Jav"), ("angular", "Ang"), ("react", "React"),
+                ("aws", "AWS"), ("node", "Node"), ("typescript", "TS"), ("kubernetes", "K8s"),
+                ("docker", "Docker"), ("golang", "Go"), ("vue", "Vue"), ("spring", "Spring"),
+                (".net", ".NET"), ("sql", "SQL")]
+_IDIOMAS_ABBR = {"inglés": "EN", "ingles": "EN", "alemán": "AL", "aleman": "AL",
+                 "francés": "FR", "frances": "FR", "portugués": "PT", "portugues": "PT",
+                 "chino": "CN", "mandarín": "CN", "japonés": "JP", "italiano": "IT"}
+_MODALIDAD_TXT = {"[R]": "Remoto", "[H]": "Híbrido", "[P]": "Presencial"}
+_SENIORITY_TXT = {"lead": "Lead", "senior": "Senior", "semi": "Semi-senior", "junior": "Junior"}
+
+
+def _titulo_corto(title: str, n: int = 60) -> str:
+    """Título completo hasta n chars, cortando en límite de palabra con '…'."""
+    t = re.sub(r"\s+", " ", (title or "").strip()) or "Sin título"
+    if len(t) <= n:
+        return t
+    corte = t[:n].rsplit(" ", 1)[0] or t[:n]
+    return corte.rstrip(" -–·,(/") + "…"
+
+
+def _techs_chip(j: dict, n: int = 3) -> str:
+    tl = ((j.get("title") or "") + " " + (j.get("techs") or "")).lower()
+    found: list[str] = []
+    for k, ab in _TECHS_TABLA:
+        if k in tl and ab.lower() not in [x.lower() for x in found]:
+            found.append(ab)
+        if len(found) == n:
+            break
+    return "·".join(found)
+
+
+def _idioma_chip(j: dict) -> str:
+    """'EN' / 'EN!' (excluyente) del primer idioma pedido; '' si no hay."""
+    try:
+        import json as _j
+        lst = _j.loads(j.get("ai_idiomas") or "[]")
+        if isinstance(lst, list) and lst and isinstance(lst[0], dict):
+            ab = _IDIOMAS_ABBR.get((lst[0].get("idioma") or "").lower().strip())
+            if ab:
+                return ab + ("!" if lst[0].get("excluyente") else "")
+    except Exception:
+        pass
+    return ""
+
+
 def table_block(offers: list[dict], links: bool = True) -> str:
-    """Vista tabular con header: columnas fijas separadas por │, blanco si falta.
-    score│sueldo│M│cargo│exp│techs│edad│empresa│IA — el 🔗 final abre la oferta."""
-    lines = []
-    # header: mismo emoji que las filas; 3 espacios calzan con el ancho real
-    # de "⭐ 98%" de los datos (pct:>3 → 1 espacio + 2 dígitos) — delta 0 medido
-    lines.append("⭐<code>   %│  $$$│M│cargo       │exp │idi│techs       │ant│empresa │IA</code>")
+    """Lista de ofertas en TARJETAS de dos líneas (Telegram no tiene tablas y el
+    monoespaciado ancho se corta en el celular). Línea 1: semáforo + puntaje + título
+    completo (enlace a la oferta). Línea 2: empresa · modalidad · sueldo · nivel ·
+    techs · edad · idioma · encaje. Los datos sin valor se omiten."""
+    cards = []
     for j in offers:
         pct = int(j.get("score") or 0)
-        emoji = score_emoji(pct)
-        sal = salary_tag(j).replace("💵", "").replace("USD", "$").strip()[:5]
-        mod = _mod_short(j).strip("[]")
-        if mod == "?":
-            mod = " "
-        tl = ((j.get("title") or "") + " " + (j.get("techs") or "")).lower()
-        found = []
-        for k, ab in [("python", "Py"), ("java", "Jav"), ("angular", "Ang"), ("react", "Rct"),
-                      ("aws", "AWS"), ("node", "Node"), ("typescript", "TS"), ("kubernetes", "K8s"),
-                      ("docker", "Dkr"), ("golang", "Go"), ("vue", "Vue"), ("spring", "Spr"),
-                      (".net", ".NET"), ("sql", "SQL")]:
-            if k in tl and ab.lower() not in [f.lower() for f in found]:
-                found.append(ab)
-            if len(found) == 3:
-                break
-        joined = "-".join(found)
-        while joined and len(joined) > 11:
-            found.pop()
-            joined = "-".join(found)
-        techs = joined.ljust(12) if joined else " " * 12
-        raw_age = _age_short(j.get("date_posted") or "")
-        age = "   " if "?" in raw_age else raw_age.replace("ahora", "0h")[:3].rjust(3)
-        co = esc((j.get("company") or "").strip()[:8]).ljust(8)
-        rol = _role_short(j)[:12].ljust(12)
-        exp = {"lead": "Lead", "senior": "Sr", "semi": "sSr", "junior": "Jr"}.get(
-            (j.get("seniority_real") or "").strip().lower(), "   ")[:4].ljust(4)
-        # idiomas pedidos: EN!/PT en 3 chars (vacío = sin dato o sin idiomas)
-        idi = ""
-        try:
-            import json as _j
-            lst = _j.loads(j.get("ai_idiomas") or "[]")
-            ABBR = {"inglés": "EN", "ingles": "EN", "alemán": "AL", "aleman": "AL",
-                    "francés": "FR", "frances": "FR", "portugués": "PT", "portugues": "PT",
-                    "chino": "CN", "mandarín": "CN", "japonés": "JP", "italiano": "IT"}
-            if isinstance(lst, list) and lst:
-                primero = lst[0]
-                if isinstance(primero, dict):
-                    ab = ABBR.get((primero.get("idioma") or "").lower().strip())
-                    if ab:
-                        idi = (ab + ("!" if primero.get("excluyente") else "")).ljust(3)
-        except Exception:
-            pass
-        idi = idi.ljust(3)
-        ia = "*" if j.get("ia_model") else " "
-        row = f"{emoji}{pct:>3}%│{sal:>5}│{mod}│{rol}│{exp}│{idi}│{techs}│{age}│{co}│{ia} "
+        titulo = esc(_titulo_corto(j.get("title") or ""))
         url = _attr_esc(j.get("url") or "")
-        link = f' <a href="{url}">🔗</a>' if links and url else ""
-        lines.append(f"<code>{row}</code>{link}")
-    return "\n".join(lines)
+        titulo_html = f'<a href="{url}">{titulo}</a>' if links and url else f"<b>{titulo}</b>"
+        l1 = f"{score_emoji(pct)} <b>{pct}%</b> · {titulo_html}"
+        partes = []
+        co = (j.get("company") or "").strip()
+        if co:
+            partes.append("🏢 " + esc(co[:28]))
+        mod = _MODALIDAD_TXT.get(_mod_short(j))
+        if mod:
+            partes.append("🧭 " + mod)
+        sal = salary_tag(j).replace("💵", "").replace("USD", "US$").strip()
+        if sal:
+            partes.append("💰 " + esc(sal))
+        sen = _SENIORITY_TXT.get((j.get("seniority_real") or "").strip().lower())
+        if sen:
+            partes.append("💼 " + sen)
+        tc = _techs_chip(j)
+        if tc:
+            partes.append("🧰 " + esc(tc))
+        raw_age = _age_short(j.get("date_posted") or "")
+        if raw_age and "?" not in raw_age:
+            partes.append("📅 " + raw_age.replace("ahora", "ahora"))
+        idi = _idioma_chip(j)
+        if idi:
+            partes.append("🗣 " + idi)
+        if (j.get("ai_encaje") or "").strip().lower() in ("alto", "medio"):
+            partes.append("🎯 " + j["ai_encaje"].strip().lower())
+        cards.append(l1 + ("\n    " + " · ".join(partes) if partes else ""))
+    return "\n\n".join(cards)
+
+
+_TAGS_TG = ("b", "strong", "i", "em", "u", "ins", "s", "strike", "del", "code", "pre", "a",
+            "blockquote", "tg-spoiler", "span")
+_LIMITE_MSG = 3900   # Telegram acepta 4096 chars de texto ya parseado; holgura para cierres y '…'
+
+
+def cerrar_html(texto: str) -> str:
+    """Cierra en orden inverso las etiquetas abiertas de `texto` (HTML de Telegram)."""
+    abiertas: list[str] = []
+    for m in re.finditer(r"<(/?)([a-zA-Z][\w-]*)[^<>]*>", texto):
+        cierre, tag = m.group(1) == "/", m.group(2).lower()
+        if tag not in _TAGS_TG:
+            continue
+        if not cierre:
+            abiertas.append(tag)
+        elif tag in abiertas:
+            while abiertas and abiertas.pop() != tag:
+                pass
+    return "".join(f"</{t}>" for t in reversed(abiertas))
+
+
+def recortar_html(texto: str, limite: int = _LIMITE_MSG) -> str:
+    """Recorta HTML de Telegram SIN romperlo: corta en salto de línea (nunca dentro de una
+    etiqueta ni de una entidad &amp;) y cierra las etiquetas que queden abiertas.
+    Un [:N] ciego dejaba '<a href=...' a medias → Telegram 400 'Unclosed start tag'."""
+    if len(texto) <= limite:
+        return texto
+    corte = texto.rfind("\n", 0, limite)
+    if corte <= 0:
+        corte = limite
+        ini_tag, fin_tag = texto.rfind("<", 0, corte), texto.rfind(">", 0, corte)
+        if ini_tag > fin_tag:
+            corte = ini_tag                       # no cortar dentro de <...>
+        amp, pcoma = texto.rfind("&", 0, corte), texto.rfind(";", 0, corte)
+        if amp > pcoma and corte - amp <= 8:
+            corte = amp                           # no cortar dentro de &entidad;
+    cabeza = texto[:corte].rstrip()
+    return cabeza + cerrar_html(cabeza) + "\n…"
+
+
+def html_a_texto(texto: str) -> str:
+    """HTML de Telegram → texto plano legible (para reintentar sin formato). Los enlaces
+    quedan como 'texto (url)'."""
+    import html as _html
+    t = re.sub(r'<a\s+href="([^"]*)"[^>]*>(.*?)</a>', lambda m: f"{m.group(2)} ({_html.unescape(m.group(1))})",
+               texto or "", flags=re.S)
+    t = re.sub(r"<[^<>]*>", "", t)
+    return _html.unescape(t)
+
+
+def paginar_tarjetas(offers: list[dict], page_size: int, presupuesto: int = 2800) -> list[list[dict]]:
+    """Parte `offers` en páginas de ≤page_size ofertas Y ≤presupuesto caracteres de tarjetas,
+    de modo que ninguna página supere el límite de Telegram (nada se pierde: lo que no cabe
+    pasa a la página siguiente). Determinista: mismas ofertas → mismas páginas."""
+    paginas: list[list[dict]] = []
+    actual: list[dict] = []
+    usado = 0
+    for o in offers:
+        n = len(table_block([o])) + 2
+        if actual and (len(actual) >= page_size or usado + n > presupuesto):
+            paginas.append(actual)
+            actual, usado = [], 0
+        actual.append(o)
+        usado += n
+    if actual:
+        paginas.append(actual)
+    return paginas or [[]]
 
 
 def build_digest_text(offers: list[dict], cfg) -> str:
@@ -343,7 +436,7 @@ def build_digest_text(offers: list[dict], cfg) -> str:
         return f"🔍 <i>Sin ofertas con score ≥ {cfg.alerts.min_score}</i> en este barrido."
     best = max(offers, key=lambda o: o.get("score", 0))
     stamp = datetime.now(timezone.utc).strftime("%d %b %H:%M")
-    shown = offers[:cfg.alerts.max_per_digest]
+    shown = paginar_tarjetas(offers[:cfg.alerts.max_per_digest], cfg.alerts.max_per_digest)[0]
     lines = [
         f"📬 <b>Ofertas ≥{cfg.alerts.min_score}</b> · <i>{len(offers)} activas</i> · {stamp}",
         "",
@@ -355,10 +448,10 @@ def build_digest_text(offers: list[dict], cfg) -> str:
     ]
     if best.get("ai_fit_reason"):
         lines.append(f"   🎯 <i>{esc(best['ai_fit_reason'][:140])}</i>")
-    lines += ["", "<b>Esta página</b> (toca el 🔗 para abrir):", table_block(shown)]
+    lines += ["", "<b>Esta página</b> (toca el título para abrir):", table_block(shown)]
     lines.append("")
-    lines.append("<i>⭐ ≥85 · 🟢 ≥70 · 🟡 ≥55 · ⚪ resto · * = IA · toca el 🔗 para abrir</i>")
-    return "\n".join(lines)[:4000]
+    lines.append("<i>⭐ ≥85 · 🟢 ≥70 · 🟡 ≥55 · ⚪ resto · toca el título para abrir</i>")
+    return recortar_html("\n".join(lines))
 
 
 def build_buttons(offers: list[dict], cfg) -> list[list[dict]]:

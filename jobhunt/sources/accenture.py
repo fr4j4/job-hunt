@@ -14,7 +14,9 @@ from html import unescape as _u
 
 import requests
 
+from ..domain.texto import MAX_DESC
 from ..logging_setup import get_logger
+from . import errores
 
 log = get_logger(__name__)
 
@@ -37,6 +39,7 @@ def _search_session() -> requests.Session:
         s.get("https://www.accenture.com/cl-es/careers/jobsearch", timeout=25)
     except Exception as e:
         log.warning("accenture home falló: %s", e)
+        errores.registrar("accenture")
     return s
 
 
@@ -74,6 +77,7 @@ def jobs(queries: list[str], found_by_prefix: str = "", max_pages: int = 2, on_q
                 d = r.json()
             except Exception as e:
                 log.warning("accenture fetch falló (%s p%s): %s", q[:30], page, e)
+                errores.registrar("accenture")
                 break
             data = d.get("data") or []
             if not data:
@@ -94,16 +98,16 @@ def jobs(queries: list[str], found_by_prefix: str = "", max_pages: int = 2, on_q
                         fecha = (parts[2] if len(parts[2]) == 4 else "20" + parts[2]) + "-" + \
                                 parts[1].zfill(2) + "-" + parts[0].zfill(2)
                     except Exception:
-                        fecha = now.date().isoformat()
+                        fecha = ""
                 else:
-                    fecha = now.date().isoformat()
+                    fecha = ""   # sin fecha real → vacío (se usa first_seen); antes: hoy
                 # remoteType: "Hybrid El..." / "Remote..." / "Onsite..."
                 remote = (a.get("remoteType") or "").strip()
                 modality = ("híbrido" if remote.lower().startswith("hybrid")
                             else "remoto" if remote.lower().startswith("remote")
                             else "presencial" if remote.lower().startswith(("onsite", "on-site", "presencial"))
                             else "")
-                desc = _clean(a.get("jobDescriptionClean") or a.get("jobDescription") or "")[:2000]
+                desc = _clean(a.get("jobDescriptionClean") or a.get("jobDescription") or "")[:MAX_DESC]
                 out[uid] = {
                     "title": _clean(a.get("title"))[:150],
                     "company": "Accenture",

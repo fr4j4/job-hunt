@@ -72,7 +72,7 @@ def test_apply_ia_result_sanitiza_fosil(mem_db):
     ok = en.apply_ia_result(mem_db, _cfg(), r, parsed)
     assert ok
     row = mem_db.execute("SELECT ai_opinion FROM ofertas WHERE group_id='g2'").fetchone()
-    assert row["ai_opinion"] == ""
+    assert "vieja" not in row["ai_opinion"]   # el fósil se reemplaza (sin texto: frase fija)
 
 
 @pytest.mark.parametrize("val,expected", [
@@ -82,6 +82,7 @@ def test_apply_ia_result_sanitiza_fosil(mem_db):
 def test_apply_ia_result_coerce_salario(mem_db, val, expected):
     gid = f"g3-{val}"
     _insert(mem_db, gid, salary="", salary_source="")
+    mem_db.execute("UPDATE ofertas SET description='Renta $2.500.000 liquidos' WHERE group_id=?", (gid,))
     r = {"group_id": gid, "title": f"Titulo {gid}"}
     parsed = {"salario_clp_mensual": val}
     ok = en.apply_ia_result(mem_db, _cfg(), r, parsed)
@@ -263,3 +264,27 @@ def test_cmd_run_no_rebindea_stop_event_global():
     src_batch = inspect.getsource(BatchRunner.run)
     assert "stop_event = threading.Event()" not in src_batch
     assert "lote_stop" in src_batch
+
+
+def test_apply_ia_descarta_sueldo_inventado(mem_db):
+    _insert(mem_db, "inv1")
+    mem_db.execute("UPDATE ofertas SET description='Buscamos dev Python. Renta competitiva.' WHERE group_id='inv1'")
+    r = {"group_id": "inv1", "title": "Dev"}
+    en.apply_ia_result(mem_db, _cfg(), r,
+                       {"salario_clp_mensual": 2500000, "salario_evidencia": "", "seniority_real": "semi"})
+    assert mem_db.execute("SELECT salary FROM ofertas WHERE group_id='inv1'").fetchone()["salary"] == ""
+
+
+def test_compute_score_red_keyword_solo_aplica_a_titulo_y_ubicacion():
+    """'comercial', 'intern' o 'qa manual' en la descripción de una oferta senior no la descartan."""
+    cfg = _mkcfg(red_keywords=["comercial", "qa manual", "intern"])
+    desc = "Trabajarás con el área comercial; equipo de QA manual y programa intern. " + "x" * 100
+    score, bd = sc.compute_score({"title": "Senior React Full-stack Developer", "description": desc}, cfg)
+    assert "rejected_by" not in bd and score > 0
+    score, bd = sc.compute_score({"title": "Intern - MERN stack", "description": "x" * 100}, cfg)
+    assert score == 0 and bd["rejected_by"] == "intern"
+
+
+def test_indeed_escapa_comillas_de_la_consulta():
+    from jobhunt.sources import indeed
+    assert indeed._esc('c++ "senior"\\x') == 'c++ \\"senior\\"\\\\x'

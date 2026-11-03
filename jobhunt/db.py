@@ -12,7 +12,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .config import Config
-from .domain.fechas import canonical_date
+from .domain.fechas import canonical_date, resolver_fecha
+from .domain.texto import MAX_DESC
 from .logging_setup import get_logger
 
 log = get_logger("jobhunt.db")
@@ -36,9 +37,20 @@ def backup_db(conn: sqlite3.Connection, dest_path) -> None:
         dest_conn.close()
 
 
+class EsquemaAntiguo(RuntimeError):
+    pass
+
+
 def init_db(conn: sqlite3.Connection) -> None:
+    # `id` entero (AUTOINCREMENT: jamás se reutiliza, ni tras borrar filas) es la clave que ven la web/API/historia;
+    # `group_id` (título|empresa) sigue siendo la clave de negocio del dedup.
+    existe = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='ofertas'").fetchone()
+    if existe and "id" not in {r[1] for r in conn.execute("PRAGMA table_info(ofertas)")}:
+        raise EsquemaAntiguo("la tabla `ofertas` es de un esquema anterior (sin `id` numérico) y no se migra: "
+                             "respalda data/ofertas.sqlite y descarta esas tablas con db.reset_ofertas()")
     conn.execute("""CREATE TABLE IF NOT EXISTS ofertas (
-        group_id    TEXT PRIMARY KEY,
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        group_id    TEXT NOT NULL UNIQUE,
         title       TEXT NOT NULL,
         company     TEXT DEFAULT '',
         location    TEXT DEFAULT '',
@@ -92,10 +104,24 @@ def init_db(conn: sqlite3.Connection) -> None:
         ("salary_note", "ALTER TABLE ofertas ADD COLUMN salary_note TEXT DEFAULT ''"),
         ("ctx_version", "ALTER TABLE ofertas ADD COLUMN ctx_version TEXT DEFAULT ''"),
         ("fetch_fails", "ALTER TABLE ofertas ADD COLUMN fetch_fails INTEGER DEFAULT 0"),
+        ("ai_encaje", "ALTER TABLE ofertas ADD COLUMN ai_encaje TEXT DEFAULT ''"),
+        # auditoría de filas (UTC ISO-8601): los triggers de abajo los mantienen
+        ("created_at", "ALTER TABLE ofertas ADD COLUMN created_at TEXT DEFAULT ''"),
+        ("updated_at", "ALTER TABLE ofertas ADD COLUMN updated_at TEXT DEFAULT ''"),
         ("last_fetch_ok", "ALTER TABLE ofertas ADD COLUMN last_fetch_ok TEXT DEFAULT ''"),
         # metadatos v2: señal de demanda (applicants), seniority oficial del aviso
         ("applicants_hint", "ALTER TABLE ofertas ADD COLUMN applicants_hint TEXT DEFAULT ''"),
         ("seniority_oficial", "ALTER TABLE ofertas ADD COLUMN seniority_oficial TEXT DEFAULT ''"),
+        # fecha de publicación según la página: texto original ('hace 2 semanas'), precisión
+        # (exact|dia|aprox) — date_posted es SIEMPRE una fecha calendario resuelta al capturar
+        ("date_posted_raw", "ALTER TABLE ofertas ADD COLUMN date_posted_raw TEXT DEFAULT ''"),
+        ("date_precision", "ALTER TABLE ofertas ADD COLUMN date_precision TEXT DEFAULT ''"),
+        # metadatos oficiales de la ficha (JSON-LD / badges)
+        ("contrato", "ALTER TABLE ofertas ADD COLUMN contrato TEXT DEFAULT ''"),
+        ("jornada", "ALTER TABLE ofertas ADD COLUMN jornada TEXT DEFAULT ''"),
+        ("job_benefits", "ALTER TABLE ofertas ADD COLUMN job_benefits TEXT DEFAULT ''"),
+        ("skills_official", "ALTER TABLE ofertas ADD COLUMN skills_official TEXT DEFAULT ''"),
+        ("direct_apply", "ALTER TABLE ofertas ADD COLUMN direct_apply INTEGER"),
     ]:
         if col not in cols:
             conn.execute(ddl)
@@ -103,6 +129,44 @@ def init_db(conn: sqlite3.Connection) -> None:
     conn.execute("""UPDATE ofertas SET date_canonical =
         COALESCE(NULLIF(date_posted,''), substr(first_seen,1,10))
         WHERE date_canonical = '' AND (date_posted != '' OR first_seen != '')""")
+    # created_at/updated_at: backfill de filas previas (creación ≈ first_seen, última
+    # modificación ≈ last_seen) y triggers que los mantienen para TODO escritor
+    # (upsert, enrich, IA, rescore, marcas del canal) sin tocar cada UPDATE.
+    conn.execute("""UPDATE ofertas SET
+        created_at = CASE WHEN created_at = '' THEN
+            COALESCE(NULLIF(first_seen,''), strftime('%Y-%m-%dT%H:%M:%SZ','now')) ELSE created_at END,
+        updated_at = CASE WHEN updated_at = '' THEN
+            COALESCE(NULLIF(last_seen,''), NULLIF(first_seen,''), strftime('%Y-%m-%dT%H:%M:%SZ','now'))
+            ELSE updated_at END
+        WHERE created_at = '' OR updated_at = ''""")
+    conn.execute("""CREATE TRIGGER IF NOT EXISTS trg_ofertas_created AFTER INSERT ON ofertas
+        WHEN NEW.created_at = '' OR NEW.updated_at = ''
+        BEGIN
+            UPDATE ofertas SET
+                created_at = CASE WHEN NEW.created_at = '' THEN strftime('%Y-%m-%dT%H:%M:%SZ','now') ELSE NEW.created_at END,
+                updated_at = CASE WHEN NEW.updated_at = '' THEN strftime('%Y-%m-%dT%H:%M:%SZ','now') ELSE NEW.updated_at END
+            WHERE group_id = NEW.group_id;
+        END""")
+    # updated_at = última modificación REAL de datos: el trigger solo salta si cambió el
+    # VALOR de alguna columna de contenido. No cuentan los toques de barrido (last_seen,
+    # occurrences, found_by) ni lo derivado (scores, date_canonical) ni el marcado del canal.
+    # Se recrea en cada init para cubrir columnas añadidas por migraciones futuras.
+    _sin_auditar = {"id", "group_id", "created_at", "updated_at", "last_seen", "occurrences",
+                    "found_by", "score_version", "ctx_version", "last_fetch_ok",
+                    # derivadas/operativas: un rescore o el marcado del canal no editan la oferta
+                    "score", "market_score", "date_canonical", "staffing",
+                    "notified_channel_at", "fetch_fails"}
+    from .analytics.esquema import COLUMNAS_OFERTAS
+    _sin_auditar |= {c for c, _ in COLUMNAS_OFERTAS}   # derivadas de analytics: no son "edición" de la oferta
+    cols_cont = [r[1] for r in conn.execute("PRAGMA table_info(ofertas)") if r[1] not in _sin_auditar]
+    cambio = " OR ".join(f'NEW."{c}" IS NOT OLD."{c}"' for c in cols_cont)
+    conn.execute("DROP TRIGGER IF EXISTS trg_ofertas_updated")
+    conn.execute(f"""CREATE TRIGGER trg_ofertas_updated AFTER UPDATE ON ofertas
+        WHEN NEW.updated_at = OLD.updated_at AND ({cambio})
+        BEGIN
+            UPDATE ofertas SET updated_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
+            WHERE group_id = NEW.group_id;
+        END""")
     # memoria del canal: idempotencia digests + observabilidad + message_id futuro
     conn.execute("""CREATE TABLE IF NOT EXISTS channel_posts (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -138,6 +202,8 @@ def init_db(conn: sqlite3.Connection) -> None:
     for col in ("lots_done", "ia_failures", "breaker_trips", "channel_posts"):
         if col not in cols_sl:
             conn.execute(f"ALTER TABLE scan_log ADD COLUMN {col} INTEGER DEFAULT 0")
+    from .analytics.esquema import asegurar_esquema as _esquema_analitico
+    _esquema_analitico(conn)
     conn.commit()
 
 
@@ -257,10 +323,31 @@ def rescore_ids(conn: sqlite3.Connection, group_ids: list[str], version_id: str,
     return updated
 
 
+def _fecha_oferta(job: dict, now_iso: str) -> tuple[str, str, str]:
+    """(date_posted ISO, texto original si era relativo, precisión). La fecha relativa
+    ('hace 3 días') se resuelve contra el momento de captura (now_iso = created_at)."""
+    try:
+        now = datetime.fromisoformat(str(now_iso).replace("Z", "+00:00"))
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=timezone.utc)
+    except ValueError:
+        now = datetime.now(timezone.utc)
+    raw = job.get("date_raw") or job.get("date")
+    iso, prec = resolver_fecha(job.get("date"), now)
+    if not iso and job.get("date_raw"):
+        iso, prec = resolver_fecha(job["date_raw"], now)
+    if not iso:
+        return "", "", ""
+    prec = job.get("date_precision") or prec
+    es_relativa_texto = isinstance(raw, str) and prec in ("dia", "aprox") and raw.strip()[:10] != iso
+    return iso, (raw.strip()[:60] if es_relativa_texto else ""), prec
+
+
 def upsert(conn: sqlite3.Connection, job: dict, now_iso: str) -> tuple[str, bool]:
     """Inserta o fusiona. job debe traer uid (o lo genera). Retorna (group_id, is_new)."""
     if not job.get("uid"):
         job["uid"] = re_norm_uid(job["title"], job.get("company", ""))
+    fecha_iso, fecha_raw, fecha_prec = _fecha_oferta(job, now_iso)
     gid = db_find_duplicate(conn, job)
     if gid:
         src0 = (job.get("source") or "").split(":")[0]
@@ -271,6 +358,9 @@ def upsert(conn: sqlite3.Connection, job: dict, now_iso: str) -> tuple[str, bool
                      CASE WHEN sources='' THEN ? ELSE sources || ',' || ? END END,
             found_by=CASE WHEN instr(found_by, ?) THEN found_by ELSE
                    CASE WHEN found_by='' THEN ? ELSE found_by || ',' || ? END END,
+            url=CASE WHEN url LIKE '%trabajando.cl/trabajo-empleo/%' AND ? != '' THEN ? ELSE url END,
+            company=CASE WHEN company='' OR company IS NULL THEN ? ELSE company END,
+            location=CASE WHEN location='' OR location IS NULL THEN ? ELSE location END,
             salary=CASE WHEN salary='' OR salary IS NULL THEN ? ELSE salary END,
             modality=CASE WHEN modality='' OR modality IS NULL THEN ? ELSE modality END,
             description=CASE WHEN length(description) < 200 THEN ? ELSE description END,
@@ -278,15 +368,21 @@ def upsert(conn: sqlite3.Connection, job: dict, now_iso: str) -> tuple[str, bool
             years_official=COALESCE(years_official, ?),
             remote_official=COALESCE(remote_official, ?),
             employment_type=CASE WHEN employment_type='' THEN ? ELSE employment_type END,
+            date_posted=CASE WHEN date_posted='' OR date_posted IS NULL THEN ? ELSE date_posted END,
+            date_posted_raw=CASE WHEN date_posted='' OR date_posted IS NULL THEN ? ELSE date_posted_raw END,
+            date_precision=CASE WHEN date_posted='' OR date_posted IS NULL THEN ? ELSE date_precision END,
             active=1
             WHERE group_id=?""",
             (now_iso, src0, src0, src0,
              fb, fb, fb,
-             job.get("salary", ""), job.get("modality", ""),
-             (job.get("_desc") or job.get("description") or "")[:2000],
+             job.get("url", ""), job.get("url", ""),
+             job.get("company", ""), job.get("location", ""), job.get("salary", ""),
+             job.get("modality", ""),
+             (job.get("_desc") or job.get("description") or "")[:MAX_DESC],
              job.get("valid_through", ""), job.get("years_official"),
              1 if job.get("remote_official") else None,
              job.get("employment_type", ""),
+             fecha_iso, fecha_raw, fecha_prec,
              gid))
         return gid, False
     try:
@@ -294,21 +390,38 @@ def upsert(conn: sqlite3.Connection, job: dict, now_iso: str) -> tuple[str, bool
             (group_id, title, company, location, url, source, sources, found_by,
              date_posted, valid_through, employment_type, years_official, remote_official,
              salary, modality, techs, description, description_source,
-             first_seen, last_seen, occurrences, active, score_version)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,1,'')""",
+             first_seen, last_seen, occurrences, active, score_version, salary_source,
+             date_posted_raw, date_precision, date_canonical)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,1,'',?,?,?,?)""",
             (job["uid"], job["title"], job.get("company", ""), job.get("location", ""),
              job.get("url", ""), job.get("source", ""),
              (job.get("source") or "").split(":")[0], job.get("found_by", ""),
-             job.get("date", ""), job.get("valid_through", ""), job.get("employment_type", ""),
+             fecha_iso, job.get("valid_through", ""), job.get("employment_type", ""),
              job.get("years_official"), job.get("remote_official"),
              job.get("salary", ""), job.get("modality", ""), job.get("techs", ""),
-             (job.get("_desc") or "")[:2000], job.get("description_source", ""),
-             now_iso, now_iso))
+             (job.get("_desc") or "")[:MAX_DESC], job.get("description_source", ""),
+             now_iso, now_iso, "feed" if job.get("salary") else "",
+             fecha_raw, fecha_prec,
+             canonical_date({"date_posted": fecha_iso, "first_seen": now_iso})))
         return job["uid"], True
     except sqlite3.IntegrityError:
         conn.execute("""UPDATE ofertas SET last_seen=?, occurrences=occurrences+1 WHERE group_id=?""",
                      (now_iso, job["uid"]))
         return job["uid"], False
+
+
+def expirar_sin_texto(conn: sqlite3.Connection, dias: int = 7) -> int:
+    """Desactiva ofertas sin IA, sin texto utilizable (<200 chars) y sin ficha recuperable
+    (fetch_fails>=3) que su fuente lleva `dias` sin devolver. No hay nada que enriquecer ni
+    publicar: solo inflaban la cola 'sin ficha' y el pool. Si la fuente las devuelve de nuevo,
+    upsert las reactiva (active=1)."""
+    n = conn.execute("""UPDATE ofertas SET active=0
+        WHERE active=1 AND ia_model='' AND (description IS NULL OR length(description)<200)
+          AND COALESCE(fetch_fails,0)>=3
+          AND last_seen < strftime('%Y-%m-%dT%H:%M:%S', 'now', ?)""",
+                     (f"-{int(dias)} day",)).rowcount
+    conn.commit()
+    return n
 
 
 def db_find_duplicate(conn: sqlite3.Connection, job: dict) -> str | None:
@@ -390,3 +503,22 @@ def url_key(url: str) -> str:
     if keep:
         return parsed.path + "?" + "&".join(keep)
     return parsed.path
+
+
+TABLAS_DE_OFERTAS = ("ofertas", "oferta_techs", "oferta_tags", "oferta_eventos", "oferta_prev", "estado_oferta", "aviso_estado")
+
+
+def reset_ofertas(conn: sqlite3.Connection) -> list[str]:
+    """Descarta las ofertas y todo lo que las referencia, para estrenar el esquema con `id` numérico.
+
+    Conserva scan_log, mercado_* (agregados sin ids), channel_posts (para no repostear en el canal),
+    sesiones web y score_versions. Sin migración ni backfill: es una limpieza deliberada."""
+    borradas = []
+    for t in TABLAS_DE_OFERTAS:
+        if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (t,)).fetchone():
+            conn.execute(f"DROP TABLE {t}")
+            borradas.append(t)
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE name='sqlite_sequence'").fetchone():
+        conn.execute("DELETE FROM sqlite_sequence WHERE name='ofertas'")
+    conn.commit()
+    return borradas

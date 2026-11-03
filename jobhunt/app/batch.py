@@ -189,6 +189,7 @@ class BatchRunner:
         from ..enrich import (enrich_pending, profile_description,
                               compute_market_context)
         from ..scoring import compute_score, compute_market_score
+        from ..ia.validar import texto_suficiente
 
         cfg = self.cfg
         st_run = {"lots_done": 0, "ia_failures": 0, "breaker_trips": 0,
@@ -215,7 +216,7 @@ class BatchRunner:
             # 2. FIX B: enrich de fichas ANTES de la IA — la IA lee el contexto
             #    completo (desc completa, sueldo, modalidad) en vez del crudo
             try:
-                enrich_pending(conn, cfg, max_n=8, groups=lote_ids, solo_fetch=True,
+                enrich_pending(conn, cfg, max_n=len(lote_ids), groups=lote_ids, solo_fetch=True,
                                stop_event=stop_event)
             except Exception as e:
                 conn.rollback()
@@ -233,6 +234,17 @@ class BatchRunner:
                     lote = [dict(r) for r in rows]
             except Exception as e:
                 log.warning("reload lote falló (usa dicts crudos): %s", e)
+
+            # 2c. compuerta de texto: sin descripción real la IA solo inventaría (proyecta
+            #     el stack del perfil). Esas ofertas quedan con ia_model='' y las toma la
+            #     cola nocturna cuando una ficha posterior traiga texto.
+            n_antes = len(lote)
+            lote = [j for j in lote if texto_suficiente(j.get("description"))]
+            if len(lote) < n_antes:
+                log.info("lote %d: %d/%d ofertas sin texto suficiente → sin IA (cola nocturna)",
+                         n_lote + 1, n_antes - len(lote), n_antes)
+            if not lote:
+                continue
 
             # 3. workers IA paralelos (solo HTTP, módulo-level = testeable)
             work_q, out_q = Queue(), Queue()
