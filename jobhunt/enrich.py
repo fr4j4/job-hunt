@@ -1131,31 +1131,39 @@ def run_ia_batch(conn, cfg: Config, profile_desc: str, max_n: int | None = None,
             return True
 
         if concurrency > 1 and n_lotes > 1:
-            from concurrent.futures import ThreadPoolExecutor, as_completed
+            from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
             n_vistos = 0
+            siguiente = 0
+            en_vuelo: dict = {}
+            parar = False
+            # Ventana deslizante: nunca más de `concurrency` lotes en vuelo. Así el breaker de
+            # 429/5xx y /stop frenan de verdad (no hay decenas de llamadas ya lanzadas).
             with ThreadPoolExecutor(max_workers=concurrency) as ex:
-                futures = {ex.submit(ia_extract_lote, cfg, grupo, profile_desc, mercado): grupo
-                          for grupo in lotes}
-                for fut in as_completed(futures):
-                    grupo = futures[fut]
+                while True:
+                    while (not parar and siguiente < n_lotes and len(en_vuelo) < concurrency
+                           and not (stop_event is not None and stop_event.is_set())):
+                        g = lotes[siguiente]
+                        en_vuelo[ex.submit(ia_extract_lote, cfg, g, profile_desc, mercado)] = g
+                        siguiente += 1
+                    if not en_vuelo:
+                        break
+                    hechos, _ = wait(list(en_vuelo), return_when=FIRST_COMPLETED)
+                    for fut in hechos:
+                        grupo = en_vuelo.pop(fut)
+                        arr, err = fut.result()
+                        n_vistos += 1
+                        if not parar and not _aplicar_resultado_lote(grupo, arr, err):
+                            log.warning("batch IA nocturno: %d fallos 429/5xx seguidos — circuito cortado, "
+                                        "resto queda en cola para el próximo batch", rate_racha)
+                            parar = True
+                        if progress:
+                            try:
+                                progress(min(n_vistos * N, total), total, f"lote {n_vistos}/{n_lotes}")
+                            except Exception:
+                                pass
                     if stop_event is not None and stop_event.is_set():
                         log.warning("batch IA detenido por /stop tras %d/%d lotes", n_vistos, n_lotes)
-                        for f in futures:
-                            f.cancel()
-                        break
-                    arr, err = fut.result()
-                    n_vistos += 1
-                    if not _aplicar_resultado_lote(grupo, arr, err):
-                        log.warning("batch IA nocturno: %d fallos 429/5xx seguidos — circuito cortado, "
-                                    "resto queda en cola para el próximo batch", rate_racha)
-                        for f in futures:
-                            f.cancel()
-                        break
-                    if progress:
-                        try:
-                            progress(min(n_vistos * N, total), total, f"lote {n_vistos}/{n_lotes}")
-                        except Exception:
-                            pass
+                        parar = True
         else:
             for i, grupo in enumerate(lotes, 1):
                 if stop_event is not None and stop_event.is_set():
