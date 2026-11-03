@@ -204,7 +204,25 @@ def init_db(conn: sqlite3.Connection) -> None:
             conn.execute(f"ALTER TABLE scan_log ADD COLUMN {col} INTEGER DEFAULT 0")
     from .analytics.esquema import asegurar_esquema as _esquema_analitico
     _esquema_analitico(conn)
+    reparar_urls_trabajando(conn)
     conn.commit()
+
+
+def reparar_urls_trabajando(conn: sqlite3.Connection) -> int:
+    """Reescribe los enlaces antiguos de Trabajando.com (/trabajo-empleo/<id>, página vacía sin la
+    oferta) al enlace real /trabajo/<id>-<slug>. El upsert no toca `url` de ofertas ya indexadas,
+    así que sin esto quedaban rotas para siempre. Idempotente: solo filas con el formato antiguo."""
+    from .sources.trabajando import id_de_url, url_oferta
+    filas = conn.execute("SELECT group_id, title, url FROM ofertas WHERE url LIKE '%trabajando.cl/trabajo-empleo/%'").fetchall()
+    n = 0
+    for gid, titulo, url in filas:
+        oid = id_de_url(url)
+        if oid:
+            conn.execute("UPDATE ofertas SET url=? WHERE group_id=?", (url_oferta(oid, titulo), gid))
+            n += 1
+    if n:
+        log.info("trabajando: %d enlaces /trabajo-empleo/ reescritos a /trabajo/<id>-<slug>", n)
+    return n
 
 
 def register_criteria_version(conn: sqlite3.Connection, version_id: str, cfg: Config) -> None:

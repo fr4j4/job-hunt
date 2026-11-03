@@ -64,7 +64,7 @@ def test_trabajando_listado_y_ficha(monkeypatch):
          "descripcionOferta": "resumen...", "nombreJornada": "Jornada Completa"},
         {"idOferta": 8, "nombreCargo": "Operador", "nombreEmpresa": "X", "ubicacion": "Antofagasta",
          "fechaPublicacion": "2026-10-14 12:33", "descripcionOferta": "", "nombreJornada": "Mixta (Teletrabajo + Presencial)"}]}
-    ficha = {"idOferta": 7, "descripcionOferta": "<p>Python y <b>Angular</b></p>",
+    ficha = {"idOferta": 7, "slug": "7-dev-fullstack-ssr", "descripcionOferta": "<p>Python y <b>Angular</b></p>",
              "requisitosMinimos": "<p>3 años</p>", "nombreJornada": "Teletrabajo",
              "mostrarSueldo": True, "sueldo": 2500000, "nombreMoneda": "Pesos Chilenos",
              "ubicacion": {"nombreComuna": "Providencia", "nombreRegion": "Metropolitana de Santiago"},
@@ -75,7 +75,8 @@ def test_trabajando_listado_y_ficha(monkeypatch):
     monkeypatch.setattr(_comun, "get", fake_get)
     r = trabajando.jobs(["fullstack"], "perfil:")
     a, b = r
-    assert a["url"] == "https://www.trabajando.cl/trabajo-empleo/7" and a["date"] == "2026-10-19"
+    assert a["url"] == "https://www.trabajando.cl/trabajo/7-dev-fullstack-ssr" and a["date"] == "2026-10-19"  # slug de la ficha
+    assert b["url"] == "https://www.trabajando.cl/trabajo/8-operador"                  # sin ficha: id + título
     assert a["modality"] == "remoto" and a["salary"] == "CLP 2500000"
     assert a["location"] == "Providencia, Metropolitana de Santiago"
     assert a["description_source"] == "trabajando-api" and "Python y Angular" in a["_desc"]
@@ -92,7 +93,7 @@ def test_fetch_ficha_chiletrabajos_y_trabajando(monkeypatch):
                          "ubicacion": {"nombreComuna": "Las Condes", "nombreRegion": "Metropolitana de Santiago"}}))
     c = chiletrabajos.fetch_ficha("https://www.chiletrabajos.cl/trabajo/dev-111")
     assert c["_access"] == "ok" and c["modality_badge"] == "remoto" and c["date_posted"] == "2026-10-14"
-    t = trabajando.fetch_ficha("https://www.trabajando.cl/trabajo-empleo/7")
+    t = trabajando.fetch_ficha("https://www.trabajando.cl/trabajo/7-backend-java")
     assert t["_access"] == "ok" and t["modality_badge"] == "híbrido" and t["location"] == "Las Condes, Metropolitana de Santiago"
     assert t["date_posted"] == "2026-10-19" and "Backend Java" in t["description"]
     monkeypatch.setattr(_comun, "get", lambda *a, **k: "" if k.get("as_text") else {})
@@ -106,4 +107,34 @@ def test_enrich_enruta_las_fichas_de_las_fuentes_chilenas(monkeypatch):
     monkeypatch.setattr(trabajando, "fetch_ficha", lambda url: {"_access": "ok", "description": "tb"})
     r = {"group_id": "g", "title": "t"}
     assert en._fetch_ficha({**r, "url": "https://www.chiletrabajos.cl/trabajo/dev-1"})["description"] == "ct"
-    assert en._fetch_ficha({**r, "url": "https://www.trabajando.cl/trabajo-empleo/5"})["description"] == "tb"
+    assert en._fetch_ficha({**r, "url": "https://www.trabajando.cl/trabajo/5-dev"})["description"] == "tb"
+    assert en._fetch_ficha({**r, "url": "https://www.trabajando.cl/trabajo-empleo/5"})["description"] == "tb"  # enlace antiguo
+
+
+def test_trabajando_url_oferta_e_id():
+    u = trabajando.url_oferta
+    assert u(6143588, "x", "6143588-analista-senior-fullstack") == "https://www.trabajando.cl/trabajo/6143588-analista-senior-fullstack"
+    assert (u(6141970, "Ingeniero/a Junior de Soluciones IA y Desarrollador full stack")
+            == "https://www.trabajando.cl/trabajo/6141970-ingeniero-a-junior-de-soluciones-ia-y-desarrollador-full-stack")
+    assert u(5, "Diseñador UX/UI (Híbrido)") == "https://www.trabajando.cl/trabajo/5-disenador-ux-ui-hibrido"
+    assert u(5, "Dev", "99-otro") == "https://www.trabajando.cl/trabajo/5-dev"     # slug de otra oferta: se ignora
+    assert u(5, "") == "https://www.trabajando.cl/trabajo/5"
+    assert trabajando.id_de_url("https://www.trabajando.cl/trabajo/6143588-analista-senior-fullstack") == "6143588"
+    assert trabajando.id_de_url("https://www.trabajando.cl/trabajo-empleo/6143588") == "6143588"
+    assert trabajando.id_de_url("https://www.chiletrabajos.cl/trabajo/dev-111") == ""
+
+
+def test_reparar_urls_trabajando_antiguas():
+    import sqlite3
+    from jobhunt import db
+    conn = sqlite3.connect(":memory:")
+    db.init_db(conn)
+    for gid, t, url in [("a|e", "Analista Senior Fullstack", "https://www.trabajando.cl/trabajo-empleo/6143588"),
+                        ("b|e", "Otra", "https://www.chiletrabajos.cl/trabajo/x-1")]:
+        conn.execute("INSERT INTO ofertas (group_id, title, url, first_seen, last_seen) VALUES (?,?,?,?,?)",
+                     (gid, t, url, "2026-11-01", "2026-11-01"))
+    assert db.reparar_urls_trabajando(conn) == 1
+    urls = dict(conn.execute("SELECT group_id, url FROM ofertas"))
+    assert urls["a|e"] == "https://www.trabajando.cl/trabajo/6143588-analista-senior-fullstack"
+    assert urls["b|e"] == "https://www.chiletrabajos.cl/trabajo/x-1"
+    assert db.reparar_urls_trabajando(conn) == 0                                      # idempotente

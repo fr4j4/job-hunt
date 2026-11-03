@@ -6,14 +6,42 @@ descripcionOferta (resumen), nombreJornada}]}, 15 por página.
 Ficha: GET https://www.trabajando.cl/api/ofertas/<id> → descripcionOferta y requisitosMinimos (HTML),
 nombreJornada ("Mixta (Teletrabajo + Presencial)"), sueldo/mostrarSueldo, ubicacion.{nombreRegion,
 nombreComuna}, aniosExperiencia. Se pide solo para las primeras `max_detalles` ofertas del barrido.
-Enlace público: https://www.trabajando.cl/trabajo-empleo/<id>."""
+Enlace público: https://www.trabajando.cl/trabajo/<id>-<slug>. La ficha trae `slug` ("6143588-analista-
+senior-fullstack"), que es el canonical de la página; el listado no lo trae. El sitio resuelve la oferta por
+el id (/trabajo/6143588-x muestra la misma oferta, verificado 03-11-2026), así que sin ficha se arma el slug
+desde el título. /trabajo-empleo/<id> NO sirve: devuelve una página vacía (noindex, sin datos de la oferta)."""
+import re
 import time
+import unicodedata
 
 from ..domain.texto import MAX_DESC
 from . import _comun
 
 _API = "https://www.trabajando.cl/api"
-_PUBLICO = "https://www.trabajando.cl/trabajo-empleo/"
+_PUBLICO = "https://www.trabajando.cl/trabajo/"
+# enlaces de la oferta: el actual (/trabajo/<id>-<slug>) y el antiguo roto (/trabajo-empleo/<id>)
+RE_URL_OFERTA = re.compile(r"trabajando\.cl/trabajo(?:-empleo)?/(\d+)")
+
+
+def _slug_titulo(titulo: str) -> str:
+    """'Ingeniero/a Junior de Soluciones IA' → 'ingeniero-a-junior-de-soluciones-ia' (mismo patrón que
+    los slugs del sitio; es solo cosmético: el sitio resuelve por id)."""
+    t = unicodedata.normalize("NFKD", titulo or "").encode("ascii", "ignore").decode().lower()
+    return re.sub(r"[^a-z0-9]+", "-", t).strip("-")
+
+
+def url_oferta(oid, titulo: str = "", slug: str = "") -> str:
+    """Enlace público de la oferta. `slug` es el de la ficha (canonical); sin él, id + título."""
+    slug = (slug or "").strip().strip("/")
+    if slug and slug.split("-", 1)[0] == str(oid):
+        return f"{_PUBLICO}{slug}"
+    s = _slug_titulo(titulo)
+    return f"{_PUBLICO}{oid}-{s}" if s else f"{_PUBLICO}{oid}"
+
+
+def id_de_url(url: str) -> str:
+    m = RE_URL_OFERTA.search(url or "")
+    return m.group(1) if m else ""
 
 
 def _modalidad(jornada: str) -> str:
@@ -45,7 +73,7 @@ def jobs(queries: list[str], found_by_prefix: str = "", on_query=None, max_pages
                     "title": titulo, "company": o.get("nombreEmpresa") or "",
                     "location": o.get("ubicacion") or "",
                     "date": (o.get("fechaPublicacion") or "")[:10],
-                    "url": f"{_PUBLICO}{oid}", "source": f"trabajando:{q}",
+                    "url": url_oferta(oid, titulo), "source": f"trabajando:{q}",
                     "found_by": f"{found_by_prefix}{q}", "modality": _modalidad(o.get("nombreJornada")),
                     "salary": "", "_desc": _comun.limpiar(o.get("descripcionOferta"))[:MAX_DESC],
                     "description_source": "trabajando-serp",
@@ -79,8 +107,8 @@ def _ficha_a_info(f: dict) -> dict:
 
 def fetch_ficha(url: str) -> dict:
     """Ficha para el enriquecimiento (enrich._fetch_ficha) a partir del enlace público."""
-    oid = url.rstrip("/").rsplit("/", 1)[-1].split("?")[0]
-    f = _comun.get("trabajando", f"{_API}/ofertas/{oid}") if oid.isdigit() else {}
+    oid = id_de_url(url)
+    f = _comun.get("trabajando", f"{_API}/ofertas/{oid}") if oid else {}
     if not f or "idOferta" not in f:
         return {"_access": "blocked", "error": "trabajando sin ficha"}
     i = _ficha_a_info(f)
@@ -96,6 +124,8 @@ def _completar_fichas(ofertas: list[dict], max_detalles: int) -> None:
         f = _comun.get("trabajando", f"{_API}/ofertas/{j['_tb_id']}")
         if not f or "idOferta" not in f:
             continue
+        if f.get("slug"):
+            j["url"] = url_oferta(j["_tb_id"], j["title"], f["slug"])
         i = _ficha_a_info(f)
         if i["description"]:
             j["_desc"] = i["description"]
