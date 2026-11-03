@@ -11,6 +11,7 @@ from html import unescape as _u
 
 import requests
 
+from ..domain.texto import MAX_DESC
 from ..logging_setup import get_logger
 
 log = get_logger(__name__)
@@ -48,6 +49,16 @@ def fetch_page(url: str) -> tuple[str, str]:
     return html, "ok"
 
 
+def _html_a_texto(h: str) -> str:
+    """HTML → texto conservando saltos de párrafo/lista (la ficha se muestra con pre-wrap)."""
+    h = re.sub(r"(?i)<\s*br\s*/?>|</\s*(p|div|li|ul|ol|h[1-6])\s*>", "\n", h)
+    h = re.sub(r"(?i)<\s*li[^>]*>", "• ", h)
+    t = _u(re.sub(r"<[^>]+>", " ", h))
+    t = re.sub(r"[ \t\r\f\v\xa0]+", " ", t)
+    t = re.sub(r"\n\s*(?:\n\s*)+", "\n\n", re.sub(r" ?\n ?", "\n", t)).strip()
+    return re.sub(r"^(?:Copilot said:|Copilot dijo:)\s*", "", t)   # resto de UI en fichas CB
+
+
 def _jsonld_blocks(html: str) -> list[dict]:
     out = []
     for b in re.findall(r'<script type="application/ld\+json">(.*?)</script>', html, re.S):
@@ -76,7 +87,9 @@ def parse_jobposting(html: str, url: str) -> dict:
                   "employment_type": "", "years_official": None, "remote_official": 0,
                   "industry": "", "education": "", "applicant_region": "",
                   "company": "", "company_linkedin_url": "", "modality_badge": "", "salary": "",
-                  "contrato": "", "jornada": "", "techs_desc": []}
+                  "contrato": "", "jornada": "", "techs_desc": [],
+                  "location": "", "job_benefits": "", "skills_official": "",
+                  "direct_apply": None, "date_text": ""}
 
     # CB: oferta expirada redirige a un listado genérico — fetch_page no expone la URL final,
     # así que re-petición con requests para leer la URL efectiva
@@ -129,9 +142,36 @@ def parse_jobposting(html: str, url: str) -> dict:
             if val.get("value"):
                 unit = {"MONTH": "/mes", "YEAR": "/año"}.get(val.get("unitText", ""), "")
                 info["salary"] = f"{sal.get('currencyCode','') if isinstance(sal, dict) else ''} {val.get('value','')}{unit}".strip()[:40]
+        # --- metadatos oficiales adicionales del JSON-LD ---
+        org = jp.get("hiringOrganization")
+        nom = org.get("name") if isinstance(org, dict) else org if isinstance(org, str) else ""
+        if nom:
+            info["company"] = _u(str(nom)).strip()[:80]
+        locs = jp.get("jobLocation")
+        locs = locs if isinstance(locs, list) else [locs] if locs else []
+        partes_loc = []
+        for lo in locs:
+            ad = lo.get("address") if isinstance(lo, dict) else None
+            if isinstance(ad, dict):
+                partes_loc.append(", ".join(str(ad[k]) for k in ("addressLocality", "addressRegion")
+                                            if ad.get(k)))
+        if any(partes_loc):
+            info["location"] = " | ".join(p for p in partes_loc if p)[:120]
+        ben = jp.get("jobBenefits")
+        if ben:
+            info["job_benefits"] = _html_a_texto(ben if isinstance(ben, str) else "; ".join(map(str, ben)))[:500]
+        sk = jp.get("skills")
+        if sk:
+            info["skills_official"] = (sk if isinstance(sk, str) else ", ".join(map(str, sk)))[:300]
+        da = jp.get("directApply")
+        if isinstance(da, bool) or str(da).lower() in ("true", "false"):
+            info["direct_apply"] = 1 if str(da).lower() == "true" else 0
+        wh = jp.get("workHours")
+        if wh and not info["jornada"]:
+            info["jornada"] = str(wh)[:60]
         desc_html = jp.get("description") or ""
         if desc_html:
-            info["description"] = re.sub(r"\s+", " ", _u(re.sub(r"<[^>]+>", " ", desc_html))).strip()[:1800]
+            info["description"] = _html_a_texto(desc_html)[:MAX_DESC]
     # badges Computrabajo
     for b in re.findall(r'<span class="tag base mb10">([^<]+)</span>', html):
         bl = _u(b).strip()
@@ -162,13 +202,13 @@ def parse_jobposting(html: str, url: str) -> dict:
     if not info["description"]:
         m = re.search(r'<section class="[^"]*description[^"]*"[^>]*>([\s\S]*?)</section>', html)
         if m:
-            info["description"] = re.sub(r"\s+", " ", _u(re.sub(r"<[^>]+>", " ", m.group(1)))).strip()[:4000]
+            info["description"] = re.sub(r"\s+", " ", _u(re.sub(r"<[^>]+>", " ", m.group(1)))).strip()[:MAX_DESC]
     # fallback Computrabajo: ficha sin JSON-LD → desc en <p class="mbB"> (antes <div class="mbB">;
     # el div ahora solo contiene badges de salario/contrato, el <p> tiene el texto completo)
     if not info["description"]:
         m = re.search(r'<(?:p|div) class="mbB">([a-zA-ZÁÉÍÓÚáéíóúÑñ¡¿][\s\S]{100,6000}?)</(?:p|div)>', html)
         if m:
-            info["description"] = re.sub(r"\s+", " ", _u(re.sub(r"<[^>]+>", " ", m.group(1)))).strip()[:4000]
+            info["description"] = re.sub(r"\s+", " ", _u(re.sub(r"<[^>]+>", " ", m.group(1)))).strip()[:MAX_DESC]
     # techs de la desc — ELIMINADO (spec-techs-dev-gate v2): la regex de la ficha
     # ya no se ejecuta aquí. La IA es la única fuente de techs con IA activa;
     # en modo degradado (IA apagada) se usa _extract_techs(title, desc) desde
@@ -194,7 +234,7 @@ def _extract_aira_spa(url: str) -> dict:
                     ".filter(e => e.innerText && e.innerText.length > 200)"
                     ".map(e => e.innerText.trim())"
                     ".sort((a, b) => b.length - a.length).slice(0, 2).join(' ')")
-                info["description"] = re.sub(r"\s+", " ", ps or "").strip()[:2000]
+                info["description"] = re.sub(r"\s+", " ", ps or "").strip()[:MAX_DESC]
             finally:
                 br.close()
         finally:

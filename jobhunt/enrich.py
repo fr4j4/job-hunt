@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 import sqlite3
 import time
 
@@ -34,8 +35,12 @@ from .ia.prompts import (  # noqa: F401 (compat: los tests leen estos nombres en
     _prompt_opinion_local,
 )
 from .ia.schemas import _LOTE_SCHEMA  # noqa: F401 (compat)
+from .ia import validar as _val
 from .logging_setup import get_logger
 from .salarios.arbiter import SalaryArbitrator
+from .salarios.texto import sueldo_respaldado
+from .domain.fechas import canonical_date, resolver_fecha
+from .domain.texto import MAX_DESC
 
 log = get_logger(__name__)
 
@@ -147,9 +152,9 @@ def ia_extract_detail(cfg: Config, job: dict, profile_desc: str,
               f'Contexto de mercado (para el campo opinion): {mercado}\n\n'
               f'Oferta:\nTítulo: {job.get("title","")}\nEmpresa: {job.get("company","")}\n'
               f'Ubicación: {job.get("location","")}\n'
-              f'Sueldo declarado: {job.get("salary") or "(no declarado — infiere rango de mercado solo si el texto lo permite)"}\n'
+              f'Sueldo declarado: {job.get("salary") or "(no declarado)"}\n'
               f'Modalidad declarada: {job.get("modality") or "(no declarada)"}\n'
-              f'Descripción: {(job.get("description") or "")[:2400]}'
+              f'Descripción: {(job.get("description") or "")[:6000]}'
               f'{nota_anomalia}\n\n'
               f'Responde SOLO JSON: {IA_SCHEMA}')
     messages = [{"role": "system",
@@ -232,6 +237,64 @@ def ia_extract_local(cfg: Config, job: dict, profile_desc: str,
     return d1, ""
 
 
+_PROMPT_ENCAJE = (
+    "Eres un reclutador tech estricto. Decide cuánto calza esta oferta con el PERFIL.\n"
+    "Perfil del candidato: {perfil}\n\n"
+    "Oferta:\nTítulo: {title}\nEmpresa: {company}\nRol: {rol}\nTechs: {techs}\n"
+    "Descripción: {desc}\n\n"
+    "encaje: \"alto\" (rol y stack coinciden) | \"medio\" (rol de desarrollo/datos afín pero "
+    "stack o seniority parcial) | \"bajo\" (rol tech de otra área o stack ajeno) | "
+    "\"ninguno\" (no es tecnología o sin relación con el perfil). "
+    "Ante duda elige el nivel MÁS BAJO.\n"
+    "Responde SOLO JSON: {{\"encaje\": \"alto|medio|bajo|ninguno\"}}")
+
+
+def ia_encaje(cfg: Config, job: dict, profile_desc: str) -> str:
+    """Veredicto de encaje de UNA oferta ya procesada (backfill). Local si está activo,
+    si no cloud. Retorna 'alto'|'medio'|'bajo'|'ninguno' o '' si la IA falla."""
+    prompt = _PROMPT_ENCAJE.format(
+        perfil=profile_desc, title=job.get("title") or "", company=job.get("company") or "",
+        rol=job.get("rol_categoria") or "(sin clasificar)", techs=job.get("techs") or "(ninguna)",
+        desc=(job.get("description") or "")[:1200])
+    if cfg.ia.local_enabled:
+        data, err = _llm_local(cfg, prompt)
+    elif cfg.ia.enabled and cfg.ia.api_key:
+        data, err = CloudClient(cfg, tag="IA encaje").chat_json(
+            [{"role": "user", "content": prompt}], extra={"format": "json"})
+    else:
+        return ""
+    if err or not isinstance(data, dict):
+        return ""
+    v = _clean_text(data.get("encaje"), 10, lower=True)
+    return v if v in ("alto", "medio", "bajo", "ninguno") else ""
+
+
+def backfill_encaje(conn, cfg: Config, max_n: int | None = None, on_progress=None) -> tuple[int, int]:
+    """Asigna ai_encaje a ofertas activas con IA previa pero sin veredicto.
+    Mejores primero (score DESC). Retorna (hechas, fallidas). Commit POR oferta (no retiene el lock de escritura durante las llamadas IA)."""
+    rows = conn.execute(
+        "SELECT group_id, title, company, rol_categoria, techs, description FROM ofertas "
+        "WHERE active=1 AND ia_model != '' AND ai_encaje = '' ORDER BY score DESC"
+        + (" LIMIT ?" if max_n else ""), (max_n,) if max_n else ()).fetchall()
+    p_desc = profile_description(cfg)
+    hechas = fallidas = 0
+    for i, r in enumerate(rows, 1):
+        v = ia_encaje(cfg, dict(r), p_desc)
+        if v:
+            conn.execute("UPDATE ofertas SET ai_encaje=? WHERE group_id=?", (v, r["group_id"]))
+            conn.commit()      # transacción corta: la IA tarda segundos y el barrido necesita el lock
+            hechas += 1
+        else:
+            fallidas += 1
+        if on_progress:
+            try:
+                on_progress(i, len(rows))
+            except Exception:
+                pass
+    conn.commit()
+    return hechas, fallidas
+
+
 # --- Modo lote (spec-enrich-lotes §2) ---
 def ia_extract_lote(cfg: Config, rows: list[dict], profile_desc: str,
                     mercado: str = "") -> tuple[list[dict] | None, str]:
@@ -279,7 +342,7 @@ def _extract_aira_spa(url: str) -> dict:
                     ".filter(e => e.innerText && e.innerText.length > 200)"
                     ".map(e => e.innerText.trim())"
                     ".sort((a, b) => b.length - a.length).slice(0, 2).join(' ')")
-                info["description"] = re.sub(r"\s+", " ", ps or "").strip()[:2000]
+                info["description"] = re.sub(r"\s+", " ", ps or "").strip()[:MAX_DESC]
             finally:
                 br.close()
         finally:
@@ -287,6 +350,98 @@ def _extract_aira_spa(url: str) -> dict:
     except Exception as e:
         log.warning("aira-spa falló (%s): %s", url[:50], e)
     return info
+
+
+# destinos de Jooble que no se pueden leer: appcast.io detrás de DataDome (captcha), fitly.work
+# (SPA que no renderiza sin sesión). No se intenta saltar el captcha: se marcan 'blocked'.
+_JOOBLE_DESTINOS_VEDADOS = ("appcast.io", "captcha-delivery.com", "fitly.work")
+_JOOBLE_SEM = threading.BoundedSemaphore(2)   # Chromium es pesado: máx 2 a la vez
+# cortacircuitos: si el /away/ de Jooble se queda en el challenge N veces seguidas, se deja de lanzar
+# Chromium por un rato (cada intento perdido cuesta ~25 s y quemaba un intento de fetch_fails)
+_JOOBLE_BREAKER = {"fallos": 0, "hasta": 0.0}
+_JOOBLE_FALLOS_MAX = 4
+_JOOBLE_PAUSA_S = 6 * 3600
+
+
+def _jooble_en_pausa() -> bool:
+    return time.time() < _JOOBLE_BREAKER["hasta"]
+
+
+def _jooble_resultado(ok: bool, challenge: bool = False) -> None:
+    if ok:
+        _JOOBLE_BREAKER["fallos"] = 0
+    elif challenge:
+        _JOOBLE_BREAKER["fallos"] += 1
+        if _JOOBLE_BREAKER["fallos"] >= _JOOBLE_FALLOS_MAX:
+            _JOOBLE_BREAKER["hasta"] = time.time() + _JOOBLE_PAUSA_S
+            _JOOBLE_BREAKER["fallos"] = 0
+            log.warning("jooble-destino: %d challenges seguidos → pausa de %dh sin lanzar Chromium",
+                        _JOOBLE_FALLOS_MAX, _JOOBLE_PAUSA_S // 3600)
+
+
+def _extract_jooble_destino(url: str) -> dict:
+    """Ficha de una oferta de Jooble: el extracto de la tarjeta viene cortado ('...') y la página
+    interna /desc/ exige pasar el challenge de Cloudflare. El enlace /away/ redirige al sitio del
+    empleador o agregador; se sigue con un browser y se lee la descripción completa de ahí
+    (JSON-LD JobPosting; si no hay, el bloque principal de texto)."""
+    from urllib.parse import urlparse
+    info: dict = {"_access": "blocked", "description": "", "description_source": "jooble-destino"}
+    if _jooble_en_pausa():
+        return {"_access": "skip", "error": "jooble-destino en pausa (challenge)"}
+    with _JOOBLE_SEM:
+        try:
+            from playwright.sync_api import sync_playwright
+            pw = sync_playwright().start()
+            try:
+                br = pw.chromium.launch(headless=False, args=["--no-sandbox",
+                                        "--disable-blink-features=AutomationControlled"])
+                pg = br.new_context(user_agent=("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                                                "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"),
+                                    locale="es-CL").new_page()
+                try:
+                    pg.goto(url, wait_until="commit", timeout=30000)
+                    host = ""
+                    for _ in range(25):                      # el /away/ pasa por challenge + redirects
+                        pg.wait_for_timeout(1000)
+                        host = urlparse(pg.url).netloc.lower()
+                        if any(v in host for v in _JOOBLE_DESTINOS_VEDADOS):
+                            info["error"] = f"destino vedado: {host}"
+                            return info
+                        if host and "jooble.org" not in host:
+                            break
+                    if not host or "jooble.org" in host:
+                        info["error"] = "sin redirect (challenge)"
+                        _jooble_resultado(False, challenge=True)
+                        return info
+                    try:
+                        pg.wait_for_load_state("networkidle", timeout=8000)
+                    except Exception:
+                        pass
+                    ficha = parse_jobposting(pg.content(), pg.url)
+                    desc = ficha.get("description") or ""
+                    if len(desc) < 400:
+                        desc = pg.evaluate(
+                            "() => { const c = [...document.querySelectorAll("
+                            "'main, article, [class*=description], [class*=Description], "
+                            "[id*=description], [class*=job-detail]')]"
+                            ".map(e => e.innerText || '').sort((a, b) => b.length - a.length)[0];"
+                            " return c || ''; }") or ""
+                        desc = re.sub(r"[ \t]+", " ", re.sub(r"\n{3,}", "\n\n", desc)).strip()
+                    if len(desc) < 400:
+                        info["error"] = f"destino sin descripción útil ({host})"
+                        return info
+                    ficha["description"] = desc[:MAX_DESC]
+                    ficha.update(_access="ok", description_source="jooble-destino")
+                    _jooble_resultado(True)
+                    return ficha
+                finally:
+                    br.close()
+            finally:
+                pw.stop()
+        except Exception as e:
+            log.warning("jooble-destino falló (%s): %s", url[:50], e)
+            info["error"] = str(e)[:100]
+            return info
 
 
 def get_salary_pool(conn) -> list[int]:
@@ -308,12 +463,24 @@ def _fetch_ficha(r: dict) -> dict:
         url = r.get("url") or ""
         if "airavirtual.com" in url:
             return _extract_aira_spa(url)
+        if "jooble.org/away/" in url:
+            return _extract_jooble_destino(url)
+        if "chiletrabajos.cl/trabajo/" in url:
+            from .sources.chiletrabajos import fetch_ficha
+            return fetch_ficha(url)
+        if "wearestaffy.com/positions/" in url:
+            from .sources.staffy import fetch_ficha
+            return fetch_ficha(url)
+        if "trabajando.cl/trabajo-empleo/" in url:
+            from .sources.trabajando import fetch_ficha
+            return fetch_ficha(url)
         if "linkedin.com/jobs/view/" in url:
             from .sources.linkedin import fetch_description
             meta = fetch_description(url)
             desc = meta.get("description") or ""
             if desc:
                 info = {"_access": "ok", "description": desc,
+                        "date_text": meta.get("date_text", ""),
                         "description_source": "linkedin-guest",
                         "employment_type": meta.get("employment_type", ""),
                         "industry": meta.get("industry", "")}
@@ -341,6 +508,8 @@ def _aplicar_ficha(conn, r: dict, info: dict, pool: list[int], cfg: Config | Non
     regex NO se ejecuta (la IA es la única fuente de techs)."""
     from . import stats as _st
     access = info.get("_access", "ok")
+    if access == "skip":      # fuente en pausa: no cuenta como intento fallido de la oferta
+        return "blocked"
     if info.get("_cb_expired") or access == "not_found":
         conn.execute("UPDATE ofertas SET active=0 WHERE group_id=?", (r["group_id"],))
         conn.commit()
@@ -355,14 +524,27 @@ def _aplicar_ficha(conn, r: dict, info: dict, pool: list[int], cfg: Config | Non
         return "blocked"
     conn.execute("UPDATE ofertas SET fetch_fails=0, last_fetch_ok=datetime('now') WHERE group_id=?",
                  (r["group_id"],))
-    new_desc = (info.get("description") or "")[:1800]
+    new_desc = (info.get("description") or "")[:MAX_DESC]
     extra = (f" · {info['contrato']}" if info.get("contrato") else "") + \
             (f" · {info['jornada']}" if info.get("jornada") else "")
-    desc = ((new_desc + extra) if new_desc else r.get("description") or "")[:2000]
+    desc = ((new_desc + extra) if new_desc else r.get("description") or "")[:MAX_DESC]
     # ---- árbitro de salario (§1.3, ACCESO_OK únicamente) ----
     sal_fila = conn.execute(
-        "SELECT salary, salary_raw, salary_source, salary_status FROM ofertas WHERE group_id=?",
+        "SELECT salary, salary_raw, salary_source, salary_status, date_posted, date_posted_raw, "
+        "date_precision, first_seen FROM ofertas WHERE group_id=?",
         (r["group_id"],)).fetchone()
+    # ---- fecha de publicación: la del JSON-LD (exacta) manda; si la ficha solo trae texto
+    # relativo ("hace 2 semanas") y no hay fecha, se resuelve contra la hora del fetch ----
+    f_iso = sal_fila["date_posted"] if sal_fila else ""
+    f_raw = sal_fila["date_posted_raw"] if sal_fila else ""
+    f_prec = sal_fila["date_precision"] if sal_fila else ""
+    if (info.get("date_posted") or "")[:10]:
+        f_iso, f_raw, f_prec = info["date_posted"][:10], "", "exact"
+    elif not f_iso and info.get("date_text"):
+        iso_t, prec_t = resolver_fecha(info["date_text"])
+        if iso_t:
+            f_iso, f_raw, f_prec = iso_t, info["date_text"][:60], prec_t
+    f_canon = canonical_date({"date_posted": f_iso, "first_seen": sal_fila["first_seen"] if sal_fila else ""})
     dec = SalaryArbitrator(cfg).decide(
         {**r,
          "db_salary": sal_fila["salary"] if sal_fila else "",
@@ -397,7 +579,13 @@ def _aplicar_ficha(conn, r: dict, info: dict, pool: list[int], cfg: Config | Non
         salary_note=COALESCE(?, salary_note),
         salary_raw=CASE WHEN salary_raw='' OR salary_raw IS NULL THEN COALESCE(salary, '') ELSE salary_raw END,
         techs=COALESCE(NULLIF(techs,''), ?),
-        date_posted=COALESCE(NULLIF(date_posted,''), ?),
+        date_posted=?, date_posted_raw=?, date_precision=?, date_canonical=?,
+        location=CASE WHEN location='' OR location IS NULL THEN ? ELSE location END,
+        contrato=COALESCE(NULLIF(contrato,''), ?),
+        jornada=COALESCE(NULLIF(jornada,''), ?),
+        job_benefits=COALESCE(NULLIF(job_benefits,''), ?),
+        skills_official=COALESCE(NULLIF(skills_official,''), ?),
+        direct_apply=COALESCE(direct_apply, ?),
         valid_through=COALESCE(NULLIF(valid_through,''), ?),
         employment_type=COALESCE(NULLIF(employment_type,''), ?),
         years_official=COALESCE(years_official, ?),
@@ -409,7 +597,9 @@ def _aplicar_ficha(conn, r: dict, info: dict, pool: list[int], cfg: Config | Non
         WHERE group_id=?""",
         (desc, info.get("company") or "", info.get("modality_badge") or "", arb_salary,
          arb_source, arb_status, arb_note,
-         techs_join, info.get("date_posted") or "",
+         techs_join, f_iso or "", f_raw or "", f_prec or "", f_canon or "",
+         info.get("location") or "", info.get("contrato") or "", info.get("jornada") or "",
+         info.get("job_benefits") or "", info.get("skills_official") or "", info.get("direct_apply"),
          info.get("valid_through") or "", info.get("employment_type") or "",
          info.get("years_official"), info.get("remote_official"),
          "jsonld" if info.get("description") else "section",
@@ -425,6 +615,9 @@ def enrich_pending(conn, cfg: Config | None, max_n: int | None = None,
                    groups: set[str] | None = None, stop_event=None,
                    solo_fetch: bool = False) -> int:
     """Enriquece ofertas activas con descripción corta: Anillo A primero, C si sigue vacío.
+    Los extractos de Jooble ('jooble-serp', 250-400 caracteres) NO se piden aparte: el /away/ de
+    Jooble hoy se queda en el challenge de Cloudflare ('sin redirect') y cada intento cuesta ~25 s
+    de Chromium sin rendir ficha (probado 19-oct-2026: 0 de 249).
 
     spec-enrich-lotes v2 (§3-5): fetch paralelo (threads SOLO HTTP, el main escribe),
     recarga N' tras fetch, pool de salarios cacheado con LOO, modo lote IA si
@@ -571,12 +764,28 @@ def ia_queue_count(conn) -> int:
     con salary presente también califican (salario llegó después de la IA)."""
     return conn.execute(
         "SELECT COUNT(*) FROM ofertas WHERE active=1 AND ia_model='' AND "
-        "(length(description)>200 OR description_source!='') AND "
+        "length(description)>=200 AND "
         "(modality='' OR salary='' OR description IS NULL OR "
         "salary_status IN ('implausible','suspect') OR "
         "(salary != '' AND (ai_opinion LIKE '%sin salario%' OR ai_opinion LIKE '%sin sueldo%' "
         "OR ai_opinion LIKE '%no declara%' OR ai_opinion LIKE '%carece de datos monetarios%')))"
     ).fetchone()[0]
+
+
+def ia_sin_ficha_count(conn) -> int:
+    """Sin IA y sin texto suficiente (<200 chars: extracto de listado, p.ej. jooble-serp).
+    No entran a la cola (ia_queue_count exige >=200): requieren bajar la ficha. Antes /stats y
+    el ACK de /enrich excluían las que traían description_source aunque el texto fuera un
+    extracto, y esas ofertas no aparecían en ningún contador."""
+    return conn.execute(
+        "SELECT COUNT(*) FROM ofertas WHERE active=1 AND ia_model='' AND "
+        "(description IS NULL OR length(description)<200)").fetchone()[0]
+
+
+_ALIAS_POR_ABBR: dict[str, tuple[str, ...]] = {}
+for _alias, _abbr in _TECH_ABBR.items():
+    _ALIAS_POR_ABBR.setdefault(_norm(_abbr), []).append(_alias)   # type: ignore[arg-type]
+_ALIAS_POR_ABBR = {k: tuple(v) for k, v in _ALIAS_POR_ABBR.items()}
 
 
 def _clean_text(s, max_len=None, lower=False):
@@ -607,7 +816,8 @@ _TECH_NO_TECNOLOGIA = {
     "slo", "slos", "sli", "slis", "error budgets", "arquitectura",
     "architecture", "scalability", "escalabilidad", "automatización",
     "automatizacion", "automation", "pipelines", "pipeline", "agile", "scrum",
-    "kanban", "ci/cd", "cicd",
+    "kanban", "ci/cd", "cicd", "developer", "programador", "engineer", "ingeniero",
+    "site reliability", "platform", "plataforma", "software", "datos", "data",
 }
 
 
@@ -686,12 +896,33 @@ def apply_ia_result(conn, cfg: Config, r: dict, parsed: dict | None,
     # vez aquí — todos los callers quedan cubiertos sin tocar la firma.
     fila = conn.execute(
         "SELECT salary, salary_source, modality, ia_model, ai_opinion, ai_resumen, "
-        "ai_fit_reason FROM ofertas WHERE group_id=?", (r["group_id"],)).fetchone()
+        "ai_fit_reason, title, description FROM ofertas WHERE group_id=?",
+        (r["group_id"],)).fetchone()
     if fila is not None:
         cols = ("salary", "salary_source", "modality", "ia_model", "ai_opinion",
-                "ai_resumen", "ai_fit_reason")
+                "ai_resumen", "ai_fit_reason", "title", "description")
         r = {**dict(r), **dict(zip(cols, tuple(fila)))}
     model = model or parsed.get("_ia_model") or None
+    # validación contra el texto (ia/validar.py): la IA no puede afirmar lo que la
+    # oferta no dice. Sin texto suficiente solo se guarda una frase fija.
+    texto_of = f"{r.get('title') or ''} {r.get('description') or ''}"
+    con_texto = _val.texto_suficiente(r.get("description"))
+    parsed = dict(parsed)
+    if not con_texto:
+        for k in ("resumen", "fit_reason"):
+            parsed.pop(k, None)
+        parsed["opinion"] = _val.FRASE_SIN_TEXTO
+    else:
+        if _val.texto_cita_perfil_ajeno(str(parsed.get("opinion") or ""), texto_of, cfg.profile.techs):
+            log.warning("opinión IA descartada (cita el stack del perfil, no de la oferta) %s",
+                        r.get("group_id"))
+            parsed["opinion"] = _val.FRASE_NO_RESPALDADA
+        if _val.texto_cita_perfil_ajeno(str(parsed.get("resumen") or ""), texto_of, cfg.profile.techs):
+            parsed.pop("resumen", None)
+    if str(parsed.get("ingles") or "desconocido").lower() in ("", "desconocido", "none", "null"):
+        ing_txt = _val.ingles_desde_texto(texto_of)
+        if ing_txt:
+            parsed["ingles"] = ing_txt
     mod = {"R": "remoto", "H": "híbrido", "P": "presencial"}.get(parsed.get("modalidad"), "")
     ia_fields = []
     sets, params = [], []
@@ -705,6 +936,14 @@ def apply_ia_result(conn, cfg: Config, r: dict, parsed: dict | None,
         sets.append("modality=?"); params.append(mod); ia_fields.append("modality")
     # guard A3: la IA propone salary SOLO si no hay procedencia ya establecida
     sal_ia = _coerce_salario(parsed.get("salario_clp_mensual"))
+    # anti-invención: el monto DEBE aparecer en el texto de la oferta; un LLM local
+    # rellena con valores plausibles cuando no hay dato (ver salarios/texto.py)
+    if sal_ia and "salario_evidencia" in parsed and not str(parsed.get("salario_evidencia") or "").strip():
+        sal_ia = 0   # monto sin cita literal = inventado
+    if sal_ia and not sueldo_respaldado(sal_ia, r.get("title") or "", r.get("description") or ""):
+        log.warning("sueldo IA descartado (no figura en el texto) %s: %s",
+                    r.get("group_id"), sal_ia)
+        sal_ia = 0
     if not r.get("salary") and not r.get("salary_source") and sal_ia:
         sets.append("salary=?"); params.append(f"CLP {sal_ia}")
         sets.append("salary_source=?"); params.append("ia")
@@ -717,6 +956,11 @@ def apply_ia_result(conn, cfg: Config, r: dict, parsed: dict | None,
             sets.append(f"ai_{field}=?")
             params.append(_clean_text(parsed[field], 300))
             ia_fields.append(field)
+    encaje = _clean_text(parsed.get("encaje"), 10, lower=True)
+    if encaje in ("alto", "medio", "bajo", "ninguno"):
+        sets.append("ai_encaje=?")
+        params.append(encaje)
+        ia_fields.append("encaje")
     if parsed.get("opinion"):
         sets.append("ai_opinion=?")
         params.append(_clean_text(parsed["opinion"], 300))
@@ -732,7 +976,7 @@ def apply_ia_result(conn, cfg: Config, r: dict, parsed: dict | None,
     # pudo detectar techs que ya no aplican o alucinadas).
     if "techs" in parsed and isinstance(parsed["techs"], list):
         techs_limpio = []
-        for t in parsed["techs"][:8]:
+        for t in _val.limpiar_techs(parsed["techs"], texto_of, _ALIAS_POR_ABBR)[:8]:
             t = _clean_tech(t)
             if not t:
                 continue
@@ -760,6 +1004,10 @@ def apply_ia_result(conn, cfg: Config, r: dict, parsed: dict | None,
             sets.append("ai_idiomas=?")
             params.append(json.dumps(idiomas_limpio, ensure_ascii=False)[:400])
             ia_fields.append("idiomas")
+    parsed["red_flags"] = _val.limpiar_flags(parsed.get("red_flags") or [])
+    parsed["green_flags"] = _val.limpiar_flags(parsed.get("green_flags") or [])
+    parsed["benefits"] = _val.quitar_duplicados(_val.limpiar_flags(parsed.get("benefits") or []),
+                                                parsed["green_flags"])
     for field in ("red_flags", "green_flags", "benefits"):
         if parsed.get(field):
             limpio = [_clean_text(x, 120) for x in parsed[field] if _clean_text(x, 120)]
@@ -807,7 +1055,7 @@ def run_ia_batch(conn, cfg: Config, profile_desc: str, max_n: int | None = None,
             "SELECT group_id, title, company, location, description, modality, salary, "
             "salary_raw, salary_status, salary_note, techs FROM ofertas "
             "WHERE active=1 AND ia_model='' AND "
-            "(length(description)>200 OR description_source!='') "
+            "length(description)>=200 "
             "ORDER BY score DESC").fetchall()
     else:
         # C9 (v4.1) ampliado: cola relajada — la IA puede trabajar con lo que haya
@@ -819,7 +1067,7 @@ def run_ia_batch(conn, cfg: Config, profile_desc: str, max_n: int | None = None,
         rows = conn.execute(
             "SELECT group_id, title, company, location, description, modality, salary, "
             "salary_raw, salary_status, salary_note, techs FROM ofertas "
-            "WHERE active=1 AND ia_model='' AND (length(description)>200 OR description_source!='') AND "
+            "WHERE active=1 AND ia_model='' AND length(description)>=200 AND "
             "(modality='' OR salary='' OR description IS NULL OR "
             "salary_status IN ('implausible','suspect') OR "
             "(salary != '' AND (ai_opinion LIKE '%sin salario%' OR ai_opinion LIKE '%sin sueldo%' "

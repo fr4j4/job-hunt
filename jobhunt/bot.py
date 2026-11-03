@@ -28,6 +28,7 @@ from . import db as database
 from .cli import cmd_run
 from .notify import (esc, score_emoji, score_style, modality_tag, role_tag, techs_tag,
                      age_tag, salary_tag, compact_label, abbr_loc, table_block, _age_short)
+from .telegram.render import paginar_tarjetas, recortar_html
 # compat: re-export — eliminar en v6 cuando los imports apunten al paquete nuevo
 from .telegram.api import TelegramClient
 from .app.state import IAState, SearchState, StopEvent
@@ -55,9 +56,10 @@ def render_page(offers: list[dict], page: int, page_size: int, cfg: Config,
     cada página navegada) para que se sepa qué búsqueda está paginando.
     """
     total = len(offers)
-    pages = max(1, (total + page_size - 1) // page_size)
+    paginas = paginar_tarjetas(offers, page_size)     # ≤page_size ofertas y ≤2800 chars de tarjetas
+    pages = len(paginas)
     page = max(0, min(page, pages - 1))
-    chunk = offers[page * page_size:(page + 1) * page_size]
+    chunk = paginas[page]
 
     stamp = datetime.now(timezone.utc).strftime("%d %b %H:%M")
     head = label or f"📬 <b>Ofertas ≥{cfg.alerts.min_score}</b>"
@@ -79,10 +81,10 @@ def render_page(offers: list[dict], page: int, page_size: int, cfg: Config,
         ]
         if best.get("ai_fit_reason"):
             lines.append(f"   🎯 <i>{esc(best['ai_fit_reason'][:140])}</i>")
-        lines += ["", "<b>Esta página</b> (toca el 🔗 para abrir):", table_block(chunk)]
+        lines += ["", "<b>Esta página</b> (toca el título para abrir la oferta):", table_block(chunk)]
     lines.append("")
-    lines.append("<i>⭐ ≥85 · 🟢 ≥70 · 🟡 ≥55 · ⚪ resto · * = IA · toca el 🔗 para abrir</i>")
-    text = "\n".join(lines)[:4000]
+    lines.append("<i>⭐ ≥85 · 🟢 ≥70 · 🟡 ≥55 · ⚪ resto (puntaje de afinidad) · EN! = inglés excluyente · 🎯 = encaje con tu perfil</i>")
+    text = recortar_html("\n".join(lines))
 
     kb = []   # solo navegación — el link está en el título de cada fila
 
@@ -156,8 +158,41 @@ def _tg_edit_or_send(cfg: Config, chat_id: int, message_id: int | None,
     return (resp or {}).get("result", {}).get("message_id")
 
 
+def _tg_edit_progreso(cfg: Config, chat_id: int, message_id: int, texto: str, limitador) -> None:
+    """Edita el mensaje de progreso SIN recrearlo: ante 429 respeta retry_after, ante
+    'not modified' no hace nada. Solo si el mensaje fue borrado deja de editar."""
+    try:
+        _tg_api(cfg, "editMessageText", {"chat_id": chat_id, "message_id": message_id,
+                                         "text": texto, "parse_mode": "HTML"})
+    except Exception as exc:
+        msg = str(exc).lower()
+        if "not modified" in msg:
+            return
+        if "429" in msg or "too many" in msg or "retry" in msg:
+            m = re.search(r"(?:retry after|retry_after\D{0,5})\s*(\d+)", msg)
+            limitador.esperar_hasta(float(m.group(1)) if m else 10.0)
+            return
+        raise
+
+
+_CAMPOS_TEXTO = {"sendMessage": "text", "editMessageText": "text"}
+
+
 def _tg_api(cfg: Config, method: str, payload: dict, retries: int = 2) -> dict:
-    return _tg_client(cfg).call(method, retries=retries, **payload)
+    """Llamada a la Bot API. Si Telegram rechaza el HTML ("can't parse entities") el usuario
+    no debe ver un error: se reintenta UNA vez como texto plano (sin parse_mode, sin tags)."""
+    try:
+        return _tg_client(cfg).call(method, retries=retries, **payload)
+    except RuntimeError as exc:
+        campo = _CAMPOS_TEXTO.get(method)
+        if not (campo and payload.get("parse_mode") and "can't parse entities" in str(exc)):
+            raise
+        from .telegram.render import html_a_texto
+        log.warning("HTML rechazado por Telegram en %s (%s) — reintento como texto plano",
+                    method, str(exc)[-120:])
+        plano = {k: v for k, v in payload.items() if k != "parse_mode"}
+        plano[campo] = html_a_texto(payload.get(campo) or "")[:4096]
+        return _tg_client(cfg).call(method, retries=0, **plano)
 
 
 def _tg_send_document(cfg: Config, chat_id: int, path: str, caption: str = "") -> bool:
@@ -247,7 +282,15 @@ def handle_callback(cfg: Config, query: dict, state: dict) -> None:
             rendered = render_page(_latest_offers(cfg), page, cfg.telegram.digest_page_size, cfg,
                                    label="🆕 <b>Últimas registradas</b>", cb_prefix=prefix)
         elif prefix.startswith("f"):
-            f = _dec_filters(prefix[1:])
+            if prefix.startswith("fk"):
+                f = _FILTROS_CB.get(prefix)
+                if f is None:      # el daemon se reinició: ya no hay filtros para esa búsqueda
+                    _tg_api(cfg, "answerCallbackQuery", {
+                        "callback_query_id": qid, "show_alert": True,
+                        "text": "Esta búsqueda expiró (el bot se reinició). Repite el comando /jobs."})
+                    return
+            else:
+                f = _dec_filters(prefix[1:])      # botones antiguos
             rendered = render_page(_filter_offers(cfg, f), page, cfg.telegram.digest_page_size, cfg,
                                    label=f"🔎 <b>Ofertas</b>",
                                    filtros_txt=_describe_filters(f),
@@ -476,6 +519,25 @@ def _score_offers(cfg: Config, threshold: int, solo_sueldo: bool = False) -> lis
         conn.close()
 
 
+_FILTROS_CB: dict[str, dict] = {}   # clave corta → filtros (los últimos _FILTROS_CB_MAX)
+_FILTROS_CB_MAX = 300
+
+
+def _registrar_filtros(f: dict) -> str:
+    """Guarda los filtros y devuelve 'fk<8 hex>' para usar como prefijo de callback_data.
+    Antes se serializaban dentro del callback (base64 cortado a 22 chars, separador '-'
+    ambiguo y tope de 64 bytes) → páginas ≥2 filtraban distinto o Telegram rechazaba."""
+    import hashlib
+    canon = json.dumps({k: (sorted(v) if isinstance(v, set) else v) for k, v in f.items()},
+                       sort_keys=True, default=str, ensure_ascii=False)
+    key = "fk" + hashlib.sha1(canon.encode()).hexdigest()[:8]
+    _FILTROS_CB.pop(key, None)
+    _FILTROS_CB[key] = f
+    while len(_FILTROS_CB) > _FILTROS_CB_MAX:
+        _FILTROS_CB.pop(next(iter(_FILTROS_CB)))
+    return key
+
+
 def _enc_filters(f: dict) -> str:
     """Serializa filtros para callback_data (máx 64 bytes): texto → base64 't…',
     score → 'n80' (min) / 'x80' (max)."""
@@ -573,39 +635,60 @@ def _op_minutes(op: str) -> int:
 
 
 def _run_search_async(cfg: Config, chat_id: int):
-    """Barrido en background con mensaje vivo que muta por fuente/query/página."""
+    """Barrido en background con mensaje vivo: una línea por fuente (corren en paralelo),
+    barra de IA y ETA. El mensaje se edita desde UN hilo refrescador con intervalo mínimo
+    (Telegram limita las ediciones; antes cada query/página editaba y un 429 recreaba el mensaje)."""
+    import re as _re
+    from .progreso import Limitador, Progreso
     msg_id = None
+    stop_ui = threading.Event()
     try:
         _SEARCH_STATE.update(running=True, t0=time.time())
-        sent = _tg_api(cfg, "sendMessage", {"chat_id": chat_id,
-                                            "text": "🔍 <b>Búsqueda iniciada</b> — barriendo fuentes…",
+        prog, lim = Progreso(), Limitador(4.0)
+        sent = _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "text": prog.render(),
                                             "parse_mode": "HTML"})
         msg_id = (sent or {}).get("result", {}).get("message_id")
         t0 = time.time()
-        fase = {"fuente": "preparando", "query": "", "page": 0, "detail": ""}
+        _ia_re = _re.compile(r"(\d+)/(\d+)\s*·\s*lote\s*(\d+)/(\d+)")
 
         def on_phase(fuente: str, query: str = "", page: int = 0, detail: str = ""):
-            """Actualiza estado y edita el MISMO mensaje (throttle 15s)."""
-            fase.update(fuente=fuente, query=query, page=page, detail=detail)
-            nonlocal msg_id
-            if not msg_id or time.time() - t0 < 15:
-                return
-            mins = int(time.time() - t0) // 60
-            linea = f"   ▸ <b>{esc(fuente)}</b>"
-            if query:
-                linea += f' — "{esc(query[:40])}"'
-            if page:
-                linea += f" · pág {page}"
-            if fase.get("detail"):
-                linea += f"\n   {esc(fase['detail'][:60])}"
-            try:
-                msg_id = _tg_edit_or_send(cfg, chat_id, msg_id, {
-                    "text": (f"🔍 <b>Búsqueda en curso</b> ({mins}m)\n{linea}"),
-                    "parse_mode": "HTML"})
-            except Exception:
-                pass  # flood o mensaje igual → no tumba el barrido
+            """Solo actualiza el estado en memoria; la edición la hace el refrescador."""
+            if fuente == "IA complementaria":
+                m = _ia_re.search(detail or "")
+                if m:
+                    prog.fase("ia", hechas=int(m[1]), total=int(m[2]), lote=int(m[3]), lotes=int(m[4]))
+            elif fuente == "guardando ofertas":
+                prog.fase("guardando")
+            elif fuente.startswith("canal"):
+                prog.fase("canal")
+            elif query or page:
+                prog.fuente(fuente, "run", query=query, page=page)
 
-        offers, stats = _do_sweep(cfg, on_phase=on_phase)
+        def on_source(nombre: str, estado: str, n: int, segs: float):
+            prog.fuente(nombre, estado, n=n, segs=segs)
+
+        def refrescar():
+            nonlocal msg_id
+            ultimo = ""
+            while not stop_ui.wait(1.0):
+                if not msg_id or not lim.listo():
+                    continue
+                txt = prog.render()
+                if txt == ultimo:
+                    continue
+                try:
+                    _tg_edit_progreso(cfg, chat_id, msg_id, txt, lim)
+                    ultimo = txt
+                except Exception as exc:
+                    if "not found" in str(exc).lower():
+                        msg_id = None   # el usuario borró el mensaje: no se recrea
+                    # otros errores (red) → se reintenta en el siguiente ciclo
+
+        hilo_ui = threading.Thread(target=refrescar, name="tg-progreso", daemon=True)
+        hilo_ui.start()
+
+        offers, stats = _do_sweep(cfg, on_phase=on_phase, on_source=on_source)
+        stop_ui.set()
         # resumen final: borrar el mensaje vivo y mandar el resultado limpio
         if msg_id:
             try:
@@ -634,12 +717,13 @@ def _run_search_async(cfg: Config, chat_id: int):
         except Exception:
             pass
     finally:
+        stop_ui.set()
         _SEARCH_STATE.update(running=False, t0=0.0)
 
 
-def _help_text() -> str:
+def _help_admin_text() -> str:
     return "\n".join([
-        "🤖 <b>Comandos del bot</b>",
+        "🤖 <b>Comandos del bot — administración</b>",
         "",
         "🔎 <b>Búsqueda y pool</b>",
         "/search — gatilla una búsqueda ahora (reporta inicio, término y error)",
@@ -664,6 +748,11 @@ def _help_text() -> str:
         "/report — análisis completo del mercado con gráficos → PDF",
         "/report status · /report list — avance del reporte · historial de PDFs",
         "/stats — cobertura del pool (procesadas IA, datos faltantes)",
+        "/encaje [N] — asigna el encaje con el perfil a ofertas ya procesadas por IA y recalcula scores",
+        "/web — enlace personal (un solo uso) a la web con tablas, filtros y detalle de cada oferta",
+        "/web_salir — cierra todas las sesiones de la web",
+        "/tabla [N] — últimas ofertas en tabla nativa de Telegram (experimental; si falla, muestra tarjetas + el error)",
+        "/fuentes — salud del scraping: ofertas por fuente en los últimos barridos",
         "/config — configuración actual (tokens enmascarados)",
         "/preview — oferta aleatoria como se vería en el canal (sin marcar publicada)",
         "/preview 80 — aleatoria con market_score >= 80 · /preview java — filtra por texto",
@@ -697,6 +786,70 @@ def _help_text() -> str:
         "",
         "/help — esta ayuda",
     ])
+
+
+def _help_text(admin: bool = False) -> str:
+    """Ayuda: versión simple por defecto; admin=True (/help admin) trae TODOS los comandos."""
+    if admin:
+        return _help_admin_text()
+    return "\n".join([
+        "👋 <b>Hola, soy tu buscador de empleo tech</b>",
+        "Reviso LinkedIn, Computrabajo, Indeed, Laborum y más, y te dejo "
+        "solo lo que calza con tu perfil.",
+        "",
+        "🔎 <b>Lo más usado</b>",
+        "/latest — las últimas ofertas encontradas",
+        "/score 60 — ofertas con buen puntaje (cambia 60 por el mínimo que quieras)",
+        "/jobs remote salary2.5 — filtra: remoto, sueldo desde $2,5M, ciudad…",
+        "/search — buscar ofertas nuevas ahora",
+        "",
+        "📊 <b>Cómo va todo</b>",
+        "/fuentes — ¿están funcionando los portales?",
+        "/stats — cuántas ofertas hay y qué tan completas están",
+        "/report — informe de mercado en PDF",
+        "",
+        "💡 <b>Tips</b>",
+        "• Combina filtros: <code>/jobs hybrid stgo score70</code>",
+        "• Busca por palabra: <code>/jobs q\"kubernetes\"</code>",
+        "• ¿Algo tarda? <code>/stop</code> lo detiene sin perder lo ya hecho",
+        "",
+        "⚙️ Canal, IA y base de datos: <code>/help admin</code>",
+    ])
+
+
+def _help_keyboard() -> str:
+    """Botones de acción rápida (callback go:<comando>)."""
+    return _kb_json([
+        [{"text": "🔎 Últimas ofertas", "callback_data": "go:latest"},
+         {"text": "🔄 Buscar ahora", "callback_data": "go:search"}],
+        [{"text": "📡 Fuentes", "callback_data": "go:fuentes"},
+         {"text": "📊 Estado", "callback_data": "go:stats"}],
+    ])
+
+
+_GO_COMANDOS = {"latest", "search", "fuentes", "stats", "encaje", "report"}
+
+
+def handle_go(cfg: Config, query: dict, state: dict) -> None:
+    """Botón de acción rápida: ejecuta el comando como si el usuario lo hubiera escrito."""
+    qid = query.get("id")
+    cmd = (query.get("data") or "")[3:]
+    msg = query.get("message") or {}
+    chat_id = (msg.get("chat") or {}).get("id")
+    try:
+        _tg_api(cfg, "answerCallbackQuery", {"callback_query_id": qid})
+    except Exception:
+        pass
+    if cmd in _GO_COMANDOS and chat_id and _chat_allowed(cfg, chat_id):
+        _handle_command(cfg, {"chat": {"id": chat_id}, "text": f"/{cmd}"}, state)
+
+
+def _sugerir_comando(cmd: str) -> str:
+    """'/lastest' → '/latest' (difflib sobre el menú registrado)."""
+    import difflib
+    conocidos = ["/" + c["command"] for c in _MENU_COMANDOS]
+    cerca = difflib.get_close_matches(cmd, conocidos, n=2, cutoff=0.6)
+    return " o ".join(f"<code>{c}</code>" for c in cerca)
 
 
 def _config_text(cfg: Config) -> str:
@@ -814,14 +967,10 @@ def _stats_text(cfg: Config) -> str:
         ia = q("SELECT COUNT(*) FROM ofertas WHERE active=1 AND ia_model != ''")
         con_mod = q("SELECT COUNT(*) FROM ofertas WHERE active=1 AND modality != ''")
         con_sal = q("SELECT COUNT(*) FROM ofertas WHERE active=1 AND salary != ''")
-        # C9 ampliado (mismo criterio que el ACK del enrich): procesables AHORA
-        en_cola = q("""SELECT COUNT(*) FROM ofertas WHERE active=1 AND ia_model=''
-                       AND (length(description)>200 OR description_source!='')
-                       AND (modality='' OR salary='' OR description IS NULL OR
-                            salary_status IN ('implausible','suspect'))""")
-        # sin IA + sin descripción suficiente → requieren scan (no enrich)
-        sin_ficha = q("""SELECT COUNT(*) FROM ofertas WHERE active=1 AND ia_model=''
-                         AND NOT (length(description)>200 OR description_source!='')""")
+        # mismo criterio que el batch y el ACK de /enrich (una sola definición en enrich.py)
+        from .enrich import ia_queue_count, ia_sin_ficha_count
+        en_cola = ia_queue_count(conn)
+        sin_ficha = ia_sin_ficha_count(conn)
         # modelo ACTIVO (config) — no el de la última oferta por last_seen
         # (last_seen refleja el search, no cuándo se procesó con IA — engañoso)
         modelo_activo = cfg.ia.local_model if cfg.ia.local_enabled else cfg.ia.model
@@ -914,6 +1063,41 @@ def _handle_command(cfg: Config, message: dict, state: dict) -> None:
                                          "text": _config_text(cfg)})
         elif cmd == "/preview":
             _preview_offer(cfg, chat_id, arg)
+        elif cmd == "/encaje":
+            busy = _op_busy()
+            if busy:
+                _tg_api(cfg, "sendMessage", {
+                    "chat_id": chat_id, "parse_mode": "HTML",
+                    "text": f"⏳ Hay una operación en curso ({busy}, {_op_minutes(busy)}m) — "
+                            f"espera que termine antes de lanzar el backfill de encaje"})
+            else:
+                max_n = int(arg) if arg.strip().isdigit() else None
+                threading.Thread(target=_encaje_async, args=(cfg, chat_id, max_n), daemon=True).start()
+        elif cmd == "/web":
+            _web_enlace(cfg, chat_id)
+        elif cmd == "/web_salir":
+            from .web import auth as _wauth
+            conn = database.connect(cfg)
+            try:
+                n = _wauth.revocar_todo(conn)
+            finally:
+                conn.close()
+            _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
+                                         "text": f"🔒 Listo: cerré {n} sesión(es) de la web e invalidé "
+                                                 f"los enlaces pendientes."})
+        elif cmd == "/tabla":
+            _tabla_nativa(cfg, chat_id, arg)
+        elif cmd == "/fuentes":
+            from .salud import texto_fuentes
+            conn = database.connect(cfg)
+            try:
+                txt = texto_fuentes(conn, cfg)
+            finally:
+                conn.close()
+            _tg_api(cfg, "sendMessage", {
+                "chat_id": chat_id, "parse_mode": "HTML", "text": txt,
+                "reply_markup": _kb_json([[{"text": "🔄 Buscar ahora", "callback_data": "go:search"},
+                                           {"text": "📊 Estado", "callback_data": "go:stats"}]])})
         elif cmd == "/stats":
             _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
                                          "text": _stats_text(cfg)})
@@ -1297,7 +1481,7 @@ def _handle_command(cfg: Config, message: dict, state: dict) -> None:
                     "chat_id": chat_id, "parse_mode": "HTML",
                     "text": f"Nada con <b>{_describe_filters(f)}</b> en el pool activo."})
                 return
-            prefix = "f" + _enc_filters(f)
+            prefix = _registrar_filtros(f)
             rendered = render_page(offers, 0, cfg.telegram.digest_page_size, cfg,
                                    label=f"🔎 <b>Ofertas</b>",
                                    filtros_txt=_describe_filters(f),
@@ -1337,17 +1521,24 @@ def _handle_command(cfg: Config, message: dict, state: dict) -> None:
                 "disable_web_page_preview": True,
                 "reply_markup": _kb_json(kb)})
         elif cmd in ("/help", "/start"):
+            admin = cmd == "/help" and arg.lower() in ("admin", "avanzado")
             _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
-                                         "text": _help_text()})
+                                         "text": _help_text(admin=admin),
+                                         **({} if admin else {"reply_markup": _help_keyboard()})})
         else:
+            cerca = _sugerir_comando(cmd)
             _tg_api(cfg, "sendMessage", {
                 "chat_id": chat_id, "parse_mode": "HTML",
-                "text": "Comando no reconocido. <code>/help</code> para ver los disponibles."})
+                "text": f"🤔 No conozco <code>{esc(cmd)}</code>."
+                        + (f" ¿Quisiste decir {cerca}?" if cerca else "")
+                        + "\nEscribe <code>/help</code> para ver lo que puedo hacer."})
     except Exception as exc:
         log.error("comando %s falló: %s", cmd, exc)
         try:
-            _tg_api(cfg, "sendMessage", {"chat_id": chat_id,
-                                         "text": f"⚠️ Error ejecutando {cmd}: {esc(str(exc)[:200])}"})
+            _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
+                                         "text": f"😕 No pude ejecutar <code>{esc(cmd)}</code>. "
+                                                 f"Prueba de nuevo en un momento; si sigue fallando, "
+                                                 f"avisa al administrador.\n<i>Detalle: {esc(str(exc)[:160])}</i>"})
         except Exception:
             pass
 
@@ -1384,11 +1575,10 @@ def _ia_batch_async(cfg: Config, chat_id: int | None, scheduled: bool = False,
     try:
         conn = database.connect(cfg)
         try:
-            from .enrich import run_ia_batch, profile_description, ia_queue_count, enrich_pending
+            from .enrich import (run_ia_batch, profile_description, ia_queue_count,
+                                 ia_sin_ficha_count, enrich_pending)
             cola = ia_queue_count(conn)
-            sin_ficha = conn.execute(
-                "SELECT COUNT(*) FROM ofertas WHERE active=1 AND ia_model='' AND "
-                "NOT (length(description)>200 OR description_source!='')").fetchone()[0]
+            sin_ficha = ia_sin_ficha_count(conn)
         finally:
             conn.close()
         if chat_id:
@@ -1438,6 +1628,9 @@ def _ia_batch_async(cfg: Config, chat_id: int | None, scheduled: bool = False,
                 database.register_criteria_version(conn3, version_id, cfg)
                 rescored = database.rescore_all(conn3, compute_score, version_id, cfg,
                                             market_score_fn=compute_market_score)
+                # la IA/ficha recién aplicada hace elegibles ofertas del pool: publicarlas ya
+                from .channel import publicar_pendientes
+                publicar_pendientes(cfg, conn3, _tg_api_for_channel(cfg))
             finally:
                 conn3.close()
         except Exception as e:
@@ -1456,6 +1649,100 @@ def _ia_batch_async(cfg: Config, chat_id: int | None, scheduled: bool = False,
                                              "text": f"⚠️ Batch IA falló: <code>{esc(str(exc)[:200])}</code>"})
             except Exception:
                 pass
+
+
+def _web_enlace(cfg: Config, chat_id: int) -> None:
+    """/web — enlace personal de un solo uso a la web (solo chats del allowlist llegan aquí)."""
+    from .telegram.render import _attr_esc
+    from .web import auth as _wauth
+    from .web.app import url_base
+    conn = database.connect(cfg)
+    try:
+        token = _wauth.crear_token_login(conn, cfg.web.token_minutes)
+    finally:
+        conn.close()
+    url = f"{url_base(cfg)}/login?t={token}"
+    nota = "" if cfg.web.enabled else (
+        "\n\n⚠️ La web no está activada en el bot: pon <code>WEB_ENABLED=true</code> en el .env "
+        "y reinicia, o córrela aparte con <code>python -m jobhunt web</code>.")
+    _tg_api(cfg, "sendMessage", {
+        "chat_id": chat_id, "parse_mode": "HTML",
+        # sin vista previa: Telegram no debe abrir el enlace por su cuenta
+        "disable_web_page_preview": True, "link_preview_options": {"is_disabled": True},
+        "text": (f"🔐 <b>Tu acceso a la web</b>\n<a href=\"{_attr_esc(url)}\">Abrir jobhunt</a>\n\n"
+                 f"Enlace personal: sirve <b>una sola vez</b> y vence en {cfg.web.token_minutes} min. "
+                 f"No lo reenvíes.\nPara cerrar todas las sesiones: /web_salir{nota}")})
+
+
+def _tabla_nativa(cfg: Config, chat_id: int, arg: str = "") -> None:
+    """/tabla [N] — últimas N ofertas en TABLA NATIVA de Telegram (mensajes enriquecidos,
+    experimental). Si Telegram la rechaza, manda las tarjetas y el error exacto."""
+    from .telegram.rich import enviar_tabla
+    n = max(1, min(int(arg), 15)) if arg.strip().isdigit() else 10
+    offers = _latest_offers(cfg, n)
+    if not offers:
+        _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "text": "ℹ️ Aún no hay ofertas para mostrar."})
+        return
+    ok, errores = enviar_tabla(lambda m, p: _tg_api(cfg, m, p, retries=0), chat_id, offers)
+    if ok:
+        return
+    log.warning("tabla nativa rechazada: %s", errores)
+    _tg_api(cfg, "sendMessage", {
+        "chat_id": chat_id, "parse_mode": "HTML", "disable_web_page_preview": True,
+        "text": "📋 <b>Últimas ofertas</b>\n\n" + table_block(offers)})
+    _tg_api(cfg, "sendMessage", {
+        "chat_id": chat_id, "parse_mode": "HTML",
+        "text": "⚠️ Telegram no aceptó la tabla nativa (experimental). Error de cada variante:\n"
+                + "\n".join(f"• <code>{esc(e)}</code>" for e in errores)})
+
+
+def _encaje_async(cfg: Config, chat_id: int | None, max_n: int | None = None) -> None:
+    """Backfill de ai_encaje + rescore en background (comparte el lock _IA_STATE con /enrich).
+    Nunca tumba el daemon; reporta inicio y fin al chat."""
+    if _IA_STATE["running"] or _SEARCH_STATE["running"]:
+        return
+    _IA_STATE.update(running=True, done=0, total=0, current="encaje", t0=time.time())
+    t0 = time.time()
+    try:
+        from .enrich import backfill_encaje
+        from .scoring import compute_score, compute_market_score
+        conn = database.connect(cfg)
+        try:
+            pend = conn.execute("SELECT COUNT(*) FROM ofertas WHERE active=1 AND ia_model != '' "
+                                "AND ai_encaje = ''").fetchone()[0]
+            total = min(pend, max_n) if max_n else pend
+            if chat_id:
+                _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
+                                             "text": f"🎯 <b>Backfill de encaje iniciado</b> — {total} ofertas"})
+            _IA_STATE.update(total=total)
+            hechas, fallidas = backfill_encaje(
+                conn, cfg, max_n, on_progress=lambda i, n: _IA_STATE.update(done=i))
+            version_id = database.current_version(conn) or (
+                "env-" + datetime.now(timezone.utc).strftime("%Y%m%d%H%M"))
+            database.register_criteria_version(conn, version_id, cfg)
+            rescored = database.rescore_all(conn, compute_score, version_id, cfg,
+                                            market_score_fn=compute_market_score)
+            from .channel import publicar_pendientes
+            publicar_pendientes(cfg, conn, _tg_api_for_channel(cfg))
+        finally:
+            conn.close()
+        dur = int(time.time() - t0)
+        if chat_id:
+            _tg_api(cfg, "sendMessage", {
+                "chat_id": chat_id, "parse_mode": "HTML",
+                "text": f"🎯 <b>Encaje terminado</b> — {hechas} asignados · {fallidas} fallidos · "
+                        f"rescore: {rescored} · {dur // 60}m{dur % 60:02d}s"})
+        log.info("backfill encaje OK: %d asignados, %d fallidos, rescore %d", hechas, fallidas, rescored)
+    except Exception as exc:
+        log.error("backfill encaje falló: %s", exc)
+        if chat_id:
+            try:
+                _tg_api(cfg, "sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
+                                             "text": f"⚠️ Backfill de encaje falló: <code>{esc(str(exc)[:200])}</code>"})
+            except Exception:
+                pass
+    finally:
+        _IA_STATE.reset()
 
 
 def _enrich_status(cfg: Config, chat_id: int) -> None:
@@ -1705,46 +1992,54 @@ def _digests_maybe(cfg: Config, state: dict) -> None:
         conn.close()
 
 
+_MENU_COMANDOS = [
+    {"command": "latest", "description": "Ver las últimas ofertas"},
+    {"command": "score", "description": "Ofertas con buen puntaje (ej: /score 60)"},
+    {"command": "jobs", "description": "Filtrar: remote, salary2.5, temuco, q\"python\"…"},
+    {"command": "search", "description": "Buscar ofertas nuevas ahora"},
+    {"command": "fuentes", "description": "¿Funcionan los portales? Estado de cada fuente"},
+    {"command": "stats", "description": "Cuántas ofertas hay y qué tan completas están"},
+    {"command": "report", "description": "Informe de mercado en PDF"},
+    {"command": "stop", "description": "Detener lo que esté corriendo"},
+    {"command": "help", "description": "Ayuda (/help admin para el resto)"},
+    {"command": "web", "description": "Abrir la web (enlace personal de un solo uso)"},
+    {"command": "web_salir", "description": "Cerrar todas las sesiones de la web"},
+    {"command": "tabla", "description": "Últimas ofertas en tabla nativa (experimental)"},
+    {"command": "encaje", "description": "Evaluar el encaje con tu perfil de ofertas ya analizadas"},
+    {"command": "enrich", "description": "Corre el batch IA ahora (rellena datos faltantes)"},
+    {"command": "enrich_all", "description": "TODAS las activas sin IA con descripción"},
+    {"command": "config", "description": "Configuración actual (tokens enmascarados)"},
+    {"command": "preview", "description": "Oferta aleatoria como se vería en el canal"},
+    {"command": "channel", "description": "Estado del canal"},
+    {"command": "channel_publish", "description": "Publicar candidatas al canal ahora"},
+    {"command": "channel_publish_ia", "description": "Publicar solo ofertas revisadas por IA"},
+    {"command": "channel_daily", "description": "Daily digest ahora"},
+    {"command": "channel_weekly", "description": "Digests semanales ahora (remote+rol+salary)"},
+    {"command": "channel_weekly_remote", "description": "Solo digest weekly-remote"},
+    {"command": "channel_weekly_rol", "description": "Solo mejor de la semana por rol"},
+    {"command": "channel_weekly_techs", "description": "Solo tecnologías del mercado"},
+    {"command": "channel_weekly_salary", "description": "Solo ranking salarial"},
+    {"command": "channel_trends", "description": "Post mensual de tendencias"},
+    {"command": "channel_all", "description": "Publish + todos los digests"},
+    {"command": "channel_dry", "description": "Preview sin publicar"},
+    {"command": "report_daily", "description": "Prueba DM: top del día por categoría"},
+    {"command": "report_weekly_rol", "description": "Prueba DM: mejor de la semana por rol"},
+    {"command": "report_weekly_techs", "description": "Prueba DM: tecnologías del mercado"},
+    {"command": "report_weekly_salary", "description": "Prueba DM: ranking salarial con contexto"},
+    {"command": "report_all", "description": "Prueba DM: todos los reportes"},
+    {"command": "channel_reset_confirm", "description": "Limpiar marcas de publicados"},
+    {"command": "channel_wipe_confirm", "description": "Borrar TODOS los mensajes del canal"},
+    {"command": "db", "description": "DB stats"},
+    {"command": "db_old_confirm", "description": "Purge inactivas >30d (confirm)"},
+    {"command": "db_nondev_confirm", "description": "Purge no-dev (confirm)"},
+    {"command": "db_all_confirm", "description": "Borrar TODO el pool (backup previo)"},
+    {"command": "db_iaclear_confirm", "description": "Limpiar marca IA (re-encola todo)"},
+]
+
+
 def _register_commands(cfg: Config) -> None:
     """Registra los comandos en Telegram (menú "/" del cliente)."""
-    commands = [
-        {"command": "search", "description": "Gatilla una búsqueda ahora"},
-        {"command": "enrich", "description": "Corre el batch IA ahora (rellena datos faltantes)"},
-        {"command": "enrich_all", "description": "TODAS las activas sin IA con descripción"},
-        {"command": "stop", "description": "Detiene la operación en curso (corte limpio)"},
-        {"command": "report", "description": "Análisis de mercado completo con PDF"},
-        {"command": "latest", "description": "Últimas ofertas registradas"},
-        {"command": "stats", "description": "Cobertura del pool"},
-        {"command": "config", "description": "Configuración actual (tokens enmascarados)"},
-        {"command": "preview", "description": "Oferta aleatoria como se vería en el canal"},
-        {"command": "channel", "description": "Estado del canal"},
-        {"command": "channel_publish", "description": "Publicar candidatas al canal ahora"},
-        {"command": "channel_publish_ia", "description": "Publicar solo ofertas revisadas por IA"},
-        {"command": "channel_daily", "description": "Daily digest ahora"},
-        {"command": "channel_weekly", "description": "Digests semanales ahora (remote+rol+salary)"},
-        {"command": "channel_weekly_remote", "description": "Solo digest weekly-remote"},
-        {"command": "channel_weekly_rol", "description": "Solo mejor de la semana por rol"},
-        {"command": "channel_weekly_techs", "description": "Solo tecnologías del mercado"},
-        {"command": "channel_weekly_salary", "description": "Solo ranking salarial"},
-        {"command": "channel_trends", "description": "Post mensual de tendencias"},
-        {"command": "channel_all", "description": "Publish + todos los digests"},
-        {"command": "channel_dry", "description": "Preview sin publicar"},
-        {"command": "report_daily", "description": "Prueba DM: top del día por categoría"},
-        {"command": "report_weekly_rol", "description": "Prueba DM: mejor de la semana por rol"},
-        {"command": "report_weekly_techs", "description": "Prueba DM: tecnologías del mercado"},
-        {"command": "report_weekly_salary", "description": "Prueba DM: ranking salarial con contexto"},
-        {"command": "report_all", "description": "Prueba DM: todos los reportes"},
-        {"command": "channel_reset_confirm", "description": "Limpiar marcas de publicados"},
-        {"command": "channel_wipe_confirm", "description": "Borrar TODOS los mensajes del canal"},
-        {"command": "db", "description": "DB stats"},
-        {"command": "db_old_confirm", "description": "Purge inactivas >30d (confirm)"},
-        {"command": "db_nondev_confirm", "description": "Purge no-dev (confirm)"},
-        {"command": "db_all_confirm", "description": "Borrar TODO el pool (backup previo)"},
-        {"command": "db_iaclear_confirm", "description": "Limpiar marca IA (re-encola todo)"},
-        {"command": "score",  "description": "Ofertas con score ≥ N (ej: /score 60)"},
-        {"command": "jobs",   "description": "Filtra: remote, salary2.5, temuco… combinables"},
-        {"command": "help",   "description": "Ayuda"},
-    ]
+    commands = _MENU_COMANDOS
     try:
         _tg_api(cfg, "setMyCommands", {"commands": commands})
         log.info("comandos registrados en Telegram")
@@ -1754,10 +2049,10 @@ def _register_commands(cfg: Config) -> None:
 
 # ---------------------------------------------------------------- daemon loop
 
-def _do_sweep(cfg: Config, on_phase=None) -> tuple[list[dict], dict]:
+def _do_sweep(cfg: Config, on_phase=None, on_source=None) -> tuple[list[dict], dict]:
     """Barrido completo + pool refrescado. Retorna (ofertas ≥min_score, stats del scan_log)."""
     with _sweep_lock:
-        cmd_run(cfg, notify=False, on_phase=on_phase, stop_event=_STOP_EVENT)   # barrido SIN mensaje push
+        cmd_run(cfg, notify=False, on_phase=on_phase, stop_event=_STOP_EVENT, on_source=on_source)   # barrido SIN mensaje push
         conn = database.connect(cfg)
         try:
             offers = [dict(r) for r in conn.execute(
@@ -1829,6 +2124,11 @@ def _load_pool(cfg: Config) -> list[dict]:
         return [dict(r) for r in conn.execute(
             "SELECT * FROM ofertas WHERE active=1 AND score >= ? ORDER BY score DESC",
             (cfg.alerts.min_score,)).fetchall()]
+    except sqlite3.OperationalError as exc:
+        # DB recién creada/borrada sin tablas: degradar a pool vacío en vez de
+        # tumbar el daemon (init_db del bootstrap o del primer barrido lo recrea).
+        log.warning("_load_pool sin esquema (¿DB vacía?): %s", exc)
+        return []
     finally:
         conn.close()
 
@@ -1858,12 +2158,18 @@ def _sweep_hours_due(cfg: Config, state: dict) -> bool:
     return now.hour in cfg.daemon.sweep_hours_utc and state.get("last_sweep_key") != key
 
 
-def run_daemon(cfg: Config) -> None:
-    """Proceso residente: sin barridos al arrancar (carga pool desde DB) +
-    barridos por horas agendadas (DAEMON_SWEEP_HOURS_UTC) + comandos/callbacks."""
-    log.info("daemon iniciado · barridos agendados %s UTC · callbacks + comandos activos",
-             cfg.daemon.sweep_hours_utc)
-
+def _daemon_bootstrap(cfg: Config) -> dict:
+    """Estado inicial del daemon, en orden seguro para DB inexistente/vacía:
+    init_db PRIMERO (crea archivo + tablas + migraciones), después las lecturas.
+    Un fallo en init_db degrada con warning: el primer barrido lo reintenta."""
+    try:
+        _c = database.connect(cfg)
+        try:
+            database.init_db(_c)
+        finally:
+            _c.close()
+    except Exception as exc:
+        log.warning("init_db al arranque falló (se reintenta en el barrido): %s", exc)
     state: dict = {"offers": _load_pool(cfg), "anchor_id": None, "last_sweep_key": ""}
     # FIX sweep-fantasma: el marcador persiste en DB — un restart no re-barre la hora ya hecha
     try:
@@ -1874,17 +2180,25 @@ def run_daemon(cfg: Config) -> None:
             _c0.close()
     except Exception as exc:
         log.warning("no pude leer last_sweep_key persistente (arranca fresco): %s", exc)
+    return state
+
+
+def run_daemon(cfg: Config) -> None:
+    """Proceso residente: sin barridos al arrancar (carga pool desde DB) +
+    barridos por horas agendadas (DAEMON_SWEEP_HOURS_UTC) + comandos/callbacks."""
+    state: dict = _daemon_bootstrap(cfg)
+    log.info("daemon iniciado · barridos agendados %s UTC · callbacks + comandos activos",
+             cfg.daemon.sweep_hours_utc)
+
     _register_commands(cfg)
 
-    # H4: migraciones al arranque del daemon (no esperar al primer barrido)
-    try:
-        _c = database.connect(cfg)
+    # web opcional en un hilo (WEB_ENABLED=true). Si faltan dependencias, el bot sigue igual.
+    if cfg.web.enabled:
         try:
-            database.init_db(_c)
-        finally:
-            _c.close()
-    except Exception as exc:
-        log.warning("init_db al arranque falló (se reintenta en el barrido): %s", exc)
+            from .web.app import servir
+            threading.Thread(target=servir, args=(cfg,), daemon=True, name="web").start()
+        except Exception as exc:
+            log.warning("web no arrancó (pip install fastapi uvicorn jinja2): %s", exc)
 
     # mensaje de arranque (fancy, con resumen del pool) — SIN lista de jobs;
     # la ancla se crea solo tras un barrido (search agendado o manual)
@@ -1925,6 +2239,9 @@ def run_daemon(cfg: Config) -> None:
             for upd in data.get("result", []):
                 offset = upd["update_id"] + 1
                 cq = upd.get("callback_query")
+                if cq and (cq.get("data") or "").startswith("go:"):
+                    handle_go(cfg, cq, state)
+                    continue
                 if cq and (cq.get("data") or "").startswith(("jobs:", "sc", "latest", "f", "noop")):
                     handle_callback(cfg, cq, state)
                     continue

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import sqlite3
 
-from .db import url_key, norm_title, norm_company, companies_match, similar
+from .db import url_key, norm_title, norm_company, companies_match, similar, _GENERIC
 
 
 def find_duplicate(conn, job: dict) -> str | None:
@@ -34,8 +34,16 @@ def find_duplicate(conn, job: dict) -> str | None:
                 return r["group_id"]
             if rel == "weak":
                 return r["group_id"]  # genérica: aceptar
+    # capa 3 (fuzzy): una empresa desconocida actúa de comodín, y títulos genéricos ("Data
+    # Scientist" ≈ "Data Scientist - GCP") fusionaban ofertas de empresas distintas. El comodín
+    # solo vale si AMBAS empresas son desconocidas (fuentes sin dato); con una empresa real
+    # de un lado el fuzzy exige empresa fuerte — el título exacto (capa 2) sigue valiendo.
+    job_generica = norm_company(job.get("company", "")) in _GENERIC
     for r in rows:
-        if companies_match(job.get("company", ""), r["company"]) == "different":
+        rel = companies_match(job.get("company", ""), r["company"])
+        if rel == "different":
+            continue
+        if rel == "weak" and not (job_generica and norm_company(r["company"]) in _GENERIC):
             continue
         if similar(job["title"], r["title"]):
             return r["group_id"]

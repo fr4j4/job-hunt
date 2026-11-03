@@ -17,7 +17,9 @@ from datetime import datetime, timedelta, timezone
 
 import requests
 
+from ..domain.texto import MAX_DESC
 from ..logging_setup import get_logger
+from . import errores
 
 log = get_logger(__name__)
 
@@ -63,7 +65,7 @@ def _parse_offer(a: dict, feed: str) -> dict | None:
     fecha = ""
     pdays = a.get("publication_days")
     if isinstance(pdays := pdays, int) and pdays >= 0:
-        fecha = (datetime.now(timezone.utc) - timedelta(days=pdays)).date().isoformat()
+        fecha = (datetime.now(timezone.utc) - timedelta(days=pdays)).date().isoformat()   # precisión: día
     url = a.get("link") or ""
     if not url and a.get("id"):
         url = f"https://login.airavirtual.com/postula/{a['id']}"
@@ -71,13 +73,13 @@ def _parse_offer(a: dict, feed: str) -> dict | None:
         "title": name[:150],
         "company": company or "Confidencial",
         "location": location[:120],
-        "date": fecha,
+        "date": fecha, "date_precision": "dia" if fecha else "",
         "url": url,
         "source": f"aira:{feed}",
         "found_by": f"{feed}",
         "salary": "",
         "modality": modality,
-        "_desc": _clean(a.get("description") or a.get("snippet") or "")[:2000],
+        "_desc": _clean(a.get("description") or a.get("snippet") or "")[:MAX_DESC],
         "description_source": "aira-feed",
         "_aira_area": _clean(a.get("area") or a.get("area_text") or ""),
         # metadatos estructurados del feed (v2): contrato/jornada oficiales
@@ -99,10 +101,12 @@ def jobs(feeds: list[str], found_by_prefix: str = "", on_feed=None) -> list[dict
             r = s.get(f"https://gcs-storage.airavirtual.com/public/feeds/{fname}.json", timeout=20)
             if r.status_code != 200:
                 log.warning("aira %s: HTTP %s", fname, r.status_code)
+                errores.registrar("aira")
                 continue
             d = r.json()
         except Exception as e:
             log.warning("aira %s falló: %s", fname, e)
+            errores.registrar("aira")
             continue
         offers = _extract_offers(d)
         if on_feed:

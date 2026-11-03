@@ -22,7 +22,9 @@ from .domain.roles import (  # noqa: F401
     _DEV_CATEGORIES,
     _NONDEV_CATEGORIES,
     _categorias_dev,
+    fit_ok,
     is_dev,
+    tiene_senal_tech,
 )
 from .logging_setup import get_logger
 
@@ -33,7 +35,10 @@ log = get_logger(__name__)
 
 _ABBR_FUENTE = {"linkedin": "LinkedIn", "computrabajo": "CB", "indeed": "Indeed",
                 "glassdoor": "Glassdoor", "laborum": "Laborum", "jooble": "Jooble",
-                "accenture": "Accenture", "aira": "AIRA"}
+                "accenture": "Accenture", "aira": "AIRA",
+                "getonboard": "GetOnBoard", "himalayas": "Himalayas", "remotive": "Remotive",
+                "weworkremotely": "WWR", "chiletrabajos": "Chiletrabajos",
+                "trabajando": "Trabajando", "staffy": "Staffy"}
 
 
 def _fuente(row: dict) -> str:
@@ -59,6 +64,20 @@ _SEP_THIN = "─────────────────────"
 _SEP_THICK = "━━━━━━━━━━━━━━━━━━━━━"
 
 
+_ENCAJE_CHIP = {"alto": "🎯 Encaje alto", "medio": "🎯 Encaje medio"}
+
+
+def _edad_humana(edad: int) -> str:
+    """Antigüedad legible: Hoy · Ayer · Hace N días · Hace más de 2 semanas."""
+    if edad <= 0:
+        return "Hoy"
+    if edad == 1:
+        return "Ayer"
+    if edad < 14:
+        return f"Hace {edad} días"
+    return "Hace más de 2 semanas"
+
+
 def render_offer_post(row: dict) -> tuple[str, dict | None]:
     """Post individual de oferta al canal (spec v3 §5-A) con botón URL.
 
@@ -74,7 +93,7 @@ def render_offer_post(row: dict) -> tuple[str, dict | None]:
 
     lines: list[str] = []
     ms = row.get("market_score") or 0
-    lines.append(f"🎯 [<b>{ms}</b>] {esc(row.get('title') or 'Sin título')}")
+    lines.append(f"<b>{esc(row.get('title') or 'Sin título')}</b>")
     meta: list[str] = []
     if row.get("company"):
         meta.append(f"🏢 {esc(row['company'])}")
@@ -91,16 +110,22 @@ def render_offer_post(row: dict) -> tuple[str, dict | None]:
     mod = (row.get("modality") or "").strip()
     loc = esc((row.get("location") or "").strip())
     if mod:
-        meta.append(f"🧭 {esc(mod)}" + (f" · 📍 {loc}" if loc else ""))
+        meta.append(f"🧭 {esc(mod.capitalize())}" + (f" · 📍 {loc}" if loc else ""))
     elif loc:
         meta.append(f"📍 {loc}")
     # inglés como chip en meta (si hay)
     ing_raw = (row.get("ai_idiomas") or "").strip()
     if ing_raw and "inglés" in ing_raw.lower():
         excl = '"excluyente": true' in ing_raw
-        meta.append("🗣 EN!" if excl else "🗣 EN")
+        meta.append("🗣 Inglés requerido" if excl else "🗣 Inglés deseable")
     if meta:
         lines.append(" · ".join(meta))
+    # chips de calidad: puntaje de la oferta + encaje con el perfil (si la IA lo evaluó)
+    chips = [f"⭐ {ms}/100"]
+    encaje = _ENCAJE_CHIP.get((row.get("ai_encaje") or "").strip().lower())
+    if encaje:
+        chips.append(encaje)
+    lines.append("  ".join(chips))
 
     # ── Bloque 1: Hechos ──
     lines.append(_SEP_THIN)
@@ -119,7 +144,7 @@ def render_offer_post(row: dict) -> tuple[str, dict | None]:
                 sal_note += f" ({esc(note)})"
         elif st == "trusted" and note:
             sal_note = f" · {esc(note)}"
-        lines.append(f"💰 ${sal:,}".replace(",", ".") + sal_note)
+        lines.append(f"💰 ${sal:,}/mes".replace(",", ".") + sal_note)
     elif raw_sal:
         # salario existe pero parser lo rechazó (implausible > techo) → mostrar crudo con alerta
         st = (row.get("salary_status") or "").strip().lower()
@@ -129,7 +154,7 @@ def render_offer_post(row: dict) -> tuple[str, dict | None]:
             sal_note += f" ({esc(note)})" if st == "implausible" else f" · {esc(note)}"
         lines.append(f"💰 {esc(raw_sal)}{sal_note}")
     else:
-        lines.append("💰 Sin sueldo declarado")
+        lines.append("💰 Sueldo no declarado")
 
     # ── Bloque 2: Análisis IA global (sin encaje personal) ──
     resumen = (row.get("ai_resumen") or "").strip()
@@ -151,16 +176,16 @@ def render_offer_post(row: dict) -> tuple[str, dict | None]:
     if red or green or ben:
         lines.append(_SEP_THIN)
         if red:
-            lines.append("⚠️ " + esc(" · ".join(red)))
+            lines.append("⚠️ <b>A considerar:</b> " + esc(" · ".join(red)))
         if green:
-            lines.append("✅ " + esc(" · ".join(green)))
+            lines.append("✅ <b>A favor:</b> " + esc(" · ".join(green)))
         if ben:
-            lines.append("🎁 " + esc(" · ".join(ben)))
+            lines.append("🎁 <b>Beneficios:</b> " + esc(" · ".join(ben)))
 
     tail: list[str] = []
     edad = age_days(row)
     if edad or row.get("date_canonical"):
-        tail.append(f"📅 {edad}d" if edad < 14 else "📅 >2 sem")
+        tail.append(f"📅 {_edad_humana(edad)}")
     tail.append(f"🌐 {_fuente(row)}")
     if tail:
         lines.append(_SEP_THIN)
@@ -177,9 +202,26 @@ def render_offer_post(row: dict) -> tuple[str, dict | None]:
 
 _GATE_SQL = """SELECT * FROM ofertas
 WHERE active=1 AND market_score >= :min_score
-  AND notified_channel_at = ''
+  AND notified_channel_at = '' AND group_id NOT IN (SELECT group_id FROM channel_posts WHERE kind='offer')
   AND date_canonical >= date('now', '-' || :max_age || ' days')
   ORDER BY market_score DESC, first_seen DESC"""
+
+
+def _sin_ver(row: dict, cfg: Config) -> bool:
+    """True si la fuente lleva más de max_unseen_hours sin devolver la oferta (probable aviso
+    caído). Criterio por TIEMPO: el 'cerrada' de la analítica cuenta barridos y con barridos
+    manuales seguidos o rotación de queries marca como cerradas ofertas vivas (1183 reaparecidas
+    de 3138 cierres)."""
+    h = cfg.channel.max_unseen_hours
+    if not h:
+        return False
+    try:
+        dt = datetime.fromisoformat(str(row.get("last_seen") or "").replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+    except ValueError:
+        return False
+    return (datetime.now(timezone.utc) - dt).total_seconds() > h * 3600
 
 
 def select_channel_offers(conn, cfg: Config, require_ia: bool = False) -> list[dict]:
@@ -198,8 +240,12 @@ def select_channel_offers(conn, cfg: Config, require_ia: bool = False) -> list[d
     out = []
     for r in rows:
         d = dict(r)
+        if _sin_ver(d, cfg) or not tiene_senal_tech(d.get("title"), d.get("techs")):
+            continue
         if cfg.channel.require_dev and not is_dev(d.get("rol_categoria"), d.get("title") or "", cfg,
                                                   d.get("description") or ""):
+            continue
+        if not fit_ok(d, cfg):
             continue
         if cfg.channel.max_first_seen_hours:
             fs = str(d.get("first_seen") or "")
@@ -231,7 +277,7 @@ def publish_channel(cfg: Config, conn, tg_api, dry_run: bool = False,
     require_ia=True: solo ofertas revisadas por IA (ia_model != '').
     """
     stats: dict = {"candidates": 0, "posted": 0, "skipped_age": 0, "skipped_score": 0,
-                   "skipped_notified": 0, "skipped_dev": 0}
+                   "skipped_notified": 0, "skipped_dev": 0, "skipped_fit": 0}
     if not cfg.channel.enabled or not cfg.channel.chat_id:
         return stats
 
@@ -254,9 +300,18 @@ def publish_channel(cfg: Config, conn, tg_api, dry_run: bool = False,
 
     posteadas = []
     for r in rows:
+        if _sin_ver(r, cfg):
+            stats["skipped_sin_ver"] = stats.get("skipped_sin_ver", 0) + 1
+            continue
+        if not tiene_senal_tech(r.get("title"), r.get("techs")):
+            stats["skipped_sin_senal"] = stats.get("skipped_sin_senal", 0) + 1
+            continue
         if cfg.channel.require_dev and not is_dev(r.get("rol_categoria"), r.get("title") or "", cfg,
                                                   r.get("description") or ""):
             stats["skipped_dev"] += 1
+            continue
+        if not fit_ok(r, cfg):
+            stats["skipped_fit"] += 1
             continue
         if len(posteadas) >= tope:
             break
@@ -296,10 +351,28 @@ def publish_channel(cfg: Config, conn, tg_api, dry_run: bool = False,
                 log.warning("canal: sendMessage sin ok → %s", str(resp)[:120])
         except Exception as e:
             log.warning("canal: post falló (%.40s): %s", r.get("title") or "", e)
-    log.info("canal: %d/%d publicadas (dev-skip %d, sobrantes por tope %d)",
+    log.info("canal: %d/%d publicadas (dev-skip %d, fit-skip %d, sobrantes por tope %d)",
              stats["posted"], stats["candidates"], stats["skipped_dev"],
-             stats["candidates"] - stats["skipped_dev"] - stats["posted"])
+             stats["skipped_fit"],
+             stats["candidates"] - stats["skipped_dev"] - stats["skipped_fit"] - stats["posted"])
     return stats
+
+
+def publicar_pendientes(cfg: Config, conn, tg_api, budget: int | None = None) -> int:
+    """Publica lo que quedó elegible tras un paso que cambia el gate SIN publicar por sí mismo
+    (rescore global del barrido, batch IA nocturno/manual, backfill de encaje). Sin esto esas
+    ofertas esperaban al siguiente barrido para salir — de ahí los posts "de rezago" en cada
+    pasada. Nunca lanza: el canal no debe tumbar el paso que lo invoca. Retorna posts hechos."""
+    if not cfg.channel.enabled or not cfg.channel.chat_id:
+        return 0
+    try:
+        st = publish_channel(cfg, conn, tg_api,
+                             budget=cfg.channel.max_posts_per_sweep if budget is None else budget)
+        log.info("canal (pendientes): %s", st)
+        return st["posted"]
+    except Exception as e:
+        log.warning("canal (pendientes) falló: %s", e)
+        return 0
 
 
 # ---------------- digests (B/C/D/E — spec v3 §5) ----------------
@@ -327,8 +400,8 @@ def _send_digest(cfg: Config, tg_api, kind: str, text: str, conn, now: datetime,
     automático (force=False, sin chat_id) conserva la idempotencia por bucket.
     """
     if len(text) > 4096:
-        cut = text.rfind("\n\n", 0, 4000)
-        text = (text[:cut] if cut > 0 else text[:4000]) + "\n…"
+        from .telegram.render import recortar_html
+        text = recortar_html(text, 4000)
     if chat_id is not None or force:
         cid = int(chat_id) if chat_id is not None else int(cfg.channel.chat_id)
         try:
@@ -433,6 +506,8 @@ def publish_daily_digest(cfg: Config, conn, tg_api, dry_run: bool = False,
         if cfg.channel.require_dev and not is_dev(r.get("rol_categoria"), r.get("title") or "", cfg,
                                                   r.get("description") or ""):
             continue
+        if not fit_ok(r, cfg):
+            continue
         rol = (r.get("rol_categoria") or "Otro").strip() or "Otro"
         cur = por_rol.get(rol)
         if cur is None or (r.get("market_score") or 0) > (cur.get("market_score") or 0):
@@ -471,7 +546,7 @@ def _weekly_remote_rows(conn, cfg: Config) -> dict[str, list[dict]]:
     rows = [dict(r) for r in conn.execute("""SELECT * FROM ofertas WHERE active=1
         AND market_score >= :min_score AND date_canonical >= date('now', '-' || :max_age || ' days')
         AND (modality LIKE '%remot%' OR remote_official LIKE '%TELECOMMUTE%')
-        AND seniority_real != '' AND notified_channel_at = ''
+        AND seniority_real != '' AND notified_channel_at = '' AND group_id NOT IN (SELECT group_id FROM channel_posts WHERE kind='offer')
         ORDER BY market_score DESC, first_seen DESC LIMIT 60""",
         {"min_score": cfg.channel.min_score - 5, "max_age": cfg.channel.max_age_days}).fetchall()]
     featured = set()
@@ -531,13 +606,15 @@ def publish_weekly_rol(cfg: Config, conn, tg_api, dry_run: bool = False,
     now = datetime.now(timezone.utc)
     rows = [dict(r) for r in conn.execute("""SELECT * FROM ofertas WHERE active=1
         AND market_score >= :min_score AND date_canonical >= date('now', '-' || :max_age || ' days')
-        AND notified_channel_at = ''
+        AND notified_channel_at = '' AND group_id NOT IN (SELECT group_id FROM channel_posts WHERE kind='offer')
         ORDER BY market_score DESC, first_seen DESC LIMIT 80""",
         {"min_score": cfg.channel.min_score - 5, "max_age": cfg.channel.max_age_days}).fetchall()]
     por_rol: dict[str, dict] = {}
     for r in rows:
         if cfg.channel.require_dev and not is_dev(r.get("rol_categoria"), r.get("title") or "", cfg,
                                                   r.get("description") or ""):
+            continue
+        if not fit_ok(r, cfg):
             continue
         rol = (r.get("rol_categoria") or "Otro").strip() or "Otro"
         cur = por_rol.get(rol)
@@ -579,7 +656,7 @@ def publish_weekly_salary(cfg: Config, conn, tg_api, dry_run: bool = False,
     now = datetime.now(timezone.utc)
     rows = [dict(r) for r in conn.execute("""SELECT * FROM ofertas WHERE active=1
         AND market_score >= :min_score AND date_canonical >= date('now', '-' || :max_age || ' days')
-        AND salary != '' AND notified_channel_at = ''
+        AND salary != '' AND notified_channel_at = '' AND group_id NOT IN (SELECT group_id FROM channel_posts WHERE kind='offer')
         ORDER BY market_score DESC, first_seen DESC LIMIT 60""",
         {"min_score": cfg.channel.min_score - 5, "max_age": cfg.channel.max_age_days}).fetchall()]
     sal_rows = []
@@ -825,7 +902,8 @@ def channel_status(conn, cfg: Config) -> str:
     last = conn.execute("""SELECT posted_at, kind FROM channel_posts ORDER BY id DESC LIMIT 1""").fetchone()
     cola = [dict(r) for r in conn.execute(
         _GATE_SQL, {"min_score": ch.min_score, "max_age": ch.max_age_days}).fetchall()]
-    dev_ok = [r for r in cola if is_dev(r["rol_categoria"], r["title"], cfg, r.get("description") or "")]
+    dev_ok = [r for r in cola if is_dev(r["rol_categoria"], r["title"], cfg, r.get("description") or "")
+              and fit_ok(r, cfg)]
     dist = Counter()
     for (ms,) in conn.execute("SELECT market_score FROM ofertas WHERE active=1"):
         dist[(ms or 0) // 10 * 10] += 1

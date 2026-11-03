@@ -23,6 +23,25 @@ from .domain.techs import TITLE_RE as _MARKET_TECHS_TITLE_RE  # noqa: F401
 from .domain.texto import _norm  # noqa: F401
 
 
+_PERFIL_ABBRS_CACHE: dict[tuple, frozenset] = {}
+
+
+def _perfil_abbrs(techs) -> frozenset:
+    """Abreviaturas de columna 'techs' que corresponden a PROFILE_TECHS (cacheado)."""
+    from .domain.techs import ABBR_BY_ALIAS
+    key = tuple(techs)
+    if key not in _PERFIL_ABBRS_CACHE:
+        out = set()
+        for t in techs:
+            t = _norm(t)
+            ab = ABBR_BY_ALIAS.get(t) or next(
+                (ABBR_BY_ALIAS[w] for w in t.split() if w in ABBR_BY_ALIAS), None)
+            if ab:
+                out.add(ab)
+        _PERFIL_ABBRS_CACHE[key] = frozenset(out)
+    return _PERFIL_ABBRS_CACHE[key]
+
+
 def _years_from_description(desc: str) -> int | None:
     m = re.search(r"(\d{1,2})\+?\s*(?:años|anos|years)", _norm(desc))
     return int(m.group(1)) if m else None
@@ -89,6 +108,14 @@ def _staffing(job: dict) -> bool:
     return False
 
 
+def tiene_senal_perfil(breakdown: dict) -> bool:
+    """True si el título trae alguna señal del perfil (tech, rol del perfil o rol-keyword).
+    Sin señal = título genérico: la IA se difiere al batch nocturno en vez de gastarse
+    en el barrido (la oferta sigue indexada)."""
+    return bool(breakdown.get("techs") or breakdown.get("role_profile")
+                or any(k.startswith("role:") for k in breakdown))
+
+
 def compute_score(job: dict, cfg: Config) -> tuple[int, dict]:
     """Calcula el score de compatibilidad de una oferta contra el perfil.
 
@@ -108,8 +135,11 @@ def compute_score(job: dict, cfg: Config) -> tuple[int, dict]:
     breakdown["base"] = s.base
 
     # ---- hard filters (red keywords del .env) ----
+    # solo título/ubicación: en la descripción 'comercial', 'soporte técnico', 'intern' o
+    # 'qa manual' aparecen en ofertas senior legítimas (el área, el equipo, los beneficios)
+    # y dejaban en score 0 → sin IA ni canal a >100 ofertas de desarrollo.
     for kw in p.red_keywords:
-        if kw and (_kw_hit(kw, blob) or _kw_hit(kw, t_desc)):
+        if kw and _kw_hit(kw, blob):
             breakdown["rejected_by"] = kw
             return 0, breakdown
 
@@ -129,6 +159,13 @@ def compute_score(job: dict, cfg: Config) -> tuple[int, dict]:
         if kw in t_title:
             score += pts
             breakdown[f"role:{kw}"] = pts
+
+    # ---- roles del perfil (PROFILE_ROLES) en el título: una sola vez ----
+    for role in p.roles:
+        if role and _kw_hit(role, t_title):
+            score += s.role_profile
+            breakdown["role_profile"] = f"{role} +{s.role_profile}"
+            break
 
     # ---- experiencia (JSON-LD oficial > regex descripción) ----
     years = job.get("years_official") or _years_from_description(desc)
@@ -178,9 +215,12 @@ def compute_score(job: dict, cfg: Config) -> tuple[int, dict]:
             breakdown["salary_out"] = s.salary_out_soft
 
     # ---- stack overlap (techs de la descripción vs tu stack) ----
-    job_techs = [x for x in (job.get("techs") or "").split(";") if x]
-    overlap = sum(1 for x in ("Py", "Java", "AWS", "Angular", "React", "K8s", "Docker", "Spring", "Postgres")
-                  if x in job_techs and any(x.lower().startswith(t[:4]) for t in p.techs)) if job_techs else 0
+    # techs del perfil → abreviaturas de columna (python→Py, kubernetes→K8s, 'spring boot'→Spring).
+    # Antes se comparaba por prefijo de 4 letras contra una lista fija y 'Py'/'K8s' (el stack
+    # principal) jamás coincidían: ofertas de DevOps/Python con el stack del perfil en la
+    # descripción quedaban sin ese puntaje.
+    job_techs = {x.strip() for x in (job.get("techs") or "").split(";") if x.strip()}
+    overlap = len(job_techs & _perfil_abbrs(p.techs)) if job_techs else 0
     pts = min(overlap * s.stack_overlap_per, s.stack_overlap_max)
     if pts:
         score += pts
@@ -319,7 +359,10 @@ def compute_market_score(job: dict, now=None) -> tuple[int, dict]:
     b["mod_pts"] = mod_pts
 
     # ---- transparencia (20; bloqueado = mitad) ----
-    bloqueado = (job.get("fetch_fails") or 0) > 0
+    # el extracto del SERP de Jooble (<400 chars, sin contrato ni modalidad) tampoco es "la oferta
+    # sin datos": su ficha no se puede bajar (challenge de Cloudflare). Mismo trato que fetch bloqueado.
+    bloqueado = ((job.get("fetch_fails") or 0) > 0
+                 or (job.get("description_source") or "") == "jooble-serp")
     company = (job.get("company") or "").strip()
     trans = 0
     if company and not re.search(r"importante empresa|empresa del sector|confidencial",

@@ -8,6 +8,10 @@ from __future__ import annotations
 
 import unicodedata
 
+# Tope de almacenamiento de la descripción completa de una oferta (la IA recibe
+# un recorte aparte en prompts.py). Antes: 1800/2000 → fichas largas truncadas.
+MAX_DESC = 20000
+
 
 def _norm(s: str) -> str:
     s = unicodedata.normalize("NFKD", s or "")

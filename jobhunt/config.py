@@ -95,6 +95,7 @@ class Scoring:
     stack_overlap_max: float
     cap: int
     modality_bonus: dict[str, int] = field(default_factory=dict)
+    role_profile: int = 6          # bonus si un PROFILE_ROLES aparece en el título
 
 
 @dataclass
@@ -107,11 +108,18 @@ class Search:
     queries_laborum: list[str]
     queries_jooble: list[str]
     queries_accenture: list[str]
+    queries_getonboard: list[str]
+    queries_himalayas: list[str]
+    queries_remotive: list[str]
     sample_linkedin: list[str]
     sample_indeed: list[str]
     sample_computrabajo: list[str]
     sample_glassdoor: list[str]
     sample_rotation: float
+    queries_chiletrabajos: list[str] = field(default_factory=list)
+    queries_trabajando: list[str] = field(default_factory=list)
+    max_pages: int = 3             # páginas por query (Computrabajo/Indeed/Accenture)
+    linkedin_max_pages: int = 8    # LinkedIn tiene su propio tope (corta antes por antigüedad)
 
 
 @dataclass
@@ -142,6 +150,7 @@ class Alerts:
     min_score: int
     max_per_digest: int
     worth_it_score: int
+    source_sweeps: int = 3         # avisa al admin si una fuente rinde 0 N barridos seguidos
 
 
 @dataclass
@@ -166,8 +175,9 @@ class RelevanceCfg:
     areas_nontech: str = (r"venta|b2c|seguridad$|guardia|logistica|produccion|manufactura|"
                           r"finanzas|contabilidad|recursos_humanos|servicios_generales|"
                           r"prevencion_de_riesgos|inmobiliaria|administracion_y_secretarias|marketing")
-    nontech_titles: str = (r"guardia|cajer[ao]|repositor|recepcionista|vendedor|operari[ao]|"
-                           r"bodeguero|conductor|mozo|auxiliar|captador")
+    nontech_titles: str = (r"guardias?|cajer[ao]s?|repositor(?:a|es|as)?|recepcionistas?|vendedor(?:a|es|as)?|"
+                           r"operari[ao]s?|bodegueros?|conductor(?:a|es|as)?|mozos?|auxiliar(?:es)?|"
+                           r"captador(?:a|es|as)?")
     ia_batch: int = 30
 
 
@@ -181,6 +191,10 @@ class ChannelCfg:
     max_age_days: int = 14         # ventana canónica (date_canonical)
     max_first_seen_hours: int = 0  # 0=OFF; ej 72 = solo primeras 72h en el pool
     require_dev: bool = True       # rol_categoria ∈ set dev
+    require_fit: bool = True       # exige encaje con el perfil (score + veredicto IA)
+    min_fit_score: int = 45        # score de perfil mínimo (0 = sin piso; base=40 sin señales)
+    encaje_bajo_override: int = 60  # IA 'bajo' NO veta si el score de perfil es >= esto (0 = el veto es absoluto)
+    max_unseen_hours: int = 72     # no publicar ofertas que su fuente lleva >N h sin devolver (0 = OFF)
     digest_daily: bool = True
     digest_daily_hour_utc: int = 21
     digest_weekly: bool = True
@@ -205,6 +219,29 @@ class Telegram:
 
 
 @dataclass
+class WebCfg:
+    enabled: bool = False             # el daemon levanta la web en un hilo
+    host: str = "127.0.0.1"           # SOLO local por defecto; 0.0.0.0 = toda la red (usar con Tailscale/HTTPS)
+    port: int = 8787
+    public_url: str = ""              # URL con la que TÚ llegas a la web (ej https://jobhunt.tu-tailnet.ts.net)
+    token_minutes: int = 10           # vigencia del enlace de un solo uso que manda /web
+    session_days: int = 7             # vigencia de la sesión del navegador
+    cookie_secure: bool | None = None  # None = auto (Secure si public_url es https)
+    ui: str = "v2"                    # "v2" (def.): la raíz (/) entra a la interfaz nueva; la clásica queda en /?clasica=1
+
+
+@dataclass
+class AnalyticsCfg:
+    enabled: bool = True
+    close_after_sweeps: int = 6       # barridos de su fuente sin verla → evento analítico 'cerrada'
+    infer_modality: bool = True       # fallback de modalidad por texto (modality_source='inferida')
+    band_min: int = 300_000           # sueldo mensual CLP plausible para estadística
+    band_max: int = 15_000_000
+    bootstrap_b: int = 500
+    avisos_estado: bool = False       # Telegram: avisa si una oferta que sigues (guardada/postulada/entrevista) pudo cerrar
+
+
+@dataclass
 class Config:
     profile: Profile
     scoring: Scoring
@@ -218,6 +255,8 @@ class Config:
     report: ReportCfg
     relevance: RelevanceCfg
     channel: ChannelCfg
+    web: WebCfg = field(default_factory=WebCfg)
+    analytics: AnalyticsCfg = field(default_factory=AnalyticsCfg)
     jooble_api_key: str = ""
     aira_feeds: list[str] = field(default_factory=list)
     project_root: Path = PROJECT_ROOT
@@ -242,6 +281,7 @@ def load_config(env_file: Path | None = None) -> Config:
     scoring = Scoring(
         base=_env_int("SCORE_BASE", 40),
         n_tech_primary=_env_int("N_TECH_PRIMARY", 4),
+        role_profile=_env_int("SCORE_ROLE_PROFILE", 6),
         tech_primary=_env_int("SCORE_TECH_PRIMARY", 15),
         tech_secondary=_env_int("SCORE_TECH_SECONDARY", 8),
         role_keywords=_env_pairs("SCORE_ROLE_KEYWORDS"),
@@ -255,8 +295,8 @@ def load_config(env_file: Path | None = None) -> Config:
         us_hours_penalty=_env_int("SCORE_US_HOURS_PENALTY", -4),
         salary_in_range_bonus=_env_int("SCORE_SALARY_IN_RANGE_BONUS", 5),
         salary_out_soft=_env_int("SCORE_SALARY_OUT_SOFT", -2),
-        stack_overlap_per=_env_float("SCORE_STACK_OVERLAP_PER", 1.5),
-        stack_overlap_max=_env_float("SCORE_STACK_OVERLAP_MAX", 6),
+        stack_overlap_per=_env_float("SCORE_STACK_OVERLAP_PER", 2.5),
+        stack_overlap_max=_env_float("SCORE_STACK_OVERLAP_MAX", 10),
         cap=_env_int("SCORE_CAP", 98),
         modality_bonus={
             "remoto": _env_int("PROFILE_MOD_REMOTO_BONUS", 3),
@@ -290,11 +330,20 @@ def load_config(env_file: Path | None = None) -> Config:
         queries_laborum=_env_list("QUERIES_LABORUM", "python,desarrollador,full stack,backend,java"),
         queries_jooble=_env_list("QUERIES_JOOBLE", "python,desarrollador full stack,backend"),
         queries_accenture=_env_list("QUERIES_ACCENTURE", "fullstack,python,tech lead"),
+        queries_getonboard=_env_list("QUERIES_GETONBOARD", "python,full stack,tech lead,backend,java,spring boot,data engineer,devops"),
+        queries_himalayas=_env_list("QUERIES_HIMALAYAS", "python,full stack,tech lead,java,backend,data engineer"),
+        queries_remotive=_env_list("QUERIES_REMOTIVE", "python,full stack,backend,java,data engineer"),
         sample_linkedin=_env_list("SAMPLE_QUERIES_LINKEDIN"),
         sample_indeed=_env_list("SAMPLE_QUERIES_INDEED"),
         sample_computrabajo=_env_list("SAMPLE_QUERIES_COMPUTRABAJO"),
         sample_glassdoor=_env_list("SAMPLE_QUERIES_GLASSDOOR"),
         sample_rotation=_env_float("SAMPLE_ROTATION", 0.33),
+        queries_chiletrabajos=_env_list("QUERIES_CHILETRABAJOS",
+                                        "full stack,python,java,backend,tech lead,data engineer,devops"),
+        queries_trabajando=_env_list("QUERIES_TRABAJANDO",
+                                     "full stack,python,java,backend,tech lead,data engineer,devops"),
+        max_pages=max(1, min(10, _env_int("SEARCH_MAX_PAGES", 3))),
+        linkedin_max_pages=max(1, min(20, _env_int("LINKEDIN_MAX_PAGES", 8))),
     )
     sources = {
         "jooble": _env_bool("ENABLE_JOOBLE", True),
@@ -304,6 +353,14 @@ def load_config(env_file: Path | None = None) -> Config:
         "computrabajo": _env_bool("ENABLE_COMPUTRABAJO", True),
         "indeed": _env_bool("ENABLE_INDEED", True),
         "glassdoor": _env_bool("ENABLE_GLASSDOOR", True),
+        "getonboard": _env_bool("ENABLE_GETONBOARD", True),
+        "himalayas": _env_bool("ENABLE_HIMALAYAS", True),
+        "remotive": _env_bool("ENABLE_REMOTIVE", True),
+        "weworkremotely": _env_bool("ENABLE_WEWORKREMOTELY", True),
+        "chiletrabajos": _env_bool("ENABLE_CHILETRABAJOS", True),
+        "trabajando": _env_bool("ENABLE_TRABAJANDO", True),
+        "staffy": _env_bool("ENABLE_STAFFY", True),
+        "aira": _env_bool("ENABLE_AIRA", True),   # antes faltaba: el barrido nunca corría AIRA
     }
     premium_hours = [int(h) for h in _env_list("PREMIUM_TICK_HOURS_UTC", "00,12")]
     jooble_key = _env("JOOBLE_API_KEY")
@@ -346,6 +403,7 @@ def load_config(env_file: Path | None = None) -> Config:
         min_score=_env_int("ALERT_MIN_SCORE", 70),
         max_per_digest=_env_int("ALERT_MAX_PER_DIGEST", 10),
         worth_it_score=_env_int("ALERT_WORTH_IT_SCORE", 60),
+        source_sweeps=max(1, _env_int("ALERT_SOURCE_SWEEPS", 3)),
     )
     daemon = Daemon(
         interval_min=_env_int("DAEMON_INTERVAL_MIN", 240),
@@ -365,8 +423,9 @@ def load_config(env_file: Path | None = None) -> Config:
                            r"venta|b2c|logistica|produccion|manufactura|finanzas|contabilidad|"
                            r"recursos_humanos|servicios_generales|prevencion_de_riesgos|marketing"),
         nontech_titles=_env("RELEVANCE_NOUNTECH",
-                            r"guardia|cajer[ao]|repositor|recepcionista|vendedor|operari[ao]|"
-                            r"bodeguero|conductor|mozo|auxiliar|captador"),
+                            r"guardias?|cajer[ao]s?|repositor(?:a|es|as)?|recepcionistas?|vendedor(?:a|es|as)?|"
+                            r"operari[ao]s?|bodegueros?|conductor(?:a|es|as)?|mozos?|auxiliar(?:es)?|"
+                            r"captador(?:a|es|as)?"),
         ia_batch=_env_int("RELEVANCE_IA_BATCH", 30),
     )
     channel = ChannelCfg(
@@ -378,6 +437,10 @@ def load_config(env_file: Path | None = None) -> Config:
         max_age_days=_env_int("CHANNEL_MAX_AGE_DAYS", 14),
         max_first_seen_hours=_env_int("CHANNEL_MAX_FIRST_SEEN_HOURS", 0),
         require_dev=_env_bool("CHANNEL_REQUIRE_DEV", True),
+        require_fit=_env_bool("CHANNEL_REQUIRE_FIT", True),
+        min_fit_score=_env_int("CHANNEL_MIN_FIT_SCORE", 45),
+        encaje_bajo_override=_env_int("CHANNEL_ENCAJE_BAJO_OVERRIDE", 60),
+        max_unseen_hours=_env_int("CHANNEL_MAX_UNSEEN_HOURS", 72),
         digest_daily=_env_bool("CHANNEL_DIGEST_DAILY", True),
         digest_daily_hour_utc=_env_int("CHANNEL_DIGEST_DAILY_HOUR_UTC", 21),
         digest_weekly=_env_bool("CHANNEL_DIGEST_WEEKLY", True),
@@ -388,6 +451,26 @@ def load_config(env_file: Path | None = None) -> Config:
         digest_max=_env_int("CHANNEL_DIGEST_MAX", 8),
         silence_sweeps=_env_int("CHANNEL_SILENCE_SWEEPS", 6),
         max_posts_per_sweep=_env_int("CHANNEL_MAX_POSTS_PER_SWEEP", 15),
+    )
+    web = WebCfg(
+        enabled=_env_bool("WEB_ENABLED", False),
+        host=_env("WEB_HOST", "127.0.0.1").strip() or "127.0.0.1",
+        port=_env_int("WEB_PORT", 8787),
+        public_url=_env("WEB_PUBLIC_URL", "").strip().rstrip("/"),
+        token_minutes=max(1, min(60, _env_int("WEB_TOKEN_MINUTES", 10))),
+        session_days=max(1, min(90, _env_int("WEB_SESSION_DAYS", 7))),
+        ui="legacy" if _env("WEB_UI", "v2").strip().lower() == "legacy" else "v2",
+        cookie_secure=(None if _env("WEB_COOKIE_SECURE", "").strip() == ""
+                       else _env_bool("WEB_COOKIE_SECURE", False)),
+    )
+    analytics = AnalyticsCfg(
+        enabled=_env_bool("ANALYTICS_ENABLED", True),
+        close_after_sweeps=max(1, _env_int("ANALYTICS_CLOSE_AFTER_SWEEPS", 6)),
+        infer_modality=_env_bool("ANALYTICS_INFER_MODALITY", True),
+        band_min=_env_int("ANALYTICS_BAND_MIN", 300_000),
+        band_max=_env_int("ANALYTICS_BAND_MAX", 15_000_000),
+        bootstrap_b=max(50, _env_int("ANALYTICS_BOOTSTRAP_B", 500)),
+        avisos_estado=_env_bool("ANALYTICS_AVISOS_ESTADO", False),
     )
     cfg = Config(
         profile=profile,
@@ -402,6 +485,8 @@ def load_config(env_file: Path | None = None) -> Config:
         report=report,
         relevance=relevance,
         channel=channel,
+        web=web,
+        analytics=analytics,
         jooble_api_key=jooble_key,
         aira_feeds=_env_list("AIRA_FEEDS", "walmart,cencosud_scotiabank,tottus,entel,ripley,itau,bancoestado,wom,codelco,copec,cencosud"),
     )

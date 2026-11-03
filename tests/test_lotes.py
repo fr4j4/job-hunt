@@ -49,7 +49,7 @@ def test_lote_prompt_bloques_idx():
     p = en._lote_prompt(rows, "perfil", "mercado")
     assert "--- OFERTA 1 ---" in p and "--- OFERTA 2 ---" in p
     assert "idx 1..N" in p
-    assert "salario_clp_mensual = 0" in p
+    assert "= 0 (cero" in p and "salario_evidencia" in p
 
 
 def test_lote_nota_anomalia_por_oferta():
@@ -405,7 +405,7 @@ def test_lote_techs_ia_se_persisten(mem_db, monkeypatch):
     cfg = _cfg()
     _insert(mem_db, "g1", salary="")
     monkeypatch.setattr(en, "extract_structured",
-                        lambda url: {"description": "x" * 500, "_access": "ok"})
+                        lambda url: {"description": "Stack: Python, Kubernetes y AWS. " + "x" * 500, "_access": "ok"})
     monkeypatch.setattr(en, "ia_extract_lote",
                         lambda *a, **k: ([{"idx": 1, "opinion": "x", "resumen": "r",
                                            "fit_reason": "f", "seniority_real": "s",
@@ -428,7 +428,7 @@ def test_lote_techs_ia_refresca_existente(mem_db, monkeypatch):
     mem_db.execute("UPDATE ofertas SET techs='Java;Spring' WHERE group_id='g1'")
     mem_db.commit()
     monkeypatch.setattr(en, "extract_structured",
-                        lambda url: {"description": "x" * 500, "_access": "ok"})
+                        lambda url: {"description": "Stack: Python, Kubernetes y AWS. " + "x" * 500, "_access": "ok"})
     monkeypatch.setattr(en, "ia_extract_lote",
                         lambda *a, **k: ([{"idx": 1, "opinion": "x", "resumen": "r",
                                            "fit_reason": "f", "seniority_real": "s",
@@ -464,3 +464,45 @@ def test_lote_techs_ia_vacia_no_toca(mem_db, monkeypatch):
     en.enrich_pending(mem_db, cfg, max_n=1)
     techs = mem_db.execute("SELECT techs FROM ofertas WHERE group_id='g1'").fetchone()[0]
     assert techs == ""   # IA devolvió [] → limpia
+
+
+def test_fetch_ficha_jooble_usa_el_destino(monkeypatch):
+    """Las ofertas de Jooble (/away/) se leen siguiendo el redirect al sitio del empleador."""
+    llamadas = []
+    monkeypatch.setattr(en, "_extract_jooble_destino",
+                        lambda url: llamadas.append(url) or {"_access": "ok", "description": "d" * 500})
+    r = {"group_id": "g", "title": "t", "url": "https://cl.jooble.org/away/123?p=1"}
+    info = en._fetch_ficha(r)
+    assert llamadas == [r["url"]] and info["_access"] == "ok"
+
+
+def test_enrich_pending_no_pide_ficha_de_jooble_con_extracto_de_200_o_mas(mem_db, monkeypatch):
+    """El /away/ de Jooble no pasa el challenge: no se gastan ~25 s de Chromium por oferta
+    cuya descripción ya tiene un extracto de >=200 caracteres; sí se piden las de <200."""
+    cfg = _cfg()
+    _insert(mem_db, "largo", url="https://cl.jooble.org/away/1", desc="x" * 300)
+    _insert(mem_db, "corto", url="https://cl.jooble.org/away/2", desc="x" * 50)
+    mem_db.execute("UPDATE ofertas SET description_source='jooble-serp'")
+    mem_db.commit()
+    pedidas = []
+    monkeypatch.setattr(en, "_fetch_ficha", lambda r: pedidas.append(r["group_id"]) or {"_access": "blocked"})
+    en.enrich_pending(mem_db, cfg, solo_fetch=True)
+    assert pedidas == ["corto"]
+
+
+def test_jooble_cortacircuitos_pausa_tras_challenges_seguidos(mem_db, monkeypatch):
+    """4 challenges seguidos → pausa: _extract_jooble_destino devuelve 'skip' sin lanzar Chromium y
+    _aplicar_ficha no suma fetch_fails."""
+    monkeypatch.setitem(en._JOOBLE_BREAKER, "fallos", 0)
+    monkeypatch.setitem(en._JOOBLE_BREAKER, "hasta", 0.0)
+    for _ in range(en._JOOBLE_FALLOS_MAX):
+        en._jooble_resultado(False, challenge=True)
+    assert en._jooble_en_pausa()
+    info = en._extract_jooble_destino("https://cl.jooble.org/away/9")
+    assert info["_access"] == "skip"
+    _insert(mem_db, "g1", url="https://cl.jooble.org/away/9", desc="x" * 50)
+    r = dict(mem_db.execute("SELECT * FROM ofertas WHERE group_id='g1'").fetchone())
+    assert en._aplicar_ficha(mem_db, r, info, []) == "blocked"
+    assert mem_db.execute("SELECT fetch_fails FROM ofertas WHERE group_id='g1'").fetchone()[0] == 0
+    en._jooble_resultado(True)
+    monkeypatch.setitem(en._JOOBLE_BREAKER, "hasta", 0.0)

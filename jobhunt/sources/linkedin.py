@@ -4,11 +4,14 @@ from datetime import datetime, timedelta, timezone
 
 UA = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120 Safari/537.36"}
 
+from ..domain.texto import MAX_DESC
+from ..fetch.page import _html_a_texto
 from ..logging_setup import get_logger
+from . import errores
 
 log = get_logger(__name__)
 
-def fetch(url, retries=2):
+def fetch(url, retries=2, fuente="linkedin"):
     for i in range(retries):
         try:
             req = urllib.request.Request(url, headers=UA)
@@ -17,6 +20,7 @@ def fetch(url, retries=2):
         except Exception as e:
             if i == retries - 1:
                 log.warning("fetch falló %s: %s", url, e)
+                errores.registrar(fuente)
                 return ""
             time.sleep(3)
     return ""
@@ -82,6 +86,7 @@ def fetch_jobs(queries, found_by_prefix="", on_query=None, max_pages=8,
                 try:
                     if j.get("date") and datetime.fromisoformat(j["date"]).date() <= corte:
                         viejas += 1
+                        continue      # fuera de la ventana: la query pide 30d pero se queda con max_age_days
                 except (ValueError, TypeError):
                     pass
                 out.append(j)
@@ -117,7 +122,11 @@ def fetch_description(url: str) -> dict:
     out: dict = {}
     md = re.search(r'<div class="show-more-less-html__markup[^"]*"[^>]*>(.*?)</div>', html, re.S)
     if md:
-        out["description"] = clean(md.group(1))[:4000]
+        out["description"] = _html_a_texto(md.group(1))[:MAX_DESC]
+
+    mt = re.search(r'posted-time-ago__text[^>]*>\s*([^<]+?)\s*<', html)
+    if mt:
+        out["date_text"] = clean(mt.group(1))   # "2 weeks ago" / "hace 2 semanas"
 
     def _criteria(label: str) -> str:
         mc = re.search(label + r"\s*</h3>\s*<span[^>]*>\s*([^<]+)", html)

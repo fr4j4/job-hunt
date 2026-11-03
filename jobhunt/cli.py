@@ -4,6 +4,9 @@
     python -m jobhunt rescore      # re-evalúa todo el pool con el criterio vigente
     python -m jobhunt enrich       # backfill Anillo A (JSON-LD)
     python -m jobhunt ia           # batch IA nocturno (deepseek-v4-flash)
+    python -m jobhunt encaje [N]   # backfill de encaje con el perfil + rescore
+    python -m jobhunt tabla        # prueba de tabla nativa de Telegram (manda una muestra)
+    python -m jobhunt web          # web privada (acceso con /web en el bot)
     python -m jobhunt report       # stats de mercado del pool completo
 """
 from __future__ import annotations
@@ -19,7 +22,7 @@ from .logging_setup import get_logger
 
 log = get_logger(__name__)
 from . import db as database
-from .scoring import compute_score, compute_market_score
+from .scoring import compute_score, compute_market_score, tiene_senal_perfil
 from .dedup import find_duplicate
 from .notify import send_digest
 import json
@@ -62,7 +65,8 @@ from .app.batch import (BatchRunner, consume_lote, lotes_por_fit, worker_ia,
 
 
 
-def cmd_run(cfg, notify: bool = True, on_phase=None, stop_event: threading.Event | None = None):
+def cmd_run(cfg, notify: bool = True, on_phase=None, stop_event: threading.Event | None = None,
+            on_source=None):
     """on_phase(fuente, query, page) — callback opcional para progreso por fuente/query/página."""
     def phase(fuente: str, query: str = "", page: int = 0, detail: str = ""):
         if on_phase:
@@ -85,77 +89,180 @@ def cmd_run(cfg, notify: bool = True, on_phase=None, stop_event: threading.Event
         lots_done = ia_failures = breaker_trips = channel_posts = 0
 
         from .sources import (linkedin, computrabajo, indeed, glassdoor, laborum,
-                              jooble, accenture, aira)
-        from .relevance import filter_offers
+                              jooble, accenture, aira, getonboard, himalayas, remotive,
+                              weworkremotely, chiletrabajos, trabajando, staffy)
+        from .relevance import filter_offers, title_is_obvious_nontech
+        from .sources import errores
         s = cfg.search
         jobs = []
-        if cfg.sources.get("aira"):
-            phase("aira (feeds JSON employers)")
+        errores.reset()
+        salud: dict[str, dict] = {}   # fuente → {"n": ofertas, "err": fallos, "s": segundos}
+        salud_lock = threading.Lock()
+
+        def _fuente_segura(nombre, fn, contar=len):
+            """F3: una fuente rota no aborta el barrido (spec-audit). Registra cuántas
+            ofertas rindió cada fuente: 0 con queries configuradas = posible bloqueo."""
+            with salud_lock:
+                h = salud.setdefault(nombre, {"n": 0, "err": 0})
             try:
-                raw = aira.jobs(cfg.aira_feeds, "aira:")
-                relevantes, stats = filter_offers(raw, cfg)
-                jobs += relevantes
-                log.info("aira: %d/%d ofertas pasaron el gate %s", len(relevantes), len(raw), stats)
-            except Exception as e:
-                log.warning("aira falló (continúa el barrido): %s", e)
-        if cfg.sources.get("jooble"):
-            phase("jooble")
-            # jooble usa browser headless bajo xvfb (la API REST exige login de usuario)
-            try:
-                jobs += jooble.jobs(s.queries_jooble, "perfil:", on_query=qcb("jooble"))
-            except Exception as e:
-                log.warning("jooble falló (continúa el barrido): %s", e)
-        def _fuente_segura(nombre, fn):
-            """F3: una fuente rota no aborta el barrido (spec-audit)."""
-            try:
-                return fn()
+                res = fn() or []
             except Exception as e:
                 log.warning("fuente %s falló (continúa): %s", nombre, e)
+                with salud_lock:
+                    h["err"] += 1 + errores.tomar(nombre)
                 return []
+            with salud_lock:
+                h["n"] += contar(res)
+                h["err"] += errores.tomar(nombre)   # errores que la fuente capturó por dentro
+            return res
 
+        # rotación REAL del muestreo: ventana que avanza en cada barrido (antes
+        # [:n] repetía siempre las mismas queries y el resto nunca se visitaba)
+        tick = int(time.time() // 3600 // max(1, cfg.daemon.interval_min // 60))
+
+        def _rotar(lst, n):
+            if not lst or n >= len(lst):
+                return list(lst)
+            ini = (tick * n) % len(lst)
+            return (lst + lst)[ini:ini + n]
+
+        mp = s.max_pages
+
+        def _grupo(nombre, llamadas):
+            """Una tarea por SITIO: sus llamadas (perfil, muestreo, premium) van en serie para no
+            subir la tasa de peticiones a ese sitio; los sitios distintos corren en paralelo."""
+            t0 = time.time()
+            phase(nombre)
+            if on_source:
+                on_source(nombre, "run", 0, 0.0)
+            out = []
+            for fn in llamadas:
+                out += fn()
+            segs = time.time() - t0
+            with salud_lock:
+                h = salud.setdefault(nombre, {"n": 0, "err": 0})
+                h["s"] = round(segs, 1)
+                n, err = h["n"], h["err"]
+            log.info("fuente %s: %d ofertas en %.0fs (errores=%d)", nombre, n, segs, err)
+            if on_source:
+                on_source(nombre, "err" if (err and n == 0) else "ok", n, segs)
+            return out
+
+        tareas: dict = {}
+        if cfg.sources.get("aira"):
+            aira_crudas = []
+            def _aira():
+                raw = aira.jobs(cfg.aira_feeds, "aira:")
+                aira_crudas.append(len(raw))
+                relevantes, stats = filter_offers(raw, cfg)
+                log.info("aira: %d/%d ofertas pasaron el gate %s", len(relevantes), len(raw), stats)
+                return relevantes
+            # salud = ofertas que devolvió el feed (no las que pasaron el gate de relevancia:
+            # un feed sano sin cargos tech no es una fuente caída)
+            tareas["aira"] = [lambda: _fuente_segura("aira", _aira, contar=lambda res: sum(aira_crudas))]
+        if cfg.sources.get("jooble"):
+            # jooble usa browser headless bajo xvfb (la API REST exige login de usuario)
+            tareas["jooble"] = [lambda: _fuente_segura("jooble",
+                lambda: jooble.jobs(s.queries_jooble, "perfil:", on_query=qcb("jooble")))]
         if cfg.sources.get("accenture", True):
-            phase("accenture")
-            jobs += _fuente_segura("accenture",
-                lambda: accenture.jobs(s.queries_accenture, "perfil:", on_query=qcb("accenture")))
+            tareas["accenture"] = [lambda: _fuente_segura("accenture",
+                lambda: accenture.jobs(s.queries_accenture, "perfil:", max_pages=mp,
+                                       on_query=qcb("accenture")))]
         if cfg.sources.get("laborum", True):
-            phase("laborum")
-            jobs += _fuente_segura("laborum",
-                lambda: laborum.jobs(s.queries_laborum, "perfil:", on_query=qcb("laborum")))
+            tareas["laborum"] = [lambda: _fuente_segura("laborum",
+                lambda: laborum.jobs(s.queries_laborum, "perfil:", on_query=qcb("laborum")))]
+        # APIs abiertas (sin Cloudflare, livianas): una tarea por sitio, corren en cada barrido
+        if cfg.sources.get("getonboard", True):
+            tareas["getonboard"] = [lambda: _fuente_segura("getonboard",
+                lambda: getonboard.jobs(s.queries_getonboard, "perfil:", on_query=qcb("getonboard")))]
+        if cfg.sources.get("himalayas", True):
+            tareas["himalayas"] = [lambda: _fuente_segura("himalayas",
+                lambda: himalayas.jobs(s.queries_himalayas, "perfil:", on_query=qcb("himalayas")))]
+        if cfg.sources.get("remotive", True):
+            tareas["remotive"] = [lambda: _fuente_segura("remotive",
+                lambda: remotive.jobs(s.queries_remotive, "perfil:", on_query=qcb("remotive")))]
+        if cfg.sources.get("weworkremotely", True):
+            tareas["weworkremotely"] = [lambda: _fuente_segura("weworkremotely",
+                lambda: weworkremotely.jobs(None, "perfil:", on_query=qcb("weworkremotely")))]
+        if cfg.sources.get("chiletrabajos", True):
+            tareas["chiletrabajos"] = [lambda: _fuente_segura("chiletrabajos",
+                lambda: chiletrabajos.jobs(s.queries_chiletrabajos, "perfil:", on_query=qcb("chiletrabajos")))]
+        if cfg.sources.get("trabajando", True):
+            tareas["trabajando"] = [lambda: _fuente_segura("trabajando",
+                lambda: trabajando.jobs(s.queries_trabajando, "perfil:", on_query=qcb("trabajando")))]
+        if cfg.sources.get("staffy", True):
+            tareas["staffy"] = [lambda: _fuente_segura("staffy",
+                lambda: staffy.jobs(None, "perfil:", on_query=qcb("staffy")))]
+        muestreo = cfg.search.mode in ("both", "sample")
+        n_m = max(1, int(len(s.sample_linkedin) * s.sample_rotation))
         if cfg.sources.get("linkedin"):
-            phase("linkedin")
-            jobs += _fuente_segura("linkedin",
-                lambda: linkedin.fetch_jobs(s.queries_linkedin, "perfil:", on_query=qcb("linkedin")))
+            tareas["linkedin"] = [lambda: _fuente_segura("linkedin",
+                lambda: linkedin.fetch_jobs(s.queries_linkedin, "perfil:", on_query=qcb("linkedin"),
+                                            max_pages=s.linkedin_max_pages))]
+            if muestreo:
+                tareas["linkedin"].append(lambda: _fuente_segura("linkedin",
+                    lambda: linkedin.fetch_jobs(_rotar(s.sample_linkedin, n_m), "sample:",
+                                                on_query=qcb("linkedin"), max_pages=s.linkedin_max_pages)))
         if cfg.sources.get("computrabajo"):
-            phase("computrabajo")
-            jobs += _fuente_segura("computrabajo",
-                lambda: computrabajo.jobs(s.queries_computrabajo, "perfil:", on_query=qcb("computrabajo")))
-        if cfg.search.mode in ("both", "sample"):
-            # muestreo amplio: rotación para diversificar sin inflar requests
-            phase("linkedin/computrabajo (muestreo)")
-            n = max(1, int(len(s.sample_linkedin) * s.sample_rotation))
-            jobs += _fuente_segura("linkedin", lambda: linkedin.fetch_jobs(s.sample_linkedin[:n], "sample:"))
-            jobs += _fuente_segura("computrabajo", lambda: computrabajo.jobs(s.sample_computrabajo[:n], "sample:"))
-            if cfg.sources.get("indeed"):
-                phase("indeed")
-                jobs += _fuente_segura("indeed",
-                    lambda: indeed.jobs(s.sample_indeed[:n], "muestra:", on_query=qcb("indeed")))
-            if cfg.sources.get("glassdoor") and _is_premium_tick(cfg):
-                jobs += _fuente_segura("glassdoor",
-                    lambda: glassdoor.jobs(s.sample_glassdoor[:2], "muestra:", on_query=qcb("glassdoor")))
-        if cfg.sources.get("indeed") and _is_premium_tick(cfg):
-            phase("indeed")
-            jobs += _fuente_segura("indeed",
-                lambda: indeed.jobs(s.queries_indeed, "perfil:", on_query=qcb("indeed")))
+            tareas["computrabajo"] = [lambda: _fuente_segura("computrabajo",
+                lambda: computrabajo.jobs(s.queries_computrabajo, "perfil:", max_pages=mp,
+                                          on_query=qcb("computrabajo")))]
+            if muestreo:
+                tareas["computrabajo"].append(lambda: _fuente_segura("computrabajo",
+                    lambda: computrabajo.jobs(_rotar(s.sample_computrabajo, n_m), "sample:",
+                                              max_pages=mp, on_query=qcb("computrabajo"))))
+        if cfg.sources.get("indeed"):
+            tareas["indeed"] = []
+            if muestreo:
+                tareas["indeed"].append(lambda: _fuente_segura("indeed",
+                    lambda: indeed.jobs(_rotar(s.sample_indeed, n_m), "muestra:", max_pages=mp,
+                                        on_query=qcb("indeed"))))
+            if _is_premium_tick(cfg):
+                tareas["indeed"].append(lambda: _fuente_segura("indeed",
+                    lambda: indeed.jobs(s.queries_indeed, "perfil:", max_pages=mp,
+                                        on_query=qcb("indeed"))))
+            if not tareas["indeed"]:
+                del tareas["indeed"]
         if cfg.sources.get("glassdoor") and _is_premium_tick(cfg):
-            phase("glassdoor (perfil)")
-            jobs += _fuente_segura("glassdoor",
-                lambda: glassdoor.jobs(s.queries_glassdoor, "perfil:", on_query=qcb("glassdoor")))
+            tareas["glassdoor"] = []
+            if muestreo:
+                tareas["glassdoor"].append(lambda: _fuente_segura("glassdoor",
+                    lambda: glassdoor.jobs(_rotar(s.sample_glassdoor, 2), "muestra:",
+                                           on_query=qcb("glassdoor"))))
+            tareas["glassdoor"].append(lambda: _fuente_segura("glassdoor",
+                lambda: glassdoor.jobs(s.queries_glassdoor, "perfil:", on_query=qcb("glassdoor"))))
+
+        # fuentes EN PARALELO (un hilo por sitio). Resultados en orden fijo para que el dedup
+        # sea determinista; una tarea que lanza no tumba a las demás.
+        if on_source:
+            for nombre in tareas:
+                on_source(nombre, "pend", 0, 0.0)
+        if tareas:
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(max_workers=len(tareas), thread_name_prefix="fuente") as ex:
+                futs = {nombre: ex.submit(_grupo, nombre, llamadas) for nombre, llamadas in tareas.items()}
+                for nombre, fut in futs.items():
+                    try:
+                        jobs += fut.result()
+                    except Exception as e:
+                        log.warning("fuente %s: tarea falló (continúa): %s", nombre, e)
+                        if on_source:
+                            on_source(nombre, "err", 0, 0.0)
+
+        # salud por fuente: una fuente habilitada que rinde 0 (o falla) casi siempre
+        # es bloqueo/cambio de API, no "no hay ofertas" — se deja en el log y en scan_log
+        for nombre, h in salud.items():
+            if h["n"] == 0:
+                log.warning("fuente %s: 0 ofertas (errores=%d) — posible bloqueo o cambio de API",
+                            nombre, h["err"])
+        log.info("salud de fuentes: %s", ", ".join(f"{k}={v['n']}" for k, v in salud.items()))
 
         log.info("barrido iniciado: %d ofertas crudas (mode=%s)", len(jobs), s.mode)
+        phase("guardando ofertas")
 
         # dedup + index + score al indexar (commit cada 25 filas: el lock de
         # SQLite se retiene <1s por vez — batches IA / comandos no quedan fuera)
-        seen_urls, new_jobs, total_seen = set(), [], 0
+        seen_urls, new_jobs, total_seen, descartadas = set(), [], 0, 0
         now = _now()
         for n, j in enumerate(jobs, 1):
             from .db import url_key
@@ -164,29 +271,43 @@ def cmd_run(cfg, notify: bool = True, on_phase=None, stop_event: threading.Event
                 continue
             if uk:
                 seen_urls.add(uk)
+            # gate de entrada para TODAS las fuentes (antes solo AIRA): cargos
+            # obviamente no-tech ni se indexan ni gastan IA local
+            if cfg.relevance.mode != "off" and title_is_obvious_nontech(j.get("title") or "", cfg):
+                descartadas += 1
+                continue
             j["uid"] = ""
             gid, is_new = database.upsert(conn, j, now)
             j["uid"] = gid
-            score, _ = compute_score(j, cfg)
+            score, bd = compute_score(j, cfg)
             conn.execute("UPDATE ofertas SET score=?, score_version=? WHERE group_id=?",
                          (score, version_id, gid))
             total_seen += 1
             if is_new:
-                new_jobs.append({**j, "score": score, "group_id": gid})
+                new_jobs.append({**j, "score": score, "group_id": gid,
+                                 "_senal": tiene_senal_perfil(bd)})
             if n % 25 == 0:
                 conn.commit()
+        if descartadas:
+            log.info("gate de entrada: %d ofertas no-tech descartadas por título", descartadas)
         conn.execute("""INSERT INTO scan_log (ts, total_seen, new_count,
-            lots_done, ia_failures, breaker_trips, channel_posts)
-            VALUES (?,?,?,?,?,?,?)""",
+            lots_done, ia_failures, breaker_trips, channel_posts, sources_summary)
+            VALUES (?,?,?,?,?,?,?,?)""",
                      (now, total_seen, len(new_jobs), lots_done, ia_failures,
-                      breaker_trips, channel_posts))
+                      breaker_trips, channel_posts, json.dumps(salud, ensure_ascii=False)))
         conn.commit()
         row_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
 
         # PIPELINE POR LOTES con IA paralela (spec v4.1 §2):
         # lotes de IA_BATCH_SIZE, dentro de cada lote IA_CONCURRENCY workers HTTP
         # (sin SQLite — conexión única en este hilo), publish incremental por lote.
-        new_sorted = sorted(new_jobs, key=lambda j: -j.get("score", 0))  # mejores primero (aprox)
+        # score 0 = descartada por red keyword/ubicación del perfil → no gasta IA;
+        # sin señal de perfil en el título → IA diferida al batch nocturno (C9)
+        diferidas = sum(1 for j in new_jobs if j.get("score", 0) > 0 and not j.get("_senal", True))
+        if diferidas:
+            log.info("IA diferida al batch nocturno: %d ofertas sin señal de perfil en el título", diferidas)
+        new_sorted = sorted((j for j in new_jobs if j.get("score", 0) > 0 and j.get("_senal", True)),
+                            key=lambda j: -j.get("score", 0))  # mejores primero (aprox)
         total_new = len(new_sorted)
         presupuesto_canal = cfg.channel.max_posts_per_sweep if (
             cfg.channel.enabled and cfg.channel.chat_id) else 0
@@ -211,6 +332,12 @@ def cmd_run(cfg, notify: bool = True, on_phase=None, stop_event: threading.Event
             phase("rescore pool")
             database.rescore_all(conn, compute_score, version_id, cfg,
                                   market_score_fn=compute_market_score)
+            # el rescore global (enrich + market score del pool) puede dejar ofertas elegibles
+            # que ningún lote publicó: salen ahora, no en el siguiente barrido
+            if presupuesto_canal > 0:
+                from .channel import publicar_pendientes
+                phase("canal: publicando pendientes")
+                channel_posts += publicar_pendientes(cfg, conn, api, budget=presupuesto_canal)
         else:
             # sin IA: fit score al vuelo ya escrito; market/rescore global para el gate
             phase("rescore pool")
@@ -228,6 +355,27 @@ def cmd_run(cfg, notify: bool = True, on_phase=None, stop_event: threading.Event
                     log.info("canal: %s", ch_stats)
                 except Exception as e:
                     log.warning("canal falló (barrido continúa): %s", e)
+
+        try:
+            n_exp = database.expirar_sin_texto(conn)
+            if n_exp:
+                log.info("pool: %d ofertas sin texto ni ficha recuperable desactivadas (>7 días sin verse)", n_exp)
+        except Exception as e:
+            log.warning("expirar_sin_texto falló (barrido continúa): %s", e)
+
+        # analítica (web v2): derivadas + historia. Nunca tumba el barrido.
+        if cfg.analytics.enabled:
+            try:
+                from .analytics.materializar import materializar
+                materializar(conn, cfg, scan_id=row_id)
+                from .analytics.avisos import avisar_cierres
+                avisar_cierres(conn, cfg, _tg_api_for_channel(cfg))
+            except Exception as e:
+                log.warning("analytics falló (barrido continúa): %s", e)
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
 
         # digest: solo >= ALERT_MIN_SCORE
         threshold = cfg.alerts.min_score
@@ -251,6 +399,9 @@ def cmd_run(cfg, notify: bool = True, on_phase=None, stop_event: threading.Event
             conn.commit()
         except Exception as e:
             log.warning("scan_log UPDATE falló (no tumba barrido): %s", e)
+        if notify:
+            from .salud import alertar_admin
+            alertar_admin(conn, cfg, _tg_api_for_channel(cfg))
     except Exception:
         try:
             conn.rollback()      # no dejar transacción abierta → DB locked para otros
@@ -275,6 +426,40 @@ def cmd_rescore(cfg) -> None:
                               market_score_fn=compute_market_score)
     print(f"rescore completado: {updated} ofertas → versión {version_id} "
           f"({database.needs_rescore(conn, version_id)} pendientes)")
+
+
+def cmd_encaje(cfg, max_n: int | None = None) -> None:
+    """Backfill del veredicto de encaje en ofertas ya procesadas + rescore con el criterio vigente."""
+    conn = database.connect(cfg)
+    database.init_db(conn)
+    from .enrich import backfill_encaje
+    hechas, fallidas = backfill_encaje(
+        conn, cfg, max_n,
+        on_progress=lambda i, n: print(f"\rencaje {i}/{n}", end="", flush=True))
+    print(f"\nencaje: {hechas} asignados, {fallidas} fallidos")
+    cmd_rescore(cfg)
+
+
+def cmd_tabla(cfg) -> None:
+    """Prueba de la tabla nativa: manda una tabla de muestra a TELEGRAM_CHAT_ID con cada
+    variante de formato e imprime la respuesta de Telegram. No toca la DB."""
+    from .telegram.rich import probar_variantes
+    chat = cfg.telegram.chat_id
+    if not (cfg.telegram.bot_token and chat):
+        print("Falta TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID en el .env")
+        return
+    muestra = [
+        {"score": 88, "title": "Senior Backend Developer Python/AWS", "company": "Acme Chile",
+         "modality": "remoto", "salary": "CLP 3200000", "date_posted": _now()},
+        {"score": 71, "title": "Ingeniero Full Stack (React / Node)", "company": "Banco Austral",
+         "modality": "híbrido", "salary": "", "date_posted": _now()},
+        {"score": 58, "title": "Analista Programador", "company": "", "modality": "",
+         "salary": "", "date_posted": ""},
+    ]
+    call = _tg_api_for_channel(cfg)
+    for nombre, ok, detalle in probar_variantes(call, int(chat), muestra):
+        print(f"{'OK  ' if ok else 'FAIL'} {nombre}: {detalle}")
+    print("Revisa tu Telegram: cada variante OK debió llegar como una tabla.")
 
 
 def cmd_enrich(cfg) -> None:
@@ -343,6 +528,23 @@ def main():
         cmd_rescore(cfg)
     elif cmd == "enrich":
         cmd_enrich(cfg)
+    elif cmd == "materialize":
+        # python -m jobhunt materialize [--full] — recalcula derivadas, historia y agregados
+        from .analytics.materializar import materializar
+        conn = database.connect(cfg)
+        try:
+            database.init_db(conn)
+            print(materializar(conn, cfg, full="--full" in sys.argv))
+        finally:
+            conn.close()
+    elif cmd == "web":
+        from .web.app import servir
+        servir(cfg)             # python -m jobhunt web — acceso con /web en el bot
+    elif cmd == "tabla":
+        cmd_tabla(cfg)          # python -m jobhunt tabla — prueba de tabla nativa
+    elif cmd == "encaje":
+        # python -m jobhunt encaje [N]  — backfill de encaje con el perfil + rescore
+        cmd_encaje(cfg, int(sys.argv[2]) if len(sys.argv) > 2 and sys.argv[2].isdigit() else None)
     elif cmd == "market":
         cmd_market(cfg)
     elif cmd == "channel":
