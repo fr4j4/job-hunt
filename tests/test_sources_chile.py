@@ -76,7 +76,7 @@ def test_trabajando_listado_y_ficha(monkeypatch):
     r = trabajando.jobs(["fullstack"], "perfil:")
     a, b = r
     assert a["url"] == "https://www.trabajando.cl/trabajo/7-dev-fullstack-ssr" and a["date"] == "2026-10-19"  # slug de la ficha
-    assert b["url"] == "https://www.trabajando.cl/trabajo/8-operador"                  # sin ficha: id + título
+    assert b["url"] == "https://www.trabajando.cl/trabajo/8-operador"                  # ficha caída: id + título
     assert a["modality"] == "remoto" and a["salary"] == "CLP 2500000"
     assert a["location"] == "Providencia, Metropolitana de Santiago"
     assert a["description_source"] == "trabajando-api" and "Python y Angular" in a["_desc"]
@@ -124,17 +124,37 @@ def test_trabajando_url_oferta_e_id():
     assert trabajando.id_de_url("https://www.chiletrabajos.cl/trabajo/dev-111") == ""
 
 
-def test_reparar_urls_trabajando_antiguas():
+def test_reparar_urls_trabajando_antiguas(monkeypatch):
     import sqlite3
     from jobhunt import db
     conn = sqlite3.connect(":memory:")
     db.init_db(conn)
     for gid, t, url in [("a|e", "Analista Senior Fullstack", "https://www.trabajando.cl/trabajo-empleo/6143588"),
+                        ("c|e", "Cerrada", "https://www.trabajando.cl/trabajo-empleo/42"),
                         ("b|e", "Otra", "https://www.chiletrabajos.cl/trabajo/x-1")]:
         conn.execute("INSERT INTO ofertas (group_id, title, url, first_seen, last_seen) VALUES (?,?,?,?,?)",
                      (gid, t, url, "2026-11-01", "2026-11-01"))
-    assert db.reparar_urls_trabajando(conn) == 1
+    monkeypatch.setattr(_comun, "get", lambda fuente, url, params=None, retries=2, as_text=False: (
+        {"idOferta": 6143588, "slug": "6143588-analista-senior-fullstack"} if url.endswith("/6143588") else {}))
+    assert trabajando.reparar_urls(conn, pausa=0) == {"total": 2, "slug_sitio": 1, "id_titulo": 1}
     urls = dict(conn.execute("SELECT group_id, url FROM ofertas"))
-    assert urls["a|e"] == "https://www.trabajando.cl/trabajo/6143588-analista-senior-fullstack"
+    assert urls["a|e"] == "https://www.trabajando.cl/trabajo/6143588-analista-senior-fullstack"   # slug del sitio
+    assert urls["c|e"] == "https://www.trabajando.cl/trabajo/42-cerrada"                          # sin ficha
     assert urls["b|e"] == "https://www.chiletrabajos.cl/trabajo/x-1"
-    assert db.reparar_urls_trabajando(conn) == 0                                      # idempotente
+    assert trabajando.reparar_urls(conn, pausa=0)["total"] == 0                                   # idempotente
+
+
+def test_upsert_corrige_enlace_trabajando_antiguo():
+    import sqlite3
+    from jobhunt import db
+    conn = sqlite3.connect(":memory:")
+    db.init_db(conn)
+    j = {"title": "Analista Senior Fullstack", "company": "Entel", "source": "trabajando:fullstack",
+         "url": "https://www.trabajando.cl/trabajo-empleo/6143588"}
+    db.upsert(conn, dict(j), "2026-11-01T10:00:00Z")
+    db.upsert(conn, {**j, "url": "https://www.trabajando.cl/trabajo/6143588-analista-senior-fullstack"},
+              "2026-11-03T10:00:00Z")
+    assert conn.execute("SELECT url FROM ofertas").fetchone()[0] == \
+        "https://www.trabajando.cl/trabajo/6143588-analista-senior-fullstack"
+    db.upsert(conn, {**j, "url": "https://www.trabajando.cl/trabajo/6143588-otro"}, "2026-11-04T10:00:00Z")
+    assert conn.execute("SELECT url FROM ofertas").fetchone()[0].endswith("-analista-senior-fullstack")  # no pisa uno bueno

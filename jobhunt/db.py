@@ -204,25 +204,7 @@ def init_db(conn: sqlite3.Connection) -> None:
             conn.execute(f"ALTER TABLE scan_log ADD COLUMN {col} INTEGER DEFAULT 0")
     from .analytics.esquema import asegurar_esquema as _esquema_analitico
     _esquema_analitico(conn)
-    reparar_urls_trabajando(conn)
     conn.commit()
-
-
-def reparar_urls_trabajando(conn: sqlite3.Connection) -> int:
-    """Reescribe los enlaces antiguos de Trabajando.com (/trabajo-empleo/<id>, página vacía sin la
-    oferta) al enlace real /trabajo/<id>-<slug>. El upsert no toca `url` de ofertas ya indexadas,
-    así que sin esto quedaban rotas para siempre. Idempotente: solo filas con el formato antiguo."""
-    from .sources.trabajando import id_de_url, url_oferta
-    filas = conn.execute("SELECT group_id, title, url FROM ofertas WHERE url LIKE '%trabajando.cl/trabajo-empleo/%'").fetchall()
-    n = 0
-    for gid, titulo, url in filas:
-        oid = id_de_url(url)
-        if oid:
-            conn.execute("UPDATE ofertas SET url=? WHERE group_id=?", (url_oferta(oid, titulo), gid))
-            n += 1
-    if n:
-        log.info("trabajando: %d enlaces /trabajo-empleo/ reescritos a /trabajo/<id>-<slug>", n)
-    return n
 
 
 def register_criteria_version(conn: sqlite3.Connection, version_id: str, cfg: Config) -> None:
@@ -376,6 +358,7 @@ def upsert(conn: sqlite3.Connection, job: dict, now_iso: str) -> tuple[str, bool
                      CASE WHEN sources='' THEN ? ELSE sources || ',' || ? END END,
             found_by=CASE WHEN instr(found_by, ?) THEN found_by ELSE
                    CASE WHEN found_by='' THEN ? ELSE found_by || ',' || ? END END,
+            url=CASE WHEN url LIKE '%trabajando.cl/trabajo-empleo/%' AND ? != '' THEN ? ELSE url END,
             company=CASE WHEN company='' OR company IS NULL THEN ? ELSE company END,
             location=CASE WHEN location='' OR location IS NULL THEN ? ELSE location END,
             salary=CASE WHEN salary='' OR salary IS NULL THEN ? ELSE salary END,
@@ -392,6 +375,7 @@ def upsert(conn: sqlite3.Connection, job: dict, now_iso: str) -> tuple[str, bool
             WHERE group_id=?""",
             (now_iso, src0, src0, src0,
              fb, fb, fb,
+             job.get("url", ""), job.get("url", ""),
              job.get("company", ""), job.get("location", ""), job.get("salary", ""),
              job.get("modality", ""),
              (job.get("_desc") or job.get("description") or "")[:MAX_DESC],
