@@ -8,6 +8,7 @@
     python -m jobhunt tabla        # prueba de tabla nativa de Telegram (manda una muestra)
     python -m jobhunt web          # web privada (acceso con /web en el bot)
     python -m jobhunt report       # stats de mercado del pool completo
+    python -m jobhunt reparar-trabajando  # enlaces /trabajo-empleo/ ya indexados → enlace real del sitio
 """
 from __future__ import annotations
 
@@ -575,6 +576,14 @@ def main():
         run_daemon(cfg)
     elif cmd == "report":
         cmd_report(cfg)
+    elif cmd == "reparar-trabajando":
+        from .sources.trabajando import reparar_urls
+        conn = database.connect(cfg)
+        try:
+            database.init_db(conn)
+            print(f"trabajando: {reparar_urls(conn)}")
+        finally:
+            conn.close()
     else:
         print(__doc__)
 

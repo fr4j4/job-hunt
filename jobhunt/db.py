@@ -358,6 +358,7 @@ def upsert(conn: sqlite3.Connection, job: dict, now_iso: str) -> tuple[str, bool
                      CASE WHEN sources='' THEN ? ELSE sources || ',' || ? END END,
             found_by=CASE WHEN instr(found_by, ?) THEN found_by ELSE
                    CASE WHEN found_by='' THEN ? ELSE found_by || ',' || ? END END,
+            url=CASE WHEN url LIKE '%trabajando.cl/trabajo-empleo/%' AND ? != '' THEN ? ELSE url END,
             company=CASE WHEN company='' OR company IS NULL THEN ? ELSE company END,
             location=CASE WHEN location='' OR location IS NULL THEN ? ELSE location END,
             salary=CASE WHEN salary='' OR salary IS NULL THEN ? ELSE salary END,
@@ -374,6 +375,7 @@ def upsert(conn: sqlite3.Connection, job: dict, now_iso: str) -> tuple[str, bool
             WHERE group_id=?""",
             (now_iso, src0, src0, src0,
              fb, fb, fb,
+             job.get("url", ""), job.get("url", ""),
              job.get("company", ""), job.get("location", ""), job.get("salary", ""),
              job.get("modality", ""),
              (job.get("_desc") or job.get("description") or "")[:MAX_DESC],

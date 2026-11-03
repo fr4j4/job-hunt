@@ -471,7 +471,7 @@ def _fetch_ficha(r: dict) -> dict:
         if "wearestaffy.com/positions/" in url:
             from .sources.staffy import fetch_ficha
             return fetch_ficha(url)
-        if "trabajando.cl/trabajo-empleo/" in url:
+        if "trabajando.cl/trabajo/" in url or "trabajando.cl/trabajo-empleo/" in url:   # el 2.º es el enlace antiguo roto
             from .sources.trabajando import fetch_ficha
             return fetch_ficha(url)
         if "linkedin.com/jobs/view/" in url:
