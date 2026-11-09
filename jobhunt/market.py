@@ -362,6 +362,7 @@ def _ia_call(cfg: Config, prompt: str, temperature: float = 0.3) -> dict | None:
     Si el cloud falla (modelo retirado, sin key, red) y hay IA local habilitada,
     cae al modelo local: el fallback es la IA local."""
     import requests
+    from .ia.client import ajustar_temperature, parse_json_content
     system = ("Eres un analista de mercado laboral tech chileno. Escribes para "
               "personas que buscan empleo: tono directo, segunda persona, sin jerga "
               "estadística, números incrustados en el texto. Respondes SOLO JSON válido.")
@@ -370,13 +371,14 @@ def _ia_call(cfg: Config, prompt: str, temperature: float = 0.3) -> dict | None:
         try:
             req = requests.post(
                 f"{cfg.ia.base_url}/chat/completions",
-                json={"model": cfg.ia.model, "messages": messages,
-                      "temperature": temperature, "format": "json"},
+                json=ajustar_temperature(
+                    {"model": cfg.ia.model, "messages": messages,
+                     "temperature": temperature, "format": "json"}, cfg.ia.base_url),
                 timeout=cfg.ia.timeout,
                 headers={"Authorization": f"Bearer {cfg.ia.api_key}", "Content-Type": "application/json"})
             if req.status_code >= 400:
                 raise RuntimeError(f"HTTP {req.status_code}: {req.text[:120]}")
-            return json.loads(req.json()["choices"][0]["message"]["content"])
+            return parse_json_content(req.json()["choices"][0]["message"]["content"])
         except Exception as e:
             log.warning("IA narrativa (cloud) falló: %s", e)
     if cfg.ia.local_enabled:
