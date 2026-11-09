@@ -7,6 +7,7 @@ err_kind: '' ok · 'rate' 429/5xx · 'timeout' · 'other'.
 from __future__ import annotations
 
 import json
+import re
 import time
 
 import requests
@@ -15,6 +16,48 @@ from ..config import Config
 from ..logging_setup import get_logger
 
 log = get_logger(__name__)
+
+_VALLA = re.compile(r"^\s*```[\w-]*[ \t]*\n?(.*?)\n?[ \t]*```\s*$", re.S)
+
+
+def es_anthropic(base_url: str) -> bool:
+    return "anthropic.com" in (base_url or "")
+
+
+def ajustar_temperature(body: dict, base_url: str) -> dict:
+    """Los modelos nuevos de Claude responden HTTP 400 si el body trae `temperature`
+    (\"temperature is deprecated for this model\"): se quita solo para api.anthropic.com;
+    el resto de proveedores conserva el valor que pidió el llamador."""
+    if es_anthropic(base_url):
+        body.pop("temperature", None)
+    return body
+
+
+def parse_json_content(text):
+    """json.loads tolerante al formato de Claude. Si `text` ya es JSON válido devuelve
+    exactamente lo mismo que json.loads (los proveedores que ya funcionaban no cambian).
+    Solo si falla intenta: (1) quitar una valla ```json … ``` y (2) tomar el primer
+    objeto/arreglo JSON del texto (prosa antes o después). Si nada sirve, relanza el
+    error original, así 'vacío' o 'basura' siguen fallando como antes."""
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as primero:
+        m = _VALLA.match(text)
+        candidato = m.group(1) if m else text
+        try:
+            return json.loads(candidato)
+        except json.JSONDecodeError:
+            pass
+        dec = json.JSONDecoder()
+        for i, ch in enumerate(candidato):
+            if ch in "{[":
+                try:
+                    obj, _ = dec.raw_decode(candidato, i)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(obj, (dict, list)):
+                    return obj
+        raise primero
 
 
 class IAClient:
@@ -33,16 +76,13 @@ class IAClient:
                   model: str | None = None,
                   extra: dict | None = None) -> tuple[dict | list | None, str]:
         """POST /chat/completions y json.loads del content. Nunca lanza."""
-        body: dict = {"model": model or self.model, "messages": messages}
-        # Anthropic rechaza `temperature` en los modelos nuevos (HTTP 400
-        # "temperature is deprecated for this model"); el resto sigue en 0.
-        if "anthropic.com" not in self.base_url:
-            body["temperature"] = 0
+        body: dict = {"model": model or self.model, "messages": messages, "temperature": 0}
         if response_format:
             body["response_format"] = response_format
         body.update(self._extra_body())
         if extra:
             body.update(extra)
+        ajustar_temperature(body, self.base_url)   # incluye el `temperature` que pase `extra`
         for attempt in range(self.retries + 1):
             try:
                 req = requests.post(f"{self.base_url}/chat/completions",
@@ -55,7 +95,7 @@ class IAClient:
                     time.sleep(2)
                     continue
                 d = req.json()
-                return json.loads(d["choices"][0]["message"]["content"]), ""
+                return parse_json_content(d["choices"][0]["message"]["content"]), ""
             except Exception as e:
                 # orden = el de los 3 call sites originales: local corta en refused;
                 # cloud clasifica ConnectTimeout (subclase de ambas) como timeout.
