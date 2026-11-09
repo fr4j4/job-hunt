@@ -15,6 +15,7 @@ import re
 import time
 
 from .config import load_config
+from .ia.client import ajustar_temperature, parse_json_content
 from .logging_setup import get_logger
 
 log = get_logger("jobhunt.backfill_idiomas")
@@ -142,16 +143,16 @@ def _batch_ia(cfg, items: list[dict]) -> dict[int, list[dict]]:
     try:
         req = requests.post(
             f"{cfg.ia.base_url}/chat/completions",
-            json={"model": cfg.ia.model,
+            json=ajustar_temperature({"model": cfg.ia.model,
                   "messages": [
                       {"role": "system",
                        "content": "Eres un extractor de requisitos de idiomas de ofertas de empleo chilenas. "
                                   "Respondes SOLO JSON válido. No inventes idiomas."},
                       {"role": "user", "content": prompt}],
-                  "temperature": 0.0, "format": "json"},
+                  "temperature": 0.0, "format": "json"}, cfg.ia.base_url),
             timeout=cfg.ia.timeout,
             headers={"Authorization": f"Bearer {cfg.ia.api_key}", "Content-Type": "application/json"})
-        out = json.loads(req.json()["choices"][0]["message"]["content"])
+        out = parse_json_content(req.json()["choices"][0]["message"]["content"])
         res = {}
         for ritem in (out or {}).get("resultados") or []:
             try:

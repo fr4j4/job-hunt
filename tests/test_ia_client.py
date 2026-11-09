@@ -150,3 +150,81 @@ def test_temperature_se_omite_para_anthropic(monkeypatch):
 
 def test_temperature_cero_para_otros_proveedores(monkeypatch):
     assert _body_enviado(monkeypatch, "https://ollama.com/v1")["temperature"] == 0
+
+
+# ---- formato de Claude: JSON dentro de vallas ``` ----
+import pytest
+
+from jobhunt.ia.client import ajustar_temperature, parse_json_content
+
+
+@pytest.mark.parametrize("texto,esperado", [
+    ('{"a": 1}', {"a": 1}),                                   # ya válido: igual que json.loads
+    ('[1, 2]', [1, 2]),
+    ('```json\n{"a": 1}\n```', {"a": 1}),
+    ('```\n{"a": 1}\n```', {"a": 1}),
+    ('```JSON\n{"a": [1, {"b": "x```y"}]}\n```', {"a": [1, {"b": "x```y"}]}),
+    ('  ```json\n{"a": 1}\n```  \n', {"a": 1}),
+    ('Aquí va:\n```json\n{"a": 1}\n```\nSaludos', {"a": 1}),  # prosa alrededor
+    ('Claro. {"a": {"b": 2}} listo.', {"a": {"b": 2}}),
+])
+def test_parse_json_content_acepta(texto, esperado):
+    assert parse_json_content(texto) == esperado
+
+
+@pytest.mark.parametrize("texto", ["", "   ", "no hay json", "```json\n```", "```json\n{roto\n```"])
+def test_parse_json_content_sigue_fallando_igual(texto):
+    with pytest.raises(json.JSONDecodeError):
+        parse_json_content(texto)
+
+
+def test_parse_json_content_none_lanza_typeerror_como_json_loads():
+    with pytest.raises(TypeError):
+        parse_json_content(None)
+
+
+def test_chat_json_con_vallas_devuelve_dict(monkeypatch):
+    payload = {"choices": [{"message": {"content": '```json\n{"opinion": "ok"}\n```'}}]}
+    monkeypatch.setattr(requests, "post", lambda *a, **k: _Resp(200, payload))
+    d, err = CloudClient(_cfg()).chat_json([{"role": "user", "content": "x"}])
+    assert (d, err) == ({"opinion": "ok"}, "")
+
+
+def test_chat_json_basura_sigue_siendo_other(monkeypatch):
+    payload = {"choices": [{"message": {"content": "lo siento, no puedo"}}]}
+    monkeypatch.setattr(requests, "post", lambda *a, **k: _Resp(200, payload))
+    cfg = _cfg(); cfg.ia.retries = 0
+    assert CloudClient(cfg).chat_json([{"role": "user", "content": "x"}]) == (None, "other")
+
+
+def test_temperature_de_extra_tambien_se_quita_en_anthropic(monkeypatch):
+    cfg = _cfg(); cfg.ia.base_url = "https://api.anthropic.com/v1"
+    seen = {}
+    payload = {"choices": [{"message": {"content": "{}"}}]}
+    monkeypatch.setattr(requests, "post", lambda url, json=None, **k: seen.update(json) or _Resp(200, payload))
+    CloudClient(cfg).chat_json([{"role": "user", "content": "x"}], extra={"temperature": 0.3})
+    assert "temperature" not in seen
+
+
+def test_temperature_de_extra_se_respeta_fuera_de_anthropic(monkeypatch):
+    cfg = _cfg(); cfg.ia.base_url = "https://ollama.com/v1"
+    seen = {}
+    payload = {"choices": [{"message": {"content": "{}"}}]}
+    monkeypatch.setattr(requests, "post", lambda url, json=None, **k: seen.update(json) or _Resp(200, payload))
+    CloudClient(cfg).chat_json([{"role": "user", "content": "x"}], extra={"temperature": 0.3})
+    assert seen["temperature"] == 0.3
+
+
+def test_ajustar_temperature_helper():
+    assert ajustar_temperature({"temperature": 0}, "https://api.anthropic.com/v1") == {}
+    assert ajustar_temperature({"temperature": 0}, "https://x.ai/v1") == {"temperature": 0}
+
+
+def test_market_ia_call_cloud_anthropic_sin_temperature_y_con_vallas(monkeypatch):
+    from jobhunt import market
+    cfg = _cfg(); cfg.ia.base_url = "https://api.anthropic.com/v1"; cfg.ia.local_enabled = False
+    seen = {}
+    payload = {"choices": [{"message": {"content": '```json\n{"bullets": ["a"]}\n```'}}]}
+    monkeypatch.setattr(requests, "post", lambda url, json=None, **k: seen.update(json) or _Resp(200, payload))
+    assert market._ia_call(cfg, "hola", temperature=0.3) == {"bullets": ["a"]}
+    assert "temperature" not in seen
