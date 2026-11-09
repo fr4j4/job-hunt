@@ -127,3 +127,26 @@ def test_enrich_viejo_sigue_reexportando():
     assert "NUNCA agregues otras" in en._PROMPT_EXTRACT_LOCAL
     assert "ANTI-ALUCINACIÓN" in en._PROMPT_OPINION_LOCAL
     assert "--- OFERTA 1 ---" in en._lote_prompt([{"title": "A"}], "p", "m")
+
+
+def _body_enviado(monkeypatch, base_url):
+    cfg = _cfg()
+    cfg.ia.base_url = base_url
+    seen = {}
+    payload = {"choices": [{"message": {"content": "{}"}}]}
+
+    def post(url, json=None, **k):
+        seen.update(json)
+        return _Resp(200, payload)
+
+    monkeypatch.setattr(requests, "post", post)
+    CloudClient(cfg).chat_json([{"role": "user", "content": "x"}])
+    return seen
+
+
+def test_temperature_se_omite_para_anthropic(monkeypatch):
+    assert "temperature" not in _body_enviado(monkeypatch, "https://api.anthropic.com/v1")
+
+
+def test_temperature_cero_para_otros_proveedores(monkeypatch):
+    assert _body_enviado(monkeypatch, "https://ollama.com/v1")["temperature"] == 0

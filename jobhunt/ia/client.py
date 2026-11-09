@@ -33,7 +33,11 @@ class IAClient:
                   model: str | None = None,
                   extra: dict | None = None) -> tuple[dict | list | None, str]:
         """POST /chat/completions y json.loads del content. Nunca lanza."""
-        body: dict = {"model": model or self.model, "messages": messages, "temperature": 0}
+        body: dict = {"model": model or self.model, "messages": messages}
+        # Anthropic rechaza `temperature` en los modelos nuevos (HTTP 400
+        # "temperature is deprecated for this model"); el resto sigue en 0.
+        if "anthropic.com" not in self.base_url:
+            body["temperature"] = 0
         if response_format:
             body["response_format"] = response_format
         body.update(self._extra_body())
